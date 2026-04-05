@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+CLI_DIR="${ROOT_DIR}/cli/src"
+
+echo "Running pre-commit checks..."
+
+# Go vet
+echo "  go vet..."
+cd "${CLI_DIR}" && go vet ./...
+
+# Format check
+echo "  gofmt check..."
+UNFORMATTED=$(cd "${CLI_DIR}" && gofmt -l . 2>&1)
+if [ -n "$UNFORMATTED" ]; then
+    echo "these files need formatting (run 'make fmt'):"
+    echo "$UNFORMATTED"
+    exit 1
+fi
+
+# golangci-lint (if available)
+if command -v golangci-lint >/dev/null 2>&1; then
+    echo "  golangci-lint..."
+    cd "${CLI_DIR}" && golangci-lint run ./...
+else
+    echo "  skipping golangci-lint (not installed)"
+fi
+
+# Auto-regenerate changelog
+if command -v git-cliff >/dev/null 2>&1; then
+    echo "  regenerating changelog..."
+    cd "${ROOT_DIR}" && git-cliff -o CHANGELOG.md
+    git add CHANGELOG.md
+fi
+
+echo "All pre-commit checks passed"

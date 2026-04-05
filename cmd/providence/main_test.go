@@ -1,0 +1,43 @@
+package main
+
+import (
+	"bytes"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestRootCommandExists(t *testing.T) {
+	root := newRootCommand()
+	require.NotNil(t, root)
+	assert.Equal(t, "providence", root.Use)
+}
+
+func TestRootCommandShortDescription(t *testing.T) {
+	root := newRootCommand()
+	assert.NotEmpty(t, root.Short)
+	assert.Contains(t, root.Long, "providence")
+}
+
+func TestRootCommandHasNoSubcommands(t *testing.T) {
+	root := newRootCommand()
+	assert.Empty(t, root.Commands(), "root command should have no subcommands")
+}
+
+func TestRootCommandRunsWithoutError(t *testing.T) {
+	root := newRootCommand()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+
+	// Override runBubbleTUI so it doesn't launch a real program.
+	original := runBubbleTUI
+	defer func() { runBubbleTUI = original }()
+	runBubbleTUI = func(_ tea.Model) error { return nil }
+
+	// When stdout is not a TTY (in tests), runTUI prints the banner and returns.
+	err := root.Execute()
+	assert.NoError(t, err)
+}

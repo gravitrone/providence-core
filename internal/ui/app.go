@@ -6,7 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/gravitrone/providence/internal/ui/components"
+	"github.com/gravitrone/providence-core/internal/ui/components"
 )
 
 // App is the root TUI model. Providence is purely the agent chat - no tabs.

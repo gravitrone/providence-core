@@ -18,9 +18,9 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/charmbracelet/harmonica"
-	"github.com/gravitrone/providence/internal/engine"
-	"github.com/gravitrone/providence/internal/engine/claude"
-	"github.com/gravitrone/providence/internal/ui/components"
+	"github.com/gravitrone/providence-core/internal/engine"
+	"github.com/gravitrone/providence-core/internal/engine/claude"
+	"github.com/gravitrone/providence-core/internal/ui/components"
 )
 
 // completionSpring is a critically-damped spring for the completion cool-down animation.

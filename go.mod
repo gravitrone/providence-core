@@ -1,4 +1,4 @@
-module github.com/gravitrone/providence
+module github.com/gravitrone/providence-core
 
 go 1.25.8
 

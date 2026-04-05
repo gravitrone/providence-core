@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gravitrone/providence/internal/engine"
+	"github.com/gravitrone/providence-core/internal/engine"
 )
 
 // Session manages a single headless Claude Code subprocess.

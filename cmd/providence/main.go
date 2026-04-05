@@ -7,7 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/gravitrone/providence/internal/ui"
+	"github.com/gravitrone/providence-core/internal/ui"
 )
 
 // Main runs the CLI entrypoint.

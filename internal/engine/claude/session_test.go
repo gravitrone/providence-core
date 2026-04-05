@@ -3,7 +3,7 @@ package claude
 import (
 	"testing"
 
-	"github.com/gravitrone/providence/internal/engine"
+	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/stretchr/testify/assert"
 )
 

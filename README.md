@@ -13,7 +13,7 @@ Providence Core is an **autonomous AI harness** that wraps Claude Code (and soon
 Requires [Go 1.25+](https://go.dev/dl/).
 
 ```bash
-go install github.com/gravitrone/providence@latest
+go install github.com/gravitrone/providence-core/cmd/providence@latest
 ```
 
 Or from source:

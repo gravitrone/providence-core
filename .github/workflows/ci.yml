@@ -13,10 +13,6 @@ jobs:
       matrix:
         go-version: ["1.23", "1.24"]
 
-    defaults:
-      run:
-        working-directory: cli/src
-
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +25,7 @@ jobs:
         run: go vet ./...
 
       - name: Build
-        run: go build -o ../../providence ./cmd/providence/
+        run: go build -o providence ./cmd/providence/
 
       - name: Test
         run: go test -race -coverprofile=coverage.out ./...

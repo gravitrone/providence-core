@@ -105,6 +105,10 @@ type AgentTab struct {
 	// Each message can be individually selected, steered (priority), or removed.
 	queue       []QueuedMessage
 	queueCursor int // Which message is highlighted (-1 = none, back to input).
+	// Cached rendered messages to avoid re-rendering on every tick.
+	cachedMessages string
+	messagesDirty  bool
+
 	// Queued message spring animation state (harmonica-driven hover bounce).
 	queuedBright float64
 	queuedVel    float64
@@ -439,6 +443,7 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			at.messages = nil
 			at.streamBuffer = ""
 			at.pendingPerm = nil
+			at.messagesDirty = true
 			at.refreshViewport()
 		}
 		return at, nil
@@ -572,6 +577,8 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		at.streaming = false
 		at.streamBuffer = ""
 		at.spinnerVerb = ""
+		at.follow = false
+		at.messagesDirty = true
 		if re, ok := ev.Data.(*claude.ResultEvent); ok {
 			if re.IsError {
 				at.addSystemMessage(fmt.Sprintf("Error: %s", re.Result))
@@ -858,6 +865,7 @@ func (at *AgentTab) addMessage(role, content string, done bool) {
 		Content: content,
 		Done:    done,
 	})
+	at.messagesDirty = true
 }
 
 func (at *AgentTab) addSystemMessage(content string) {
@@ -884,17 +892,29 @@ func (at *AgentTab) updateLastPermissionStatus(status string) {
 }
 
 func (at *AgentTab) refreshViewport() {
-	// Banner is inside the viewport so it scrolls up as chat fills.
+	// Banner animates every tick (cheap).
 	banner := centerBlockUniform(
 		RenderBannerAnimated(at.flameFrame, at.streaming),
 		chatContentWidth(at.width),
 	)
-	messages := at.renderMessages()
-	content := banner + "\n" + messages
+
+	// Messages re-render when dirty, streaming, or animating (completion spring).
+	// When idle with no changes, use the cached render to avoid flicker.
+	if at.messagesDirty || at.streaming || at.completionActive || at.cachedMessages == "" {
+		at.cachedMessages = at.renderMessages()
+		at.messagesDirty = false
+	}
+
+	content := banner + "\n" + at.cachedMessages
 	at.viewport.SetContent(content)
 	if at.follow {
 		at.viewport.GotoBottom()
 	}
+}
+
+// invalidateMessages marks the message cache as dirty so it re-renders on next refreshViewport.
+func (at *AgentTab) invalidateMessages() {
+	at.messagesDirty = true
 }
 
 func (at AgentTab) renderMessages() string {
@@ -1460,6 +1480,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		at.messages = nil
 		at.streamBuffer = ""
 		at.pendingPerm = nil
+		at.messagesDirty = true
 		at.refreshViewport()
 		return true, nil
 	case "/help":

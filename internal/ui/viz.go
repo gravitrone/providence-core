@@ -28,11 +28,11 @@ type VizData struct {
 	Root    *TreeNode       `json:"root,omitempty"`
 	Items   []string        `json:"items,omitempty"`
 	// Fields for new viz types.
-	Value    float64  `json:"value,omitempty"`
-	Max      float64  `json:"max,omitempty"`
-	Unit     string   `json:"unit,omitempty"`
-	Delta    string   `json:"delta,omitempty"`
-	Label    string   `json:"label,omitempty"`
+	Value    json.RawMessage `json:"value,omitempty"`
+	Max      float64         `json:"max,omitempty"`
+	Unit     string          `json:"unit,omitempty"`
+	Delta    string          `json:"delta,omitempty"`
+	Label    string          `json:"label,omitempty"`
 	Events   []Event  `json:"events,omitempty"`
 	Entries  []KVPair `json:"entries,omitempty"`
 	OldLines []string `json:"old_lines,omitempty"`
@@ -55,6 +55,34 @@ type Event struct {
 type KVPair struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
+}
+
+// vizValue extracts the Value field as float64 (returns 0 if string/missing).
+func (v VizData) vizValueFloat() float64 {
+	if len(v.Value) == 0 {
+		return 0
+	}
+	var f float64
+	if err := json.Unmarshal(v.Value, &f); err == nil {
+		return f
+	}
+	return 0
+}
+
+// vizValueString extracts the Value field as a display string.
+func (v VizData) vizValueString() string {
+	if len(v.Value) == 0 {
+		return "0"
+	}
+	var f float64
+	if err := json.Unmarshal(v.Value, &f); err == nil {
+		return fmt.Sprintf("%.0f", f)
+	}
+	var s string
+	if err := json.Unmarshal(v.Value, &s); err == nil {
+		return s
+	}
+	return string(v.Value)
 }
 
 // TreeNode is a recursive node in a tree visualization.
@@ -370,7 +398,7 @@ func renderProgress(v VizData, width int) string {
 	if maxVal == 0 {
 		maxVal = 100
 	}
-	pct := v.Value / maxVal
+	pct := v.vizValueFloat() / maxVal
 	if pct > 1 {
 		pct = 1
 	}
@@ -420,7 +448,8 @@ func renderGauge(v VizData, width int) string {
 	if maxVal == 0 {
 		maxVal = 100
 	}
-	pct := v.Value / maxVal
+	val := v.vizValueFloat()
+	pct := val / maxVal
 	if pct > 1 {
 		pct = 1
 	}
@@ -457,7 +486,7 @@ func renderGauge(v VizData, width int) string {
 	valueStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	bar := "[" + filledStyle.Render(strings.Repeat("█", filled)) + emptyStyle.Render(strings.Repeat("░", empty)) + "]"
-	valStr := fmt.Sprintf("%.0f/%.0f", v.Value, maxVal)
+	valStr := fmt.Sprintf("%.0f/%.0f", val, maxVal)
 	if unit != "" {
 		valStr += " " + unit
 	}
@@ -504,13 +533,25 @@ func renderHeatmap(v VizData, _ int) string {
 		lipgloss.Color("#FFEC80"),
 	}
 
+	// Find max row label width for alignment.
+	maxLabelW := 2
+	for i := range grid {
+		label := fmt.Sprintf("%d", i)
+		if i < len(v.Items) {
+			label = v.Items[i]
+		}
+		if len(label) > maxLabelW {
+			maxLabelW = len(label)
+		}
+	}
+
 	var b strings.Builder
 	// Column headers if available
 	if len(v.Headers) > 0 {
 		headerStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-		b.WriteString("   ")
+		b.WriteString(strings.Repeat(" ", maxLabelW+1))
 		for _, h := range v.Headers {
-			b.WriteString(headerStyle.Render(fmt.Sprintf("%-3s", h)))
+			b.WriteString(headerStyle.Render(fmt.Sprintf("%-4s", h)))
 		}
 		b.WriteString("\n")
 	}
@@ -521,8 +562,8 @@ func renderHeatmap(v VizData, _ int) string {
 		if i < len(v.Items) {
 			rowLabel = v.Items[i]
 		}
-		labelStyle := lipgloss.NewStyle().Foreground(ColorMuted).Width(3)
-		b.WriteString(labelStyle.Render(rowLabel))
+		labelStyle := lipgloss.NewStyle().Foreground(ColorMuted).Width(maxLabelW).Align(lipgloss.Right)
+		b.WriteString(labelStyle.Render(rowLabel) + " ")
 
 		for _, val := range row {
 			norm := (val - minVal) / valRange
@@ -531,7 +572,7 @@ func renderHeatmap(v VizData, _ int) string {
 				colorIdx = len(heatColors) - 1
 			}
 			style := lipgloss.NewStyle().Foreground(heatColors[colorIdx])
-			b.WriteString(style.Render("██ "))
+			b.WriteString(style.Render("██") + "  ")
 		}
 		b.WriteString("\n")
 	}
@@ -599,7 +640,7 @@ func renderStat(v VizData) string {
 	}
 	unit := v.Unit
 
-	valueStr := fmt.Sprintf("%.0f", v.Value)
+	valueStr := v.vizValueString()
 	if unit != "" {
 		valueStr += " " + unit
 	}

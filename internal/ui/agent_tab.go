@@ -397,9 +397,11 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			Content: text,
 			Done:    true,
 		})
+		at.messagesDirty = true
 		at.streaming = true
 		at.streamBuffer = ""
 		at.follow = true
+		at.viewport.GotoBottom()
 		// Initialize spinner state
 		at.spinnerFrame = 0
 		at.spinnerVerb = randomVerb("")
@@ -625,9 +627,11 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 				Content: text,
 				Done:    true,
 			})
+			at.messagesDirty = true
 			at.streaming = true
 			at.streamBuffer = ""
 			at.follow = true
+			at.viewport.GotoBottom()
 			at.spinnerFrame = 0
 			at.spinnerVerb = randomVerb("")
 			at.spinnerStart = time.Now()

@@ -234,8 +234,15 @@ func renderBarChart(v VizData, width int) string {
 	labelStyle := lipgloss.NewStyle().Foreground(ColorText).Width(maxLabel).Align(lipgloss.Right)
 	valueStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
-	// Flame gradient: items cycle through primary (amber), secondary (flame orange), accent (gold).
-	colors := []color.Color{ColorPrimary, ColorSecondary, ColorAccent}
+	// Flame gradient: bars blend through the profaned spectrum.
+	colors := []color.Color{
+		lipgloss.Color("#FFD700"), // holy gold
+		lipgloss.Color("#FFA600"), // profaned amber
+		lipgloss.Color("#D77757"), // flame orange
+		lipgloss.Color("#C45A3C"), // deep flame
+		lipgloss.Color("#A0704A"), // cooled ember
+		lipgloss.Color("#8B4513"), // burnt ember
+	}
 
 	var b strings.Builder
 	for i, item := range items {
@@ -270,7 +277,7 @@ func renderTable(v VizData, width int) string {
 
 	cellStyle := lipgloss.NewStyle().Padding(0, 1)
 	oddStyle := cellStyle.Foreground(ColorText)
-	evenStyle := cellStyle.Foreground(ColorMuted)
+	evenStyle := cellStyle.Foreground(lipgloss.Color("#A0907A")) // warm muted, not as dim as ColorMuted
 
 	t := table.New().
 		Border(lipgloss.RoundedBorder()).
@@ -302,10 +309,14 @@ var sparkBlocks = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 
 // sparkColors is the flame gradient for sparkline rendering.
 var sparkColors = []color.Color{
-	lipgloss.Color("#6b5040"), // low - ember ash
-	lipgloss.Color("#D77757"), // mid - flame orange
-	lipgloss.Color("#FFA600"), // high - profaned amber
-	lipgloss.Color("#FFD700"), // peak - holy gold
+	lipgloss.Color("#3a2518"), // low - dark ember
+	lipgloss.Color("#6b5040"), // ember ash
+	lipgloss.Color("#A0704A"), // cooled ember
+	lipgloss.Color("#C45A3C"), // deep flame
+	lipgloss.Color("#D77757"), // flame orange
+	lipgloss.Color("#FFA600"), // profaned amber
+	lipgloss.Color("#FFD700"), // holy gold
+	lipgloss.Color("#FFEC80"), // white-hot peak
 }
 
 // renderSparkline renders an inline sparkline using block characters with flame gradient.
@@ -420,20 +431,20 @@ func renderProgress(v VizData, width int) string {
 	filled := int(math.Round(pct * float64(barWidth)))
 	empty := barWidth - filled
 
-	// Color shifts from ember (low) to gold (high)
-	var barColor color.Color
-	switch {
-	case pct < 0.3:
-		barColor = lipgloss.Color("#6b5040")
-	case pct < 0.6:
-		barColor = ColorSecondary
-	case pct < 0.9:
-		barColor = ColorPrimary
-	default:
-		barColor = ColorAccent
+	// Gradient from ember (low) to gold (high) using interpolation.
+	progressGradient := []color.Color{
+		lipgloss.Color("#3a2518"), // 0% - dark ember
+		lipgloss.Color("#6b5040"), // ~25%
+		lipgloss.Color("#D77757"), // ~50%
+		lipgloss.Color("#FFA600"), // ~75%
+		lipgloss.Color("#FFD700"), // 100% - holy gold
+	}
+	colorIdx := int(math.Round(pct * float64(len(progressGradient)-1)))
+	if colorIdx >= len(progressGradient) {
+		colorIdx = len(progressGradient) - 1
 	}
 
-	filledStyle := lipgloss.NewStyle().Foreground(barColor)
+	filledStyle := lipgloss.NewStyle().Foreground(progressGradient[colorIdx])
 	emptyStyle := lipgloss.NewStyle().Foreground(ColorBorder)
 	labelStyle := lipgloss.NewStyle().Foreground(ColorText)
 	pctStyle := lipgloss.NewStyle().Foreground(ColorMuted)
@@ -469,18 +480,21 @@ func renderGauge(v VizData, width int) string {
 	filled := int(math.Round(pct * float64(gaugeWidth)))
 	empty := gaugeWidth - filled
 
-	// Color based on level
-	var barColor color.Color
-	switch {
-	case pct < 0.5:
-		barColor = ColorSuccess
-	case pct < 0.8:
-		barColor = ColorPrimary
-	default:
-		barColor = lipgloss.Color("#FF4444") // danger red
+	// Gauge gradient: calm ember -> amber -> brimstone red (danger)
+	gaugeGradient := []color.Color{
+		lipgloss.Color("#6b5040"), // low - calm ember
+		lipgloss.Color("#A0704A"), // ~30%
+		lipgloss.Color("#D77757"), // ~50% - flame
+		lipgloss.Color("#FFA600"), // ~70% - amber warning
+		lipgloss.Color("#FF6B35"), // ~85% - hot
+		lipgloss.Color("#FF4444"), // 100% - brimstone red
+	}
+	colorIdx := int(math.Round(pct * float64(len(gaugeGradient)-1)))
+	if colorIdx >= len(gaugeGradient) {
+		colorIdx = len(gaugeGradient) - 1
 	}
 
-	filledStyle := lipgloss.NewStyle().Foreground(barColor)
+	filledStyle := lipgloss.NewStyle().Foreground(gaugeGradient[colorIdx])
 	emptyStyle := lipgloss.NewStyle().Foreground(ColorBorder)
 	labelStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
 	valueStyle := lipgloss.NewStyle().Foreground(ColorMuted)
@@ -586,8 +600,8 @@ func renderTimeline(v VizData) string {
 	}
 
 	timeStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
-	lineStyle := lipgloss.NewStyle().Foreground(ColorBorder)
-	dotStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
+	lineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6b5040")) // ember ash connector
+	dotStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
 	textStyle := lipgloss.NewStyle().Foreground(ColorText)
 
 	var b strings.Builder
@@ -618,8 +632,8 @@ func renderKV(v VizData) string {
 		}
 	}
 
-	keyStyle := lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true).Width(maxKey).Align(lipgloss.Right)
-	sepStyle := lipgloss.NewStyle().Foreground(ColorBorder)
+	keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true).Width(maxKey).Align(lipgloss.Right)
+	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6b5040"))
 	valStyle := lipgloss.NewStyle().Foreground(ColorText)
 
 	var b strings.Builder
@@ -655,9 +669,9 @@ func renderStat(v VizData) string {
 	if v.Delta != "" {
 		var deltaColor color.Color
 		if strings.HasPrefix(v.Delta, "+") || strings.HasPrefix(v.Delta, "▲") {
-			deltaColor = ColorSuccess
+			deltaColor = lipgloss.Color("#FFD700") // holy gold - positive
 		} else if strings.HasPrefix(v.Delta, "-") || strings.HasPrefix(v.Delta, "▼") {
-			deltaColor = lipgloss.Color("#FF4444")
+			deltaColor = lipgloss.Color("#D77757") // flame orange - negative
 		} else {
 			deltaColor = ColorMuted
 		}
@@ -673,8 +687,8 @@ func renderDiff(v VizData) string {
 		return ""
 	}
 
-	removeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4444"))
-	addStyle := lipgloss.NewStyle().Foreground(ColorSuccess)
+	removeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#D77757")) // flame orange for removed
+	addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700"))    // holy gold for added
 	contextStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	var b strings.Builder

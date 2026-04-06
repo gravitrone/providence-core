@@ -1532,10 +1532,12 @@ var availableModels = []struct {
 	{"claude-opus-4-6", []string{"opus"}, "Most capable, slower"},
 	{"claude-haiku-4-5-20251001", []string{"haiku"}, "Fastest, cheapest"},
 	{"gpt-5.4", []string{"codex", "gpt5"}, "GPT-5.4 via Codex (ChatGPT sub)"},
-	{"gpt-5.4-mini", []string{"codex-mini"}, "GPT-5.4 Mini via Codex"},
+	{"gpt-5.4-mini", []string{"codex-mini", "gpt5-mini"}, "GPT-5.4 Mini via Codex"},
 	{"gpt-5.3-codex", []string{"codex-5.3"}, "GPT-5.3 Codex"},
 	{"gpt-5.2-codex", []string{"codex-5.2"}, "GPT-5.2 Codex"},
-	{"gpt-5.1-codex-mini", []string{"codex-5.1"}, "GPT-5.1 Codex Mini"},
+	{"gpt-5.2", []string{"gpt5.2"}, "GPT-5.2 via Codex"},
+	{"gpt-5.1-codex-max", []string{"codex-max", "codex-5.1-max"}, "GPT-5.1 Codex Max"},
+	{"gpt-5.1-codex-mini", []string{"codex-5.1", "codex-5.1-mini"}, "GPT-5.1 Codex Mini"},
 }
 
 // resolveModelAlias resolves an alias or model name to the full model name.

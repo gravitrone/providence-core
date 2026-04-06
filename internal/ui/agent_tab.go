@@ -1034,7 +1034,14 @@ func (at AgentTab) renderAssistantMessage(msg ChatMessage) string {
 	indent := "  " // same width as "↳ " prefix
 
 	if msg.Done && at.mdRenderer != nil {
-		rendered, err := at.mdRenderer.Render(msg.Content)
+		// Extract viz blocks, replace with placeholders, render markdown, then swap viz back in.
+		content, vizRendered := ExtractAndRenderVizBlocks(msg.Content, at.width-4)
+		rendered, err := at.mdRenderer.Render(content)
+		if err == nil {
+			for placeholder, vizOutput := range vizRendered {
+				rendered = strings.ReplaceAll(rendered, placeholder, vizOutput)
+			}
+		}
 		if err == nil {
 			trimmed := strings.TrimSpace(rendered)
 			lines := strings.Split(trimmed, "\n")

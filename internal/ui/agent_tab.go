@@ -109,6 +109,11 @@ type AgentTab struct {
 	cachedMessages string
 	messagesDirty  bool
 
+	// Viz state: tracks when a viz block is being streamed.
+	visualizing bool
+	vizVerb     string
+	vizCount    int // number of completed viz blocks this turn
+
 	// Queued message spring animation state (harmonica-driven hover bounce).
 	queuedBright float64
 	queuedVel    float64
@@ -505,6 +510,26 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		if se, ok := ev.Data.(*claude.StreamEvent); ok {
 			if se.Event.Delta != nil && se.Event.Delta.Type == "text_delta" {
 				at.streamBuffer += se.Event.Delta.Text
+
+				// Detect viz block state in stream buffer.
+				openMarker := "```providence-viz"
+				if idx := strings.LastIndex(at.streamBuffer, openMarker); idx != -1 {
+					afterOpen := at.streamBuffer[idx+len(openMarker):]
+					if !strings.Contains(afterOpen, "```") {
+						// In-progress viz block.
+						if !at.visualizing {
+							at.visualizing = true
+							at.vizVerb = randomVizVerb("")
+						}
+					} else {
+						if at.visualizing {
+							at.vizCount++ // viz block just completed
+						}
+						at.visualizing = false
+					}
+				} else {
+					at.visualizing = false
+				}
 				if len(at.messages) > 0 && at.messages[len(at.messages)-1].Role == "assistant" && !at.messages[len(at.messages)-1].Done {
 					at.messages[len(at.messages)-1].Content = at.streamBuffer
 				} else {
@@ -579,16 +604,27 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		at.streaming = false
 		at.streamBuffer = ""
 		at.spinnerVerb = ""
-		at.follow = false
+		at.visualizing = false
 		at.messagesDirty = true
 		if re, ok := ev.Data.(*claude.ResultEvent); ok {
 			if re.IsError {
 				at.addSystemMessage(fmt.Sprintf("Error: %s", re.Result))
 			}
 		}
+		vizCount := at.vizCount
+		lastVizVerb := at.vizVerb
+		at.vizCount = 0
+		at.vizVerb = ""
 		if verb != "" && elapsed > 0 {
 			past := verbToPast(verb)
-			completionMsg := fmt.Sprintf("%s for %ds", past, elapsed)
+			var completionMsg string
+			if vizCount > 0 && lastVizVerb != "" {
+				// Turn viz verb into past tense-ish: "Conjuring the flames" -> "conjured the flames"
+				vizPast := strings.ToLower(vizVerbToPast(lastVizVerb))
+				completionMsg = fmt.Sprintf("%s and %s for %ds", past, vizPast, elapsed)
+			} else {
+				completionMsg = fmt.Sprintf("%s for %ds", past, elapsed)
+			}
 			at.addSystemMessage(completionMsg)
 			// Start completion spring animation: bright gold -> frozen ember.
 			at.completionText = completionMsg
@@ -1051,22 +1087,38 @@ func (at AgentTab) renderUserMessage(msg ChatMessage, contentW int, isLatest boo
 	return boxStyle.Render(prefix+textStyle.Render(text)) + "\n"
 }
 
-// RenderAssistantMessage renders assistant text with arrow prefix and indent.
-// Done messages get glamour markdown rendering.
+// RenderAssistantMessage renders assistant text with glamour markdown rendering.
+// Works for both streaming and done messages. Viz blocks are extracted and rendered separately.
 func (at AgentTab) renderAssistantMessage(msg ChatMessage) string {
 	arrowStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
-	indent := "  " // same width as "↳ " prefix
+	indent := "  "
 
-	if msg.Done && at.mdRenderer != nil {
-		// Extract viz blocks, replace with placeholders, render markdown, then swap viz back in.
-		content, vizRendered := ExtractAndRenderVizBlocks(msg.Content, at.width-4)
+	text := strings.TrimSpace(msg.Content)
+	if text == "" {
+		return ""
+	}
+
+	// Process viz blocks: render completed ones, strip in-progress ones.
+	if !msg.Done {
+		text = at.processStreamingViz(text)
+		text = strings.TrimSpace(text)
+		if text == "" && at.visualizing {
+			return "" // spinner handles the viz indicator
+		}
+	}
+
+	if text == "" {
+		return ""
+	}
+
+	// Glamour render for both streaming and done messages.
+	if at.mdRenderer != nil {
+		content, vizRendered := ExtractAndRenderVizBlocks(text, at.width-4)
 		rendered, err := at.mdRenderer.Render(content)
 		if err == nil {
 			for placeholder, vizOutput := range vizRendered {
 				rendered = strings.ReplaceAll(rendered, placeholder, vizOutput)
 			}
-		}
-		if err == nil {
 			trimmed := strings.TrimSpace(rendered)
 			lines := strings.Split(trimmed, "\n")
 			var b strings.Builder
@@ -1077,15 +1129,15 @@ func (at AgentTab) renderAssistantMessage(msg ChatMessage) string {
 					b.WriteString(indent + line + "\n")
 				}
 			}
+			if !msg.Done && !at.visualizing {
+				s := strings.TrimRight(b.String(), "\n")
+				return s + MutedStyle.Render("\u258d") + "\n"
+			}
 			return b.String()
 		}
 	}
 
-	// Streaming - raw text with cursor.
-	text := strings.TrimSpace(msg.Content)
-	if text == "" {
-		return ""
-	}
+	// Fallback: raw text if glamour fails.
 	var b strings.Builder
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
@@ -1095,13 +1147,31 @@ func (at AgentTab) renderAssistantMessage(msg ChatMessage) string {
 			b.WriteString(indent + line + "\n")
 		}
 	}
-	if !msg.Done {
-		s := b.String()
-		s = strings.TrimRight(s, "\n")
-		s += MutedStyle.Render("\u258d") + "\n"
-		return s
+	if !msg.Done && !at.visualizing {
+		s := strings.TrimRight(b.String(), "\n")
+		return s + MutedStyle.Render("\u258d") + "\n"
 	}
 	return b.String()
+}
+
+// processStreamingViz handles viz blocks during streaming:
+// - Completed blocks (```providence-viz ... ```) get rendered immediately
+// - In-progress blocks (opening ``` but no closing) show a "Visualizing" spinner with calamity verbs
+func (at AgentTab) processStreamingViz(text string) string {
+	// Only strip in-progress viz blocks. Completed blocks are handled
+	// by ExtractAndRenderVizBlocks in the glamour rendering path.
+	openMarker := "```providence-viz"
+	lastOpen := strings.LastIndex(text, openMarker)
+	if lastOpen == -1 {
+		return text
+	}
+	afterOpen := text[lastOpen+len(openMarker):]
+	if strings.Contains(afterOpen, "```") {
+		return text // complete, glamour path will handle it
+	}
+
+	// Strip the in-progress block from display.
+	return strings.TrimRight(text[:lastOpen], "\n") + "\n"
 }
 
 // RenderSystemMessage renders a system message in italic muted with 2-char indent.
@@ -1350,6 +1420,16 @@ var calamityToolFlavor = []string{
 
 func randomToolFlavor() string {
 	return calamityToolFlavor[rand.IntN(len(calamityToolFlavor))]
+}
+
+// vizVerbToPast converts a viz verb phrase to past tense.
+// "Conjuring the flames" -> "Conjured the flames"
+func vizVerbToPast(phrase string) string {
+	parts := strings.SplitN(phrase, " ", 2)
+	if len(parts) == 1 {
+		return verbToPast(parts[0])
+	}
+	return verbToPast(parts[0]) + " " + parts[1]
 }
 
 // VerbToPast converts a spinner verb to past tense.

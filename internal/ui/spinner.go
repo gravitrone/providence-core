@@ -82,6 +82,22 @@ var spinnerVerbs = []string{
 	"Calamitizing",
 }
 
+// VizVerbs is the Providence + Calamity themed verb list for visualizations.
+var vizVerbs = []string{
+	"Conjuring the flames",
+	"Forging divine sight",
+	"Manifesting brimstone",
+	"Channeling the profaned eye",
+	"Rendering holy fire",
+	"Crystallizing ember visions",
+	"Weaving flame tapestry",
+	"Invoking sacred geometry",
+	"Summoning the burning canvas",
+	"Igniting astral projection",
+	"Etching in divine light",
+	"Scorching reality into form",
+}
+
 // SpinnerTickMsg is sent every 120ms to advance the spinner animation.
 type spinnerTickMsg struct{}
 
@@ -105,8 +121,22 @@ func randomVerb(current string) string {
 	}
 }
 
+// RandomVizVerb picks a random viz verb, avoiding the current one.
+func randomVizVerb(current string) string {
+	if len(vizVerbs) == 1 {
+		return vizVerbs[0]
+	}
+	for {
+		v := vizVerbs[rand.IntN(len(vizVerbs))]
+		if v != current {
+			return v
+		}
+	}
+}
+
 // RenderSpinner returns the spinner line string, or "" if not streaming.
 // Uses the original pulse block animation (█▓▒░) for thinking verbs.
+// When visualizing, shows viz verbs with a hotter flame color.
 func (at AgentTab) renderSpinner() string {
 	if !at.streaming {
 		return ""
@@ -114,10 +144,19 @@ func (at AgentTab) renderSpinner() string {
 
 	frame := string(spinnerFrames[at.spinnerFrame%len(spinnerFrames)])
 	elapsed := int(time.Since(at.spinnerStart).Seconds())
+	timerStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+
+	if at.visualizing {
+		// Hotter flame for viz: gold/amber range instead of yellow.
+		vizSpinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(flameColor(at.spinnerFrame))).Bold(true)
+		vizVerbStyle := lipgloss.NewStyle().Foreground(ColorAccent).Italic(true)
+		return "  " + vizSpinnerStyle.Render(frame) + " " +
+			vizVerbStyle.Render(at.vizVerb+"...") + " " +
+			timerStyle.Render(fmt.Sprintf("(%ds)", elapsed))
+	}
 
 	spinnerStyle := lipgloss.NewStyle().Foreground(ColorWarning)
 	verbStyle := lipgloss.NewStyle().Foreground(ColorText).Italic(true)
-	timerStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	return "  " + spinnerStyle.Render(frame) + " " +
 		verbStyle.Render(at.spinnerVerb+"...") + " " +

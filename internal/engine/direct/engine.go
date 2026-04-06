@@ -39,19 +39,32 @@ type DirectEngine struct {
 	// Mid-turn steering: extra user messages injected between turns.
 	steered []string
 	steerMu sync.Mutex
+
+	// Codex mode: use OpenAI Codex API instead of Anthropic.
+	codexMode    bool
+	codexHistory []codexHistoryEntry
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
 func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
-	opts := []option.RequestOption{}
-	if cfg.APIKey != "" {
-		opts = append(opts, option.WithAPIKey(cfg.APIKey))
+	isCodex := cfg.Provider == "openai"
+
+	var client anthropic.Client
+	if !isCodex {
+		opts := []option.RequestOption{}
+		if cfg.APIKey != "" {
+			opts = append(opts, option.WithAPIKey(cfg.APIKey))
+		}
+		client = anthropic.NewClient(opts...)
 	}
-	client := anthropic.NewClient(opts...)
 
 	model := cfg.Model
 	if model == "" {
-		model = string(anthropic.ModelClaudeSonnet4_20250514)
+		if isCodex {
+			model = "gpt-5.4"
+		} else {
+			model = string(anthropic.ModelClaudeSonnet4_20250514)
+		}
 	}
 
 	// Build tool registry with all built-in tools.
@@ -82,6 +95,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		status:      engine.StatusIdle,
 		ctx:         ctx,
 		cancel:      cancel,
+		codexMode:   isCodex,
 	}, nil
 }
 
@@ -102,8 +116,16 @@ func (e *DirectEngine) Send(text string) error {
 	e.ctx, e.cancel = context.WithCancel(context.Background())
 	e.mu.Unlock()
 
-	e.history.AddUser(text)
-	go e.agentLoop(e.ctx)
+	if e.codexMode {
+		e.codexHistory = append(e.codexHistory, codexHistoryEntry{
+			Role:    "user",
+			Content: text,
+		})
+		go e.codexAgentLoop(e.ctx)
+	} else {
+		e.history.AddUser(text)
+		go e.agentLoop(e.ctx)
+	}
 	return nil
 }
 

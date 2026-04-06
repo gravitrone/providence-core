@@ -18,6 +18,11 @@ type EngineConfig struct {
 	Model        string
 	APIKey       string
 	WorkDir      string
+
+	// OpenAI/Codex fields - used when Provider is "openai".
+	Provider           string // "anthropic" (default) or "openai"
+	OpenAIAccessToken  string
+	OpenAIAccountID    string
 }
 
 // Engine is the interface all AI backends must implement.

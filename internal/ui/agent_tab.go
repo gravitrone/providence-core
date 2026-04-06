@@ -18,6 +18,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/charmbracelet/harmonica"
+	"github.com/gravitrone/providence-core/internal/auth"
 	"github.com/gravitrone/providence-core/internal/engine"
 	_ "github.com/gravitrone/providence-core/internal/engine/claude"  // register claude factory
 	_ "github.com/gravitrone/providence-core/internal/engine/direct"  // register direct factory
@@ -44,6 +45,12 @@ type AgentErrorMsg struct {
 	Err error
 }
 
+// authCompleteMsg signals that the OpenAI OAuth flow completed.
+type authCompleteMsg struct {
+	Success bool
+	Message string
+}
+
 // --- Chat Message ---
 
 // ChatMessage represents a single message in the agent chat history.
@@ -66,8 +73,9 @@ var slashCommands = []struct {
 	Name string
 	Desc string
 }{
-	{"/model", "Switch model (Haiku, Sonnet, Opus)"},
+	{"/model", "Switch model (Haiku, Sonnet, Opus, Codex)"},
 	{"/engine", "Switch engine (claude, direct)"},
+	{"/auth", "Login to OpenAI (Codex OAuth)"},
 	{"/clear", "Clear chat history"},
 	{"/help", "Show available commands"},
 }
@@ -254,6 +262,11 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 	case engineCreatedMsg:
 		cmd := at.handleEngineCreated(msg)
 		return at, cmd
+
+	case authCompleteMsg:
+		at.addSystemMessage(msg.Message)
+		at.refreshViewport()
+		return at, nil
 	}
 
 	// Forward to input.
@@ -1518,6 +1531,11 @@ var availableModels = []struct {
 	{"claude-sonnet-4-6", []string{"sonnet"}, "Fast + capable (default)"},
 	{"claude-opus-4-6", []string{"opus"}, "Most capable, slower"},
 	{"claude-haiku-4-5-20251001", []string{"haiku"}, "Fastest, cheapest"},
+	{"gpt-5.4", []string{"codex", "gpt5"}, "GPT-5.4 via Codex (ChatGPT sub)"},
+	{"gpt-5.4-mini", []string{"codex-mini"}, "GPT-5.4 Mini via Codex"},
+	{"gpt-5.3-codex", []string{"codex-5.3"}, "GPT-5.3 Codex"},
+	{"gpt-5.2-codex", []string{"codex-5.2"}, "GPT-5.2 Codex"},
+	{"gpt-5.1-codex-mini", []string{"codex-5.1"}, "GPT-5.1 Codex Mini"},
 }
 
 // resolveModelAlias resolves an alias or model name to the full model name.
@@ -1602,6 +1620,26 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		}
 		at.refreshViewport()
 		return true, nil
+	case "/auth":
+		at.addSystemMessage("Opening browser for OpenAI login...")
+		at.refreshViewport()
+		return true, func() tea.Msg {
+			tokens, err := auth.LoginOpenAI()
+			if err != nil {
+				return authCompleteMsg{Success: false, Message: "Login failed: " + err.Error()}
+			}
+			if err := auth.SaveOpenAITokens(tokens); err != nil {
+				return authCompleteMsg{Success: false, Message: "Login OK but save failed: " + err.Error()}
+			}
+			acct := tokens.AccountID
+			if acct == "" {
+				acct = "(unknown)"
+			}
+			return authCompleteMsg{
+				Success: true,
+				Message: fmt.Sprintf("OpenAI login successful! Account: %s", acct),
+			}
+		}
 	case "/clear":
 		at.messages = nil
 		at.streamBuffer = ""
@@ -1614,8 +1652,9 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		help := "## Available Commands\n\n"
 		help += "| Command | Description |\n"
 		help += "|---------|-------------|\n"
-		help += "| `/model <name>` | Switch model (Haiku, Sonnet, Opus) |\n"
+		help += "| `/model <name>` | Switch model (Haiku, Sonnet, Opus, Codex) |\n"
 		help += "| `/engine <type>` | Switch engine (claude, direct) |\n"
+		help += "| `/auth` | Login to OpenAI (Codex OAuth) |\n"
 		help += "| `/clear` | Clear chat history |\n"
 		help += "| `/help` | Show available commands |"
 		at.messages = append(at.messages, ChatMessage{
@@ -1666,6 +1705,11 @@ type engineCreatedMsg struct {
 	prompt string
 }
 
+// isCodexModel returns true if the model name indicates an OpenAI/Codex model.
+func isCodexModel(model string) bool {
+	return strings.HasPrefix(model, "gpt-")
+}
+
 // createEngineAndSend spawns a new engine session and sends the first prompt.
 func createEngineAndSend(prompt, model string, engineType engine.EngineType) tea.Cmd {
 	return func() tea.Msg {
@@ -1685,6 +1729,17 @@ func createEngineAndSend(prompt, model string, engineType engine.EngineType) tea
 			Model:        model,
 			APIKey:       os.Getenv("ANTHROPIC_API_KEY"),
 			WorkDir:      wd,
+		}
+
+		// Detect codex models and configure OpenAI provider.
+		if isCodexModel(model) {
+			cfg.Type = engine.EngineTypeDirect // codex runs through direct engine
+			cfg.Provider = "openai"
+			// Load tokens - they'll be checked per-request in the engine.
+			if tokens, err := auth.EnsureValidOpenAITokens(); err == nil {
+				cfg.OpenAIAccessToken = tokens.AccessToken
+				cfg.OpenAIAccountID = tokens.AccountID
+			}
 		}
 
 		eng, err := engine.NewEngine(cfg)

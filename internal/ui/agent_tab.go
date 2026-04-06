@@ -912,6 +912,16 @@ func (at *AgentTab) addSystemMessage(content string) {
 	at.addMessage("system", content, true)
 }
 
+// hasVizMessages returns true if any done message contains viz blocks.
+func (at AgentTab) hasVizMessages() bool {
+	for _, m := range at.messages {
+		if m.Done && m.Role == "assistant" && strings.Contains(m.Content, "```providence-viz") {
+			return true
+		}
+	}
+	return false
+}
+
 // hasSteeredMessage returns true if any queued message is marked as steered.
 func (at AgentTab) hasSteeredMessage() bool {
 	for _, m := range at.queue {
@@ -938,9 +948,10 @@ func (at *AgentTab) refreshViewport() {
 		chatContentWidth(at.width),
 	)
 
-	// Messages re-render when dirty, streaming, or animating (completion spring).
+	// Messages re-render when dirty, streaming, animating, or viz breathing.
 	// When idle with no changes, use the cached render to avoid flicker.
-	if at.messagesDirty || at.streaming || at.completionActive || at.cachedMessages == "" {
+	hasViz := at.hasVizMessages()
+	if at.messagesDirty || at.streaming || at.completionActive || hasViz || at.cachedMessages == "" {
 		at.cachedMessages = at.renderMessages()
 		at.messagesDirty = false
 	}
@@ -1113,7 +1124,7 @@ func (at AgentTab) renderAssistantMessage(msg ChatMessage) string {
 
 	// Glamour render for both streaming and done messages.
 	if at.mdRenderer != nil {
-		content, vizRendered := ExtractAndRenderVizBlocks(text, at.width-4)
+		content, vizRendered := ExtractAndRenderVizBlocks(text, at.width-4, at.flameFrame)
 		rendered, err := at.mdRenderer.Render(content)
 		if err == nil {
 			for placeholder, vizOutput := range vizRendered {

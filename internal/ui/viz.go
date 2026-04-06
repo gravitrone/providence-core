@@ -101,13 +101,13 @@ var vizTitleStyle = lipgloss.NewStyle().
 // ProcessVizBlocks finds all ```providence-viz blocks in content,
 // renders them, and replaces them with the rendered output.
 // Returns the processed content string.
-func ProcessVizBlocks(content string, width int) string {
+func ProcessVizBlocks(content string, width int, frame int) string {
 	return vizBlockRe.ReplaceAllStringFunc(content, func(match string) string {
 		subs := vizBlockRe.FindStringSubmatch(match)
 		if len(subs) < 2 {
 			return match
 		}
-		rendered := RenderVisualization(strings.TrimSpace(subs[1]), width)
+		rendered := RenderVisualization(strings.TrimSpace(subs[1]), width, frame)
 		if rendered == "" {
 			return match // failed to render, leave the raw block
 		}
@@ -118,7 +118,7 @@ func ProcessVizBlocks(content string, width int) string {
 // ExtractAndRenderVizBlocks replaces viz blocks with unique placeholders,
 // renders each viz, and returns the modified content + a map of placeholder -> rendered output.
 // This allows glamour to process the markdown without mangling ANSI codes in viz output.
-func ExtractAndRenderVizBlocks(content string, width int) (string, map[string]string) {
+func ExtractAndRenderVizBlocks(content string, width int, frame int) (string, map[string]string) {
 	vizMap := make(map[string]string)
 	idx := 0
 	result := vizBlockRe.ReplaceAllStringFunc(content, func(match string) string {
@@ -126,7 +126,7 @@ func ExtractAndRenderVizBlocks(content string, width int) (string, map[string]st
 		if len(subs) < 2 {
 			return match
 		}
-		rendered := RenderVisualization(strings.TrimSpace(subs[1]), width)
+		rendered := RenderVisualization(strings.TrimSpace(subs[1]), width, frame)
 		if rendered == "" {
 			return match
 		}
@@ -138,9 +138,35 @@ func ExtractAndRenderVizBlocks(content string, width int) (string, map[string]st
 	return result, vizMap
 }
 
+// vizBorderGradient is a precomputed gradient for viz block borders.
+var vizBorderGradient []color.Color
+
+func init() {
+	vizBorderGradient = lipgloss.Blend1D(20,
+		lipgloss.Color("#3a2518"),
+		lipgloss.Color("#6b5040"),
+		lipgloss.Color("#A0704A"),
+		lipgloss.Color("#6b5040"),
+		lipgloss.Color("#3a2518"),
+	)
+}
+
+// vizBarGradient is a precomputed per-character gradient for bar fills.
+var vizBarGradient []color.Color
+
+func init() {
+	vizBarGradient = lipgloss.Blend1D(40,
+		lipgloss.Color("#8B4513"),
+		lipgloss.Color("#D77757"),
+		lipgloss.Color("#FFA600"),
+		lipgloss.Color("#FFD700"),
+		lipgloss.Color("#FFEC80"),
+	)
+}
+
 // RenderVisualization parses vizJSON and dispatches to the correct renderer.
 // Returns empty string on any parse/render failure.
-func RenderVisualization(vizJSON string, width int) string {
+func RenderVisualization(vizJSON string, width int, frame int) string {
 	var v VizData
 	if err := json.Unmarshal([]byte(vizJSON), &v); err != nil {
 		return ""
@@ -190,8 +216,28 @@ func RenderVisualization(vizJSON string, width int) string {
 
 	var b strings.Builder
 	if v.Title != "" {
-		b.WriteString(vizTitleStyle.Render(v.Title))
+		// Title with ember breathing color.
+		titleColor := emberBreathe(frame)
+		titleStyle := lipgloss.NewStyle().
+			Foreground(titleColor).
+			Bold(true).
+			Underline(true)
+		b.WriteString(titleStyle.Render(v.Title))
 		b.WriteString("\n")
+
+		// Gradient divider under title.
+		titleLen := lipgloss.Width(v.Title)
+		if titleLen > 0 {
+			for i := range titleLen {
+				gIdx := i * len(vizBorderGradient) / titleLen
+				if gIdx >= len(vizBorderGradient) {
+					gIdx = len(vizBorderGradient) - 1
+				}
+				style := lipgloss.NewStyle().Foreground(vizBorderGradient[gIdx])
+				b.WriteString(style.Render("─"))
+			}
+			b.WriteString("\n")
+		}
 	}
 	b.WriteString(body)
 	b.WriteString("\n")
@@ -234,31 +280,28 @@ func renderBarChart(v VizData, width int) string {
 	labelStyle := lipgloss.NewStyle().Foreground(ColorText).Width(maxLabel).Align(lipgloss.Right)
 	valueStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
-	// Flame gradient: bars blend through the profaned spectrum.
-	colors := []color.Color{
-		lipgloss.Color("#FFD700"), // holy gold
-		lipgloss.Color("#FFA600"), // profaned amber
-		lipgloss.Color("#D77757"), // flame orange
-		lipgloss.Color("#C45A3C"), // deep flame
-		lipgloss.Color("#A0704A"), // cooled ember
-		lipgloss.Color("#8B4513"), // burnt ember
-	}
-
 	var b strings.Builder
-	for i, item := range items {
+	for _, item := range items {
 		barLen := int(math.Round((item.Value / maxVal) * float64(barMaxWidth)))
 		if barLen < 1 && item.Value > 0 {
 			barLen = 1
 		}
 
-		barColor := colors[i%len(colors)]
-		barStyle := lipgloss.NewStyle().Foreground(barColor)
+		// Per-character gradient: dark ember on left → bright gold on right.
+		var bar strings.Builder
+		for j := range barLen {
+			gIdx := j * len(vizBarGradient) / barLen
+			if gIdx >= len(vizBarGradient) {
+				gIdx = len(vizBarGradient) - 1
+			}
+			style := lipgloss.NewStyle().Foreground(vizBarGradient[gIdx])
+			bar.WriteString(style.Render("█"))
+		}
 
-		bar := barStyle.Render(strings.Repeat("█", barLen))
 		label := labelStyle.Render(item.Label)
 		val := valueStyle.Render(fmt.Sprintf(" %.0f", item.Value))
 
-		b.WriteString(label + " " + bar + val + "\n")
+		b.WriteString(label + " " + bar.String() + val + "\n")
 	}
 	return b.String()
 }
@@ -431,25 +474,21 @@ func renderProgress(v VizData, width int) string {
 	filled := int(math.Round(pct * float64(barWidth)))
 	empty := barWidth - filled
 
-	// Gradient from ember (low) to gold (high) using interpolation.
-	progressGradient := []color.Color{
-		lipgloss.Color("#3a2518"), // 0% - dark ember
-		lipgloss.Color("#6b5040"), // ~25%
-		lipgloss.Color("#D77757"), // ~50%
-		lipgloss.Color("#FFA600"), // ~75%
-		lipgloss.Color("#FFD700"), // 100% - holy gold
-	}
-	colorIdx := int(math.Round(pct * float64(len(progressGradient)-1)))
-	if colorIdx >= len(progressGradient) {
-		colorIdx = len(progressGradient) - 1
-	}
-
-	filledStyle := lipgloss.NewStyle().Foreground(progressGradient[colorIdx])
 	emptyStyle := lipgloss.NewStyle().Foreground(ColorBorder)
 	labelStyle := lipgloss.NewStyle().Foreground(ColorText)
 	pctStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
-	bar := filledStyle.Render(strings.Repeat("█", filled)) + emptyStyle.Render(strings.Repeat("░", empty))
+	// Per-character gradient on filled portion.
+	var barBuf strings.Builder
+	for j := range filled {
+		gIdx := j * len(vizBarGradient) / max(filled, 1)
+		if gIdx >= len(vizBarGradient) {
+			gIdx = len(vizBarGradient) - 1
+		}
+		style := lipgloss.NewStyle().Foreground(vizBarGradient[gIdx])
+		barBuf.WriteString(style.Render("█"))
+	}
+	bar := barBuf.String() + emptyStyle.Render(strings.Repeat("░", empty))
 	return labelStyle.Render(label) + " " + bar + " " + pctStyle.Render(fmt.Sprintf("%.0f%%", pct*100)) + "\n"
 }
 

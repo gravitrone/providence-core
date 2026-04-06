@@ -19,6 +19,9 @@ func main() {
 	}
 }
 
+// engineFlag holds the --engine flag value.
+var engineFlag string
+
 // NewRootCommand builds the root cobra command.
 func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
@@ -26,11 +29,13 @@ func newRootCommand() *cobra.Command {
 		Short: "The Profaned Core - autonomous AI harness",
 		Long:  "providence: autonomous AI harness - terminal, web, and beyond.",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return runTUI()
+			return runTUI(engineFlag)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+
+	root.Flags().StringVar(&engineFlag, "engine", "claude", "AI engine backend (claude, direct, openai)")
 
 	return root
 }
@@ -43,12 +48,12 @@ var runBubbleTUI = func(app tea.Model) error {
 }
 
 // RunTUI launches the fullscreen Bubble Tea TUI.
-func runTUI() error {
+func runTUI(engineType string) error {
 	if !isInteractiveTerminal(os.Stdout) {
 		fmt.Println(ui.RenderBanner())
 		return nil
 	}
-	app := ui.NewApp()
+	app := ui.NewApp(engineType)
 	if err := runBubbleTUI(app); err != nil {
 		return fmt.Errorf("tui error: %w", err)
 	}

@@ -1,5 +1,25 @@
 package engine
 
+import "fmt"
+
+// EngineType identifies the backend.
+type EngineType string
+
+const (
+	EngineTypeClaude EngineType = "claude"
+	EngineTypeDirect EngineType = "direct"
+)
+
+// EngineConfig holds creation parameters for any engine.
+type EngineConfig struct {
+	Type         EngineType
+	SystemPrompt string
+	AllowedTools []string
+	Model        string
+	APIKey       string
+	WorkDir      string
+}
+
 // Engine is the interface all AI backends must implement.
 type Engine interface {
 	// Send sends a user message to the AI.
@@ -37,3 +57,23 @@ const (
 	StatusCompleted
 	StatusFailed
 )
+
+// EngineFactory is a constructor function that creates an Engine from config.
+type EngineFactory func(cfg EngineConfig) (Engine, error)
+
+var factories = map[EngineType]EngineFactory{}
+
+// RegisterFactory registers a factory for the given engine type.
+// Call this from an init() in each engine subpackage.
+func RegisterFactory(t EngineType, f EngineFactory) {
+	factories[t] = f
+}
+
+// NewEngine creates an Engine based on the given config type.
+func NewEngine(cfg EngineConfig) (Engine, error) {
+	f, ok := factories[cfg.Type]
+	if !ok {
+		return nil, fmt.Errorf("unknown engine type: %s", cfg.Type)
+	}
+	return f(cfg)
+}

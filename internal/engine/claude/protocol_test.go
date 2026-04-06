@@ -3,6 +3,7 @@ package claude
 import (
 	"testing"
 
+	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -14,7 +15,7 @@ func TestParseEvent_SystemInit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "system", eventType)
 
-	e, ok := data.(*SystemInitEvent)
+	e, ok := data.(*engine.SystemInitEvent)
 	require.True(t, ok)
 	assert.Equal(t, "init", e.Subtype)
 	assert.Equal(t, "abc-123", e.SessionID)
@@ -29,7 +30,7 @@ func TestParseEvent_StreamEvent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "stream_event", eventType)
 
-	e, ok := data.(*StreamEvent)
+	e, ok := data.(*engine.StreamEvent)
 	require.True(t, ok)
 	assert.Equal(t, "content_block_delta", e.Event.Type)
 	assert.Equal(t, 0, e.Event.Index)
@@ -45,7 +46,7 @@ func TestParseEvent_AssistantEvent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "assistant", eventType)
 
-	e, ok := data.(*AssistantEvent)
+	e, ok := data.(*engine.AssistantEvent)
 	require.True(t, ok)
 	require.Len(t, e.Message.Content, 1)
 	assert.Equal(t, "text", e.Message.Content[0].Type)
@@ -59,7 +60,7 @@ func TestParseEvent_ResultSuccess(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "result", eventType)
 
-	e, ok := data.(*ResultEvent)
+	e, ok := data.(*engine.ResultEvent)
 	require.True(t, ok)
 	assert.Equal(t, "success", e.Subtype)
 	assert.Equal(t, "abc-123", e.SessionID)
@@ -74,7 +75,7 @@ func TestParseEvent_ResultError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "result", eventType)
 
-	e, ok := data.(*ResultEvent)
+	e, ok := data.(*engine.ResultEvent)
 	require.True(t, ok)
 	assert.Equal(t, "error", e.Subtype)
 	assert.True(t, e.IsError)
@@ -87,7 +88,7 @@ func TestParseEvent_PermissionRequest(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "permission_request", eventType)
 
-	e, ok := data.(*PermissionRequestEvent)
+	e, ok := data.(*engine.PermissionRequestEvent)
 	require.True(t, ok)
 	assert.Equal(t, "WebFetch", e.Tool.Name)
 	assert.Equal(t, "q-456", e.QuestionID)
@@ -103,7 +104,7 @@ func TestParseEvent_UnknownType(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "rate_limit_event", eventType)
 
-	e, ok := data.(*Event)
+	e, ok := data.(*engine.Event)
 	require.True(t, ok)
 	assert.Equal(t, "rate_limit_event", e.Type)
 }

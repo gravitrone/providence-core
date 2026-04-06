@@ -15,6 +15,12 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine"
 )
 
+func init() {
+	engine.RegisterFactory(engine.EngineTypeClaude, func(cfg engine.EngineConfig) (engine.Engine, error) {
+		return NewSession(cfg.SystemPrompt, cfg.AllowedTools, cfg.Model)
+	})
+}
+
 // Session manages a single headless Claude Code subprocess.
 type Session struct {
 	cmd       *exec.Cmd
@@ -138,7 +144,7 @@ func (s *Session) readLoop() {
 
 		// Track session ID from init event.
 		if err == nil && eventType == "system" {
-			if init, ok := data.(*SystemInitEvent); ok && init.Subtype == "init" {
+			if init, ok := data.(*engine.SystemInitEvent); ok && init.Subtype == "init" {
 				s.mu.Lock()
 				s.sessionID = init.SessionID
 				s.status = engine.StatusRunning
@@ -148,7 +154,7 @@ func (s *Session) readLoop() {
 
 		// Track completion/failure from result event.
 		if err == nil && eventType == "result" {
-			if result, ok := data.(*ResultEvent); ok {
+			if result, ok := data.(*engine.ResultEvent); ok {
 				s.mu.Lock()
 				if result.IsError || result.Subtype == "error" {
 					s.status = engine.StatusFailed
@@ -177,9 +183,9 @@ func (s *Session) readLoop() {
 func (s *Session) Send(text string) error {
 	msg := UserMessage{
 		Type: "user",
-		Message: MessageBody{
+		Message: engine.MessageBody{
 			Role: "user",
-			Content: []ContentPart{
+			Content: []engine.ContentPart{
 				{Type: "text", Text: text},
 			},
 		},

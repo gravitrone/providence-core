@@ -19,7 +19,8 @@ import (
 
 	"github.com/charmbracelet/harmonica"
 	"github.com/gravitrone/providence-core/internal/engine"
-	"github.com/gravitrone/providence-core/internal/engine/claude"
+	_ "github.com/gravitrone/providence-core/internal/engine/claude"  // register claude factory
+	_ "github.com/gravitrone/providence-core/internal/engine/direct"  // register direct factory
 	"github.com/gravitrone/providence-core/internal/ui/components"
 )
 
@@ -66,6 +67,7 @@ var slashCommands = []struct {
 	Desc string
 }{
 	{"/model", "Switch model (Haiku, Sonnet, Opus)"},
+	{"/engine", "Switch engine (claude, direct)"},
 	{"/clear", "Clear chat history"},
 	{"/help", "Show available commands"},
 }
@@ -82,10 +84,11 @@ type AgentTab struct {
 	input         textinput.Model
 	viewport      viewport.Model
 	messages      []ChatMessage
-	session       *claude.Session
+	engine        engine.Engine
+	engineType    engine.EngineType
 	streaming     bool
 	streamBuffer  string
-	pendingPerm   *claude.PermissionRequestEvent
+	pendingPerm   *engine.PermissionRequestEvent
 	mdRenderer    *glamour.TermRenderer
 	follow        bool
 	model         string
@@ -120,7 +123,11 @@ type AgentTab struct {
 }
 
 // NewAgentTab creates and returns a new AgentTab.
-func NewAgentTab() AgentTab {
+// engineType overrides the default engine; pass "" for the default (claude).
+func NewAgentTab(engineType engine.EngineType) AgentTab {
+	if engineType == "" {
+		engineType = engine.EngineTypeClaude
+	}
 	placeholders := []string{
 		"Speak to the Profaned...",
 		"Command the flame...",
@@ -149,6 +156,7 @@ func NewAgentTab() AgentTab {
 		follow:      true,
 		mdRenderer:  mr,
 		queueCursor: -1,
+		engineType:  engineType,
 	}
 }
 
@@ -243,8 +251,8 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 		}
 		return at, nil
 
-	case sessionCreatedMsg:
-		cmd := at.handleSessionCreated(msg)
+	case engineCreatedMsg:
+		cmd := at.handleEngineCreated(msg)
 		return at, cmd
 	}
 
@@ -275,8 +283,8 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			if optionID == "" && len(perm.Options) > 0 {
 				optionID = perm.Options[0].ID
 			}
-			if at.session != nil && optionID != "" {
-				_ = at.session.RespondPermission(perm.QuestionID, optionID)
+			if at.engine != nil && optionID != "" {
+				_ = at.engine.RespondPermission(perm.QuestionID, optionID)
 			}
 			// Update the permission message status to success
 			at.updateLastPermissionStatus("success")
@@ -297,8 +305,8 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			if optionID == "" && len(perm.Options) > 1 {
 				optionID = perm.Options[len(perm.Options)-1].ID
 			}
-			if at.session != nil && optionID != "" {
-				_ = at.session.RespondPermission(perm.QuestionID, optionID)
+			if at.engine != nil && optionID != "" {
+				_ = at.engine.RespondPermission(perm.QuestionID, optionID)
 			}
 			at.updateLastPermissionStatus("cancelled")
 			at.refreshViewport()
@@ -415,12 +423,12 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		at.refreshViewport()
 
 		// Create session on first use.
-		if at.session == nil {
-			return at, tea.Batch(createSessionAndSend(text, at.model), spinnerTick())
+		if at.engine == nil {
+			return at, tea.Batch(createEngineAndSend(text, at.model, at.engineType), spinnerTick())
 		}
 
 		// Send to existing session.
-		if err := at.session.Send(text); err != nil {
+		if err := at.engine.Send(text); err != nil {
 			at.addSystemMessage(fmt.Sprintf("send error: %s", err))
 			at.streaming = false
 			at.refreshViewport()
@@ -507,7 +515,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		return at, at.safeWaitForEvent()
 
 	case "stream_event":
-		if se, ok := ev.Data.(*claude.StreamEvent); ok {
+		if se, ok := ev.Data.(*engine.StreamEvent); ok {
 			if se.Event.Delta != nil && se.Event.Delta.Type == "text_delta" {
 				at.streamBuffer += se.Event.Delta.Text
 
@@ -545,7 +553,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		return at, at.safeWaitForEvent()
 
 	case "assistant":
-		if ae, ok := ev.Data.(*claude.AssistantEvent); ok {
+		if ae, ok := ev.Data.(*engine.AssistantEvent); ok {
 			var fullText string
 			for _, part := range ae.Message.Content {
 				switch part.Type {
@@ -582,7 +590,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		return at, at.safeWaitForEvent()
 
 	case "permission_request":
-		if pr, ok := ev.Data.(*claude.PermissionRequestEvent); ok {
+		if pr, ok := ev.Data.(*engine.PermissionRequestEvent); ok {
 			at.pendingPerm = pr
 			toolName := pr.Tool.Name
 			toolArgs := formatToolInput(pr.Tool.Input)
@@ -606,7 +614,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		at.spinnerVerb = ""
 		at.visualizing = false
 		at.messagesDirty = true
-		if re, ok := ev.Data.(*claude.ResultEvent); ok {
+		if re, ok := ev.Data.(*engine.ResultEvent); ok {
 			if re.IsError {
 				at.addSystemMessage(fmt.Sprintf("Error: %s", re.Result))
 			}
@@ -634,7 +642,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		}
 
 		// Drain queue: steered messages all at once, queued one per turn.
-		if len(at.queue) > 0 && at.session != nil {
+		if len(at.queue) > 0 && at.engine != nil {
 			// Collect all steered messages into one combined message.
 			var steered []string
 			var remaining []QueuedMessage
@@ -673,7 +681,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 			at.spinnerStart = time.Now()
 			at.spinnerLastVerb = time.Now()
 			at.refreshViewport()
-			if err := at.session.Send(text); err != nil {
+			if err := at.engine.Send(text); err != nil {
 				at.addSystemMessage(fmt.Sprintf("send error: %s", err))
 				at.streaming = false
 				at.refreshViewport()
@@ -854,7 +862,7 @@ func (at AgentTab) StatusLine() string {
 	}
 
 	session := "idle"
-	if at.session != nil {
+	if at.engine != nil {
 		if at.streaming {
 			session = "streaming"
 		} else {
@@ -890,10 +898,10 @@ func (at *AgentTab) prepareSend(text string) {
 
 // SendCmd returns the tea.Cmd to send a message (create session or send to existing).
 func (at AgentTab) sendCmd(text string) tea.Cmd {
-	if at.session == nil {
-		return createSessionAndSend(text, at.model)
+	if at.engine == nil {
+		return createEngineAndSend(text, at.model, at.engineType)
 	}
-	if err := at.session.Send(text); err != nil {
+	if err := at.engine.Send(text); err != nil {
 		return nil
 	}
 	return tea.Batch(at.safeWaitForEvent(), spinnerTick())
@@ -1568,9 +1576,28 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				at.addSystemMessage("Model set to: " + resolved + " (unknown - using as-is)")
 			}
 			// Kill existing session so next message creates new one with new model.
-			if at.session != nil {
-				at.session.Close()
-				at.session = nil
+			if at.engine != nil {
+				at.engine.Close()
+				at.engine = nil
+			}
+		}
+		at.refreshViewport()
+		return true, nil
+	case "/engine":
+		if args == "" {
+			at.addSystemMessage("Current engine: " + string(at.engineType) + "\nAvailable: claude, direct")
+		} else {
+			newType := engine.EngineType(strings.TrimSpace(args))
+			switch newType {
+			case engine.EngineTypeClaude, engine.EngineTypeDirect:
+				if at.engine != nil {
+					at.engine.Close()
+					at.engine = nil
+				}
+				at.engineType = newType
+				at.addSystemMessage("Engine set to: " + string(newType))
+			default:
+				at.addSystemMessage("Unknown engine: " + args + " (valid: claude, direct)")
 			}
 		}
 		at.refreshViewport()
@@ -1588,6 +1615,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		help += "| Command | Description |\n"
 		help += "|---------|-------------|\n"
 		help += "| `/model <name>` | Switch model (Haiku, Sonnet, Opus) |\n"
+		help += "| `/engine <type>` | Switch engine (claude, direct) |\n"
 		help += "| `/clear` | Clear chat history |\n"
 		help += "| `/help` | Show available commands |"
 		at.messages = append(at.messages, ChatMessage{
@@ -1626,36 +1654,51 @@ func waitForEvent(events <-chan engine.ParsedEvent) tea.Cmd {
 
 // SafeWaitForEvent returns a waitForEvent cmd only if session is non-nil.
 func (at AgentTab) safeWaitForEvent() tea.Cmd {
-	if at.session == nil {
+	if at.engine == nil {
 		return nil
 	}
-	return waitForEvent(at.session.Events())
+	return waitForEvent(at.engine.Events())
 }
 
-// SessionCreatedMsg carries the new session and the initial prompt to send.
-type sessionCreatedMsg struct {
-	session *claude.Session
-	prompt  string
+// engineCreatedMsg carries the new engine and the initial prompt to send.
+type engineCreatedMsg struct {
+	engine engine.Engine
+	prompt string
 }
 
-// CreateSessionAndSend spawns a new Claude session and sends the first prompt.
-func createSessionAndSend(prompt, model string) tea.Cmd {
+// createEngineAndSend spawns a new engine session and sends the first prompt.
+func createEngineAndSend(prompt, model string, engineType engine.EngineType) tea.Cmd {
 	return func() tea.Msg {
-		systemPrompt := engine.BuildSystemPrompt(nil)
-		sess, err := claude.NewSession(systemPrompt, []string{
-			"Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebSearch", "WebFetch",
-		}, model)
+		// Allowed tools differ by engine type.
+		var allowedTools []string
+		if engineType == engine.EngineTypeClaude {
+			allowedTools = []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebSearch", "WebFetch"}
+		}
+		// Direct engine builds tools into the registry itself, so empty allowed tools.
+
+		wd, _ := os.Getwd()
+
+		cfg := engine.EngineConfig{
+			Type:         engineType,
+			SystemPrompt: engine.BuildSystemPrompt(nil),
+			AllowedTools: allowedTools,
+			Model:        model,
+			APIKey:       os.Getenv("ANTHROPIC_API_KEY"),
+			WorkDir:      wd,
+		}
+
+		eng, err := engine.NewEngine(cfg)
 		if err != nil {
 			return AgentErrorMsg{Err: fmt.Errorf("failed to create session: %w", err)}
 		}
-		return sessionCreatedMsg{session: sess, prompt: prompt}
+		return engineCreatedMsg{engine: eng, prompt: prompt}
 	}
 }
 
-// HandleSessionCreated is called from Update when a sessionCreatedMsg arrives.
-func (at *AgentTab) handleSessionCreated(msg sessionCreatedMsg) tea.Cmd {
-	at.session = msg.session
-	if err := at.session.Send(msg.prompt); err != nil {
+// handleEngineCreated is called from Update when an engineCreatedMsg arrives.
+func (at *AgentTab) handleEngineCreated(msg engineCreatedMsg) tea.Cmd {
+	at.engine = msg.engine
+	if err := at.engine.Send(msg.prompt); err != nil {
 		at.addSystemMessage(fmt.Sprintf("send error: %s", err))
 		at.streaming = false
 		at.refreshViewport()

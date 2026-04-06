@@ -1128,6 +1128,10 @@ func (at AgentTab) renderAssistantMessage(msg ChatMessage) string {
 		rendered, err := at.mdRenderer.Render(content)
 		if err == nil {
 			for placeholder, vizOutput := range vizRendered {
+				// Glamour wraps placeholders in paragraph spacing - strip the extra blank lines.
+				rendered = strings.ReplaceAll(rendered, "\n\n"+placeholder+"\n\n", "\n"+vizOutput+"\n")
+				rendered = strings.ReplaceAll(rendered, "\n\n"+placeholder+"\n", "\n"+vizOutput+"\n")
+				rendered = strings.ReplaceAll(rendered, "\n"+placeholder+"\n\n", "\n"+vizOutput+"\n")
 				rendered = strings.ReplaceAll(rendered, placeholder, vizOutput)
 			}
 			trimmed := strings.TrimSpace(rendered)

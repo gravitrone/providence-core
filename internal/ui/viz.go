@@ -220,8 +220,7 @@ func RenderVisualization(vizJSON string, width int, frame int) string {
 		titleColor := emberBreathe(frame)
 		titleStyle := lipgloss.NewStyle().
 			Foreground(titleColor).
-			Bold(true).
-			Underline(true)
+			Bold(true)
 		b.WriteString(titleStyle.Render(v.Title))
 		b.WriteString("\n")
 
@@ -240,8 +239,7 @@ func RenderVisualization(vizJSON string, width int, frame int) string {
 		}
 	}
 	b.WriteString(body)
-	b.WriteString("\n")
-	return b.String()
+	return strings.TrimRight(b.String(), "\n") + "\n"
 }
 
 // renderBarChart renders horizontal bars with block chars.
@@ -519,26 +517,33 @@ func renderGauge(v VizData, width int) string {
 	filled := int(math.Round(pct * float64(gaugeWidth)))
 	empty := gaugeWidth - filled
 
-	// Gauge gradient: calm ember -> amber -> brimstone red (danger)
-	gaugeGradient := []color.Color{
-		lipgloss.Color("#6b5040"), // low - calm ember
-		lipgloss.Color("#A0704A"), // ~30%
-		lipgloss.Color("#D77757"), // ~50% - flame
-		lipgloss.Color("#FFA600"), // ~70% - amber warning
-		lipgloss.Color("#FF6B35"), // ~85% - hot
-		lipgloss.Color("#FF4444"), // 100% - brimstone red
-	}
-	colorIdx := int(math.Round(pct * float64(len(gaugeGradient)-1)))
-	if colorIdx >= len(gaugeGradient) {
-		colorIdx = len(gaugeGradient) - 1
-	}
+	// Per-character gauge gradient: ember -> amber -> brimstone (left to right).
+	gaugeGradientRamp := lipgloss.Blend1D(max(filled, 1),
+		lipgloss.Color("#6b5040"),
+		lipgloss.Color("#A0704A"),
+		lipgloss.Color("#D77757"),
+		lipgloss.Color("#FFA600"),
+		lipgloss.Color("#FF6B35"),
+		lipgloss.Color("#FF4444"),
+	)
 
-	filledStyle := lipgloss.NewStyle().Foreground(gaugeGradient[colorIdx])
 	emptyStyle := lipgloss.NewStyle().Foreground(ColorBorder)
 	labelStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
 	valueStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
-	bar := "[" + filledStyle.Render(strings.Repeat("█", filled)) + emptyStyle.Render(strings.Repeat("░", empty)) + "]"
+	var barBuf strings.Builder
+	barBuf.WriteString("[")
+	for j := range filled {
+		gIdx := j
+		if gIdx >= len(gaugeGradientRamp) {
+			gIdx = len(gaugeGradientRamp) - 1
+		}
+		style := lipgloss.NewStyle().Foreground(gaugeGradientRamp[gIdx])
+		barBuf.WriteString(style.Render("█"))
+	}
+	barBuf.WriteString(emptyStyle.Render(strings.Repeat("░", empty)))
+	barBuf.WriteString("]")
+	bar := barBuf.String()
 	valStr := fmt.Sprintf("%.0f/%.0f", val, maxVal)
 	if unit != "" {
 		valStr += " " + unit

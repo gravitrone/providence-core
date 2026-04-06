@@ -57,6 +57,41 @@ Available types:
 {"type": "list", "title": "Tasks", "items": ["Build feature", "Write tests", "Deploy"]}
 ` + "```" + `
 
+### Progress Bar
+` + "```" + `providence-viz
+{"type": "progress", "title": "Build Progress", "label": "Compiling", "value": 73, "max": 100}
+` + "```" + `
+
+### Gauge
+` + "```" + `providence-viz
+{"type": "gauge", "title": "Memory Usage", "label": "RAM", "value": 12.4, "max": 16, "unit": "GB"}
+` + "```" + `
+
+### Heatmap
+` + "```" + `providence-viz
+{"type": "heatmap", "title": "Weekly Activity", "headers": ["M","T","W","T","F"], "items": ["W1","W2"], "data": [[3,7,2,8,1],[5,1,9,4,6]]}
+` + "```" + `
+
+### Timeline
+` + "```" + `providence-viz
+{"type": "timeline", "title": "Deploy Log", "events": [{"time": "14:01", "label": "Build started"}, {"time": "14:03", "label": "Tests passed"}, {"time": "14:05", "label": "Deployed to prod"}]}
+` + "```" + `
+
+### Key-Value
+` + "```" + `providence-viz
+{"type": "kv", "title": "System Info", "entries": [{"key": "OS", "value": "Darwin 25.3"}, {"key": "Go", "value": "1.25.8"}, {"key": "CPU", "value": "Apple M4"}]}
+` + "```" + `
+
+### Stat Card
+` + "```" + `providence-viz
+{"type": "stat", "title": "Response Time", "label": "p99 Latency", "value": 142, "unit": "ms", "delta": "▼ 23%"}
+` + "```" + `
+
+### Diff
+` + "```" + `providence-viz
+{"type": "diff", "title": "Config Change", "old_lines": ["timeout: 30s", "retries: 3"], "new_lines": ["timeout: 60s", "retries: 5", "backoff: exponential"]}
+` + "```" + `
+
 Use these when presenting structured data, comparisons, file trees, metrics, or lists. Keep JSON on one line per block. Only use when it genuinely helps - plain text is fine for simple answers.
 `
 }

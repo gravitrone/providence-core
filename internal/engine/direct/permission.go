@@ -23,8 +23,10 @@ func NewPermissionHandler() *PermissionHandler {
 }
 
 // NeedsPermission returns true if the tool requires explicit approval.
-func (p *PermissionHandler) NeedsPermission(tool tools.Tool) bool {
-	return !tool.ReadOnly()
+// Currently auto-approves all tools in direct engine mode - the user launched it themselves.
+// TODO: add configurable permission modes (auto, ask, deny) per tool.
+func (p *PermissionHandler) NeedsPermission(_ tools.Tool) bool {
+	return false
 }
 
 // RequestPermission emits a permission_request ParsedEvent on the events channel

@@ -25,7 +25,8 @@ func (t *permMockTool) Execute(_ context.Context, _ map[string]any) tools.ToolRe
 
 func TestPermissionHandler_NeedsPermission(t *testing.T) {
 	ph := NewPermissionHandler()
-	assert.True(t, ph.NeedsPermission(&permMockTool{readOnly: false}))
+	// Currently auto-approves all tools in direct engine mode.
+	assert.False(t, ph.NeedsPermission(&permMockTool{readOnly: false}))
 	assert.False(t, ph.NeedsPermission(&permMockTool{readOnly: true}))
 }
 

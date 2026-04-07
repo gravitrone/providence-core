@@ -56,7 +56,7 @@ func (g *GrepTool) InputSchema() map[string]any {
 	}
 }
 
-func (g *GrepTool) Execute(_ context.Context, input map[string]any) ToolResult {
+func (g *GrepTool) Execute(ctx context.Context, input map[string]any) ToolResult {
 	pattern := paramString(input, "pattern", "")
 	if pattern == "" {
 		return ToolResult{Content: "pattern is required", IsError: true}
@@ -99,8 +99,10 @@ func (g *GrepTool) Execute(_ context.Context, input map[string]any) ToolResult {
 }
 
 // collectFiles walks a directory, filtering by glob and skipping excluded dirs.
+// Stops after 10k files to prevent hanging on large directories.
 func collectFiles(root, fileGlob string) []string {
 	var files []string
+	count := 0
 	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -110,6 +112,10 @@ func collectFiles(root, fileGlob string) []string {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		count++
+		if count > 10000 {
+			return filepath.SkipAll
 		}
 		if skipFiles[info.Name()] {
 			return nil

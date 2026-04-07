@@ -17,13 +17,13 @@ import (
 
 // codexRequest is the request body for the Codex API.
 type codexRequest struct {
-	Model        string           `json:"model"`
-	Store        bool             `json:"store"`
-	Stream       bool             `json:"stream"`
-	Instructions string           `json:"instructions"`
-	Input        []codexMessage   `json:"input"`
-	ToolChoice   string           `json:"tool_choice,omitempty"`
-	Tools        []codexTool      `json:"tools,omitempty"`
+	Model        string             `json:"model"`
+	Store        bool               `json:"store"`
+	Stream       bool               `json:"stream"`
+	Instructions string             `json:"instructions"`
+	Input        []json.RawMessage  `json:"input"`
+	ToolChoice   string             `json:"tool_choice,omitempty"`
+	Tools        []codexTool        `json:"tools,omitempty"`
 }
 
 type codexMessage struct {
@@ -108,21 +108,46 @@ func buildCodexTools(registry *tools.Registry) []codexTool {
 }
 
 // buildCodexMessages converts the internal message history to codex format.
-func buildCodexMessages(history []codexHistoryEntry) []codexMessage {
-	var msgs []codexMessage
+// Tool results use the function_call_output type with call_id.
+func buildCodexMessages(history []codexHistoryEntry) []json.RawMessage {
+	var msgs []json.RawMessage
 	for _, entry := range history {
-		msgs = append(msgs, codexMessage{
-			Role:    entry.Role,
-			Content: entry.Content,
-		})
+		switch entry.Role {
+		case "function_call":
+			msg := map[string]any{
+				"type":      "function_call",
+				"call_id":   entry.CallID,
+				"name":      entry.FuncName,
+				"arguments": entry.Content,
+			}
+			b, _ := json.Marshal(msg)
+			msgs = append(msgs, b)
+		case "tool":
+			msg := map[string]any{
+				"type":    "function_call_output",
+				"call_id": entry.CallID,
+				"output":  entry.Content,
+			}
+			b, _ := json.Marshal(msg)
+			msgs = append(msgs, b)
+		default:
+			msg := map[string]any{
+				"role":    entry.Role,
+				"content": entry.Content,
+			}
+			b, _ := json.Marshal(msg)
+			msgs = append(msgs, b)
+		}
 	}
 	return msgs
 }
 
-// codexHistoryEntry is a simple role/content pair for codex message history.
+// codexHistoryEntry is a message in the codex conversation history.
 type codexHistoryEntry struct {
-	Role    string
-	Content string
+	Role     string
+	Content  string
+	CallID   string // for function_call and function_call_output
+	FuncName string // for function_call items
 }
 
 // codexAgentLoop runs the agent loop using the Codex API.
@@ -232,6 +257,15 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 				Content: fullText,
 			})
 		}
+		// Add function_call items to history so codex can match call_ids.
+		for _, tc := range toolCalls {
+			e.codexHistory = append(e.codexHistory, codexHistoryEntry{
+				Role:       "function_call",
+				Content:    tc.RawArgs,
+				CallID:     tc.ID,
+				FuncName:   tc.Name,
+			})
+		}
 
 		// If no tool calls, we're done.
 		if len(toolCalls) == 0 {
@@ -250,7 +284,8 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 			if !ok {
 				e.codexHistory = append(e.codexHistory, codexHistoryEntry{
 					Role:    "tool",
-					Content: fmt.Sprintf(`{"call_id":"%s","output":"unknown tool: %s"}`, tc.ID, tc.Name),
+					Content: "unknown tool: " + tc.Name,
+					CallID:  tc.ID,
 				})
 				continue
 			}
@@ -261,7 +296,8 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 				if !approved {
 					e.codexHistory = append(e.codexHistory, codexHistoryEntry{
 						Role:    "tool",
-						Content: fmt.Sprintf(`{"call_id":"%s","output":"permission denied"}`, tc.ID),
+						Content: "permission denied",
+						CallID:  tc.ID,
 					})
 					continue
 				}
@@ -269,24 +305,13 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 
 			result := tool.Execute(ctx, input)
 
-			// Emit tool result in the UI.
-			e.events <- engine.ParsedEvent{
-				Type: "assistant",
-				Data: &engine.AssistantEvent{
-					Type: "assistant",
-					Message: engine.AssistantMsg{
-						Content: []engine.ContentPart{{
-							Type: "text",
-							Text: fmt.Sprintf("[%s] %s", tc.Name, truncate(result.Content, 200)),
-						}},
-					},
-				},
-			}
-
-			// Add tool result to codex history as a function_call_output input message.
+			// Tool results stay internal - not emitted to UI.
+			// The tool call itself is already displayed via the assistant event above.
+			// Add result to codex history for the next API call.
 			e.codexHistory = append(e.codexHistory, codexHistoryEntry{
-				Role:    "user",
-				Content: fmt.Sprintf("[tool:%s result]\n%s", tc.Name, result.Content),
+				Role:    "tool",
+				Content: result.Content,
+				CallID:  tc.ID,
 			})
 		}
 
@@ -457,6 +482,7 @@ func (e *DirectEngine) drainSteeredMessagesCodex() {
 		})
 	}
 }
+
 
 // truncate shortens a string to maxLen, appending "..." if truncated.
 func truncate(s string, maxLen int) string {

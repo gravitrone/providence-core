@@ -49,7 +49,7 @@ func (g *GlobTool) InputSchema() map[string]any {
 	}
 }
 
-func (g *GlobTool) Execute(_ context.Context, input map[string]any) ToolResult {
+func (g *GlobTool) Execute(ctx context.Context, input map[string]any) ToolResult {
 	pattern := paramString(input, "pattern", "")
 	if pattern == "" {
 		return ToolResult{Content: "pattern is required", IsError: true}
@@ -64,7 +64,8 @@ func (g *GlobTool) Execute(_ context.Context, input map[string]any) ToolResult {
 		fullPattern = filepath.Join(root, pattern)
 	}
 
-	// Walk-based glob to support ** patterns
+	// Walk-based glob to support ** patterns.
+	// Hard limits to prevent hanging on large directories.
 	type fileEntry struct {
 		path  string
 		mtime int64
@@ -72,8 +73,17 @@ func (g *GlobTool) Execute(_ context.Context, input map[string]any) ToolResult {
 
 	var results []fileEntry
 	truncated := false
+	filesWalked := 0
+	const maxFilesWalked = 10000 // stop walking after 10k files regardless of matches
 
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		// Respect context cancellation.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		if err != nil {
 			return nil // skip inaccessible files
 		}
@@ -84,6 +94,12 @@ func (g *GlobTool) Execute(_ context.Context, input map[string]any) ToolResult {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+
+		filesWalked++
+		if filesWalked > maxFilesWalked {
+			truncated = true
+			return filepath.SkipAll
 		}
 
 		// skip excluded files

@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/gravitrone/providence-core/internal/engine"
+	"github.com/gravitrone/providence-core/internal/ui/components"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -454,8 +455,9 @@ func TestBatchGrouping_ConsecutiveSameTool(t *testing.T) {
 		})
 	}
 	rendered := at.renderMessages()
-	// Should show batch header with "(5 calls)" and ctrl+o hint.
-	assert.Contains(t, rendered, "5 calls", "should show batch count")
+	// Should show batch header with "Reading 5 files" and ctrl+o hint.
+	plain := components.SanitizeText(rendered)
+	assert.Contains(t, plain, "Reading 5 files", "should show batch count")
 	assert.Contains(t, rendered, "ctrl+o", "should show expand hint")
 	// Individual tool args should appear in the compressed args line.
 	assert.Contains(t, rendered, "file0.go", "should show first file arg")
@@ -495,7 +497,8 @@ func TestBatchGrouping_MixedTools(t *testing.T) {
 		ChatMessage{Role: "tool", ToolName: "Write", ToolArgs: "c.go", ToolStatus: "success", Done: true},
 	)
 	rendered := at.renderMessages()
-	assert.Contains(t, rendered, "2 calls", "first 2 Read tools should be batched")
+	plain := components.SanitizeText(rendered)
+	assert.Contains(t, plain, "Reading 2 files", "first 2 Read tools should be batched")
 	assert.Contains(t, rendered, "Write", "Write tool should appear standalone")
 }
 

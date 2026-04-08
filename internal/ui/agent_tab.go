@@ -969,6 +969,16 @@ func (at *AgentTab) addSystemMessage(content string) {
 	at.addMessage("system", content, true)
 }
 
+// hasBatchTools returns true if there are consecutive same-name tool messages (2+).
+func (at AgentTab) hasBatchTools() bool {
+	for i := 0; i < len(at.messages)-1; i++ {
+		if at.messages[i].Role == "tool" && at.messages[i+1].Role == "tool" && at.messages[i].ToolName == at.messages[i+1].ToolName {
+			return true
+		}
+	}
+	return false
+}
+
 // hasVizMessages returns true if any done message contains viz blocks.
 func (at AgentTab) hasVizMessages() bool {
 	for _, m := range at.messages {
@@ -1005,10 +1015,11 @@ func (at *AgentTab) refreshViewport() {
 		chatContentWidth(at.width),
 	)
 
-	// Messages re-render when dirty, streaming, animating, or viz breathing.
+	// Messages re-render when dirty, streaming, animating, viz breathing, or batch tools animating.
 	// When idle with no changes, use the cached render to avoid flicker.
 	hasViz := at.hasVizMessages()
-	if at.messagesDirty || at.streaming || at.completionActive || hasViz || at.cachedMessages == "" {
+	hasBatch := !at.toolsExpanded && at.hasBatchTools()
+	if at.messagesDirty || at.streaming || at.completionActive || hasViz || hasBatch || at.cachedMessages == "" {
 		at.cachedMessages = at.renderMessages()
 		at.messagesDirty = false
 	}
@@ -1492,7 +1503,33 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, isLatest bool) string {
 	return header + result + "\n"
 }
 
-// renderBatchToolHeader renders a compressed header for a group of consecutive same-name tool calls.
+// batchVerb returns an active-voice verb for a tool name batch.
+func batchVerb(name string, count int) string {
+	unit := "files"
+	switch name {
+	case "Read":
+		return fmt.Sprintf("Reading %d %s", count, unit)
+	case "Write":
+		return fmt.Sprintf("Writing %d %s", count, unit)
+	case "Edit":
+		return fmt.Sprintf("Editing %d %s", count, unit)
+	case "Glob":
+		return fmt.Sprintf("Scanning %d patterns", count)
+	case "Grep":
+		return fmt.Sprintf("Searching %d queries", count)
+	case "Bash":
+		return fmt.Sprintf("Executing %d commands", count)
+	case "WebFetch":
+		return fmt.Sprintf("Fetching %d pages", count)
+	case "WebSearch":
+		return fmt.Sprintf("Searching %d queries", count)
+	default:
+		return fmt.Sprintf("%s x%d", name, count)
+	}
+}
+
+// renderBatchToolHeader renders a "super tool" header for batched consecutive same-name tool calls.
+// Uses a unique pulsating gradient that shifts hotter than regular tools.
 func (at AgentTab) renderBatchToolHeader(name string, count int, msgs []ChatMessage) string {
 	// Collect args from all messages in the batch.
 	var args []string
@@ -1502,26 +1539,44 @@ func (at AgentTab) renderBatchToolHeader(name string, count int, msgs []ChatMess
 		}
 	}
 
-	// Build header: "✧ Read(5 calls)"
-	icon := lipgloss.NewStyle().Foreground(ColorFrozen).Render("✧")
-	nameStyle := lipgloss.NewStyle().Foreground(ColorFrozen).Bold(true)
-	header := icon + " " + nameStyle.Render(name) + ToolArgsStyle.Render(fmt.Sprintf("(%d calls)", count))
+	// Super tool icon: double sparkle with hot gradient color.
+	// Pulsates between holy gold and white-hot, hotter than regular tools.
+	frame := at.flameFrame
+	t := (math.Sin(float64(frame)*0.3) + 1.0) / 2.0
+	r := uint8(0xFF)
+	g := uint8(0xD7 + t*float64(0xFF-0xD7))
+	b := uint8(0x00 + t*float64(0x80-0x00))
+	superColor := lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", r, g, b))
 
-	// Build args list: "  ⎿ file1.go, file2.go, ..."
+	icon := lipgloss.NewStyle().Foreground(superColor).Bold(true).Render("✦✦")
+
+	// Active verb header with per-character gradient shimmer.
+	verb := batchVerb(name, count)
+	var headerBuf strings.Builder
+	runes := []rune(verb)
+	for i, ch := range runes {
+		// Shift gradient across the text, faster than regular shimmer.
+		colorIdx := (frame*3 + i*2) % len(flameShimmerRamp)
+		style := lipgloss.NewStyle().Foreground(flameShimmerRamp[colorIdx]).Bold(true)
+		headerBuf.WriteString(style.Render(string(ch)))
+	}
+
+	// Args list below.
 	argsLine := ""
 	if len(args) > 0 {
 		joined := strings.Join(args, ", ")
 		if len(joined) > 80 {
 			joined = joined[:77] + "..."
 		}
-		connector := lipgloss.NewStyle().Foreground(ColorFrozen).Render("  ⎿ ")
-		argsLine = "\n" + connector + ToolArgsStyle.Render(joined)
+		connector := lipgloss.NewStyle().Foreground(superColor).Render("  ⎿ ")
+		argsStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
+		argsLine = "\n" + connector + argsStyle.Render(joined)
 	}
 
 	// Expand hint.
-	hint := lipgloss.NewStyle().Foreground(ColorMuted).Render("  [ctrl+o: expand]")
+	hint := lipgloss.NewStyle().Foreground(ColorMuted).Render("  [ctrl+o]")
 
-	return header + hint + argsLine + "\n"
+	return icon + " " + headerBuf.String() + hint + argsLine + "\n"
 }
 
 // RenderThinkingMessage renders a thinking indicator.

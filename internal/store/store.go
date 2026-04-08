@@ -1,0 +1,84 @@
+package store
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	_ "modernc.org/sqlite"
+)
+
+// Store wraps a SQLite database for session persistence.
+type Store struct {
+	db *sql.DB
+}
+
+// DefaultDBPath returns ~/.providence/sessions.db.
+func DefaultDBPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".providence", "sessions.db")
+}
+
+// Open creates or opens the SQLite database at dbPath.
+func Open(dbPath string) (*Store, error) {
+	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("create db dir: %w", err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open db: %w", err)
+	}
+	db.Exec("PRAGMA journal_mode=WAL")
+	db.Exec("PRAGMA foreign_keys=ON")
+
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return &Store{db: db}, nil
+}
+
+// Close closes the database connection.
+func (s *Store) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.Close()
+}
+
+func migrate(db *sql.DB) error {
+	schema := `
+	CREATE TABLE IF NOT EXISTS sessions (
+		id TEXT PRIMARY KEY,
+		cwd TEXT NOT NULL,
+		engine_type TEXT,
+		model TEXT,
+		title TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		token_count INTEGER DEFAULT 0,
+		cost_usd REAL DEFAULT 0
+	);
+	CREATE TABLE IF NOT EXISTS messages (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+		role TEXT NOT NULL,
+		content TEXT,
+		tool_name TEXT,
+		tool_args TEXT,
+		tool_status TEXT,
+		tool_body TEXT,
+		tool_output TEXT,
+		image_count INTEGER DEFAULT 0,
+		done BOOLEAN DEFAULT 1,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+	CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd);
+	CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
+	`
+	_, err := db.Exec(schema)
+	return err
+}

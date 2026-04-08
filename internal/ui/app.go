@@ -8,6 +8,7 @@ import (
 
 	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/engine"
+	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 )
 
@@ -21,10 +22,10 @@ type App struct {
 
 // NewApp creates and returns a new App model.
 // engineType sets the initial AI backend; pass "" for the default (claude).
-func NewApp(engineType string, cfg config.Config) App {
+func NewApp(engineType string, cfg config.Config, st *store.Store) App {
 	return App{
 		keys:     DefaultKeyMap(),
-		agentTab: NewAgentTab(engine.EngineType(engineType), cfg),
+		agentTab: NewAgentTab(engine.EngineType(engineType), cfg, st),
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,7 +24,9 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine"
 	_ "github.com/gravitrone/providence-core/internal/engine/claude"  // register claude factory
 	"github.com/gravitrone/providence-core/internal/engine/direct"  // register direct factory + image types
+	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
+	"github.com/google/uuid"
 )
 
 // completionSpring is a critically-damped spring for the completion cool-down animation.
@@ -88,6 +91,8 @@ var slashCommands = []struct {
 	{"/image", "Attach image file (png, jpg, gif, webp)"},
 	{"/theme", "Switch theme (flame, night, auto)"},
 	{"/auth", "Login to OpenAI (Codex OAuth)"},
+	{"/sessions", "List past sessions"},
+	{"/resume", "Resume a past session"},
 	{"/clear", "Clear chat history"},
 	{"/help", "Show available commands"},
 }
@@ -149,11 +154,15 @@ type AgentTab struct {
 
 	// Persisted user config.
 	cfg config.Config
+
+	// Session persistence.
+	store     *store.Store
+	sessionID string
 }
 
 // NewAgentTab creates and returns a new AgentTab.
 // engineType overrides the default engine; pass "" for the default (claude).
-func NewAgentTab(engineType engine.EngineType, cfg config.Config) AgentTab {
+func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Store) AgentTab {
 	if engineType == "" {
 		engineType = engine.EngineTypeClaude
 	}
@@ -190,6 +199,7 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config) AgentTab {
 		engineType:  engineType,
 		model:       model,
 		cfg:         cfg,
+		store:       st,
 	}
 }
 
@@ -460,6 +470,12 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			}
 		}
 		at.input.SetValue("")
+		// Create session on first real send.
+		if at.sessionID == "" && at.store != nil {
+			at.sessionID = uuid.New().String()
+			cwd, _ := os.Getwd()
+			at.store.CreateSession(at.sessionID, cwd, string(at.engineType), at.model)
+		}
 		imgCount := len(at.pendingImages)
 		at.messages = append(at.messages, ChatMessage{
 			Role:       "user",
@@ -468,6 +484,7 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			ImageCount: imgCount,
 		})
 		at.messagesDirty = true
+		at.persistLastMessage()
 		at.streaming = true
 		at.streamBuffer = ""
 		at.follow = true
@@ -529,6 +546,10 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 
 	case "ctrl+l":
 		if !at.streaming {
+			if at.store != nil && at.sessionID != "" {
+				at.store.DeleteSession(at.sessionID)
+			}
+			at.sessionID = ""
 			at.messages = nil
 			at.streamBuffer = ""
 			at.pendingPerm = nil
@@ -642,6 +663,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 						ToolBody:   randomToolFlavor(),
 						Done:       true,
 					})
+					at.persistLastMessage()
 				}
 			}
 			if fullText == "" {
@@ -657,6 +679,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 					Done:    true,
 				})
 			}
+			at.persistLastMessage()
 			at.streamBuffer = ""
 			at.refreshViewport()
 		}
@@ -728,6 +751,22 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 			at.completionVel = 0.0
 		}
 
+		// Set session title from first user message if not yet set.
+		if at.store != nil && at.sessionID != "" {
+			if sess, err := at.store.GetSession(at.sessionID); err == nil && sess != nil && sess.Title == "" {
+				for _, m := range at.messages {
+					if m.Role == "user" && m.Content != "" {
+						title := m.Content
+						if len(title) > 60 {
+							title = title[:60]
+						}
+						at.store.UpdateSessionTitle(at.sessionID, title)
+						break
+					}
+				}
+			}
+		}
+
 		// Drain queue: steered messages all at once, queued one per turn.
 		if len(at.queue) > 0 && at.engine != nil {
 			// Collect all steered messages into one combined message.
@@ -758,6 +797,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 				Content: text,
 				Done:    true,
 			})
+			at.persistLastMessage()
 			at.messagesDirty = true
 			at.streaming = true
 			at.streamBuffer = ""
@@ -1045,6 +1085,19 @@ func (at *AgentTab) addMessage(role, content string, done bool) {
 		Done:    done,
 	})
 	at.messagesDirty = true
+	// Persist done messages to DB.
+	if done {
+		at.persistLastMessage()
+	}
+}
+
+// persistLastMessage saves the last message in at.messages to the DB.
+func (at *AgentTab) persistLastMessage() {
+	if at.store == nil || at.sessionID == "" || len(at.messages) == 0 {
+		return
+	}
+	m := at.messages[len(at.messages)-1]
+	at.store.AddMessage(at.sessionID, m.Role, m.Content, m.ToolName, m.ToolArgs, m.ToolStatus, m.ToolBody, m.ToolOutput, m.ImageCount, m.Done)
 }
 
 func (at *AgentTab) addSystemMessage(content string) {
@@ -2017,7 +2070,134 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		}
 		at.refreshViewport()
 		return true, nil
+	case "/sessions":
+		if at.store == nil {
+			at.addSystemMessage("Session store not available")
+			at.refreshViewport()
+			return true, nil
+		}
+		cwd, _ := os.Getwd()
+		sessions, err := at.store.ListSessions(cwd, 10)
+		if err != nil {
+			at.addSystemMessage("Failed to list sessions: " + err.Error())
+			at.refreshViewport()
+			return true, nil
+		}
+		if len(sessions) == 0 {
+			at.addSystemMessage("No past sessions found")
+			at.refreshViewport()
+			return true, nil
+		}
+		var b strings.Builder
+		b.WriteString("## Past Sessions\n\n")
+		b.WriteString("| # | Title | Date | Messages |\n")
+		b.WriteString("|---|-------|------|----------|\n")
+		for i, s := range sessions {
+			title := s.Title
+			if title == "" {
+				title = "(untitled)"
+			}
+			date := s.UpdatedAt.Format("Jan 02 15:04")
+			b.WriteString(fmt.Sprintf("| %d | %s | %s | %d |\n", i+1, title, date, s.MessageCount))
+		}
+		b.WriteString("\nUse `/resume N` to restore a session")
+		at.messages = append(at.messages, ChatMessage{
+			Role:    "assistant",
+			Content: b.String(),
+			Done:    true,
+		})
+		at.refreshViewport()
+		return true, nil
+
+	case "/resume":
+		if at.store == nil {
+			at.addSystemMessage("Session store not available")
+			at.refreshViewport()
+			return true, nil
+		}
+		cwd, _ := os.Getwd()
+		sessions, err := at.store.ListSessions(cwd, 10)
+		if err != nil {
+			at.addSystemMessage("Failed to list sessions: " + err.Error())
+			at.refreshViewport()
+			return true, nil
+		}
+		if len(sessions) == 0 {
+			at.addSystemMessage("No past sessions found")
+			at.refreshViewport()
+			return true, nil
+		}
+		if args == "" {
+			// Show sessions list with hint.
+			var b strings.Builder
+			b.WriteString("## Past Sessions\n\n")
+			b.WriteString("| # | Title | Date | Messages |\n")
+			b.WriteString("|---|-------|------|----------|\n")
+			for i, s := range sessions {
+				title := s.Title
+				if title == "" {
+					title = "(untitled)"
+				}
+				date := s.UpdatedAt.Format("Jan 02 15:04")
+				b.WriteString(fmt.Sprintf("| %d | %s | %s | %d |\n", i+1, title, date, s.MessageCount))
+			}
+			b.WriteString("\nUse `/resume N` to restore a session")
+			at.messages = append(at.messages, ChatMessage{
+				Role:    "assistant",
+				Content: b.String(),
+				Done:    true,
+			})
+			at.refreshViewport()
+			return true, nil
+		}
+		idx, err := strconv.Atoi(strings.TrimSpace(args))
+		if err != nil || idx < 1 || idx > len(sessions) {
+			at.addSystemMessage(fmt.Sprintf("Invalid session number. Use 1-%d", len(sessions)))
+			at.refreshViewport()
+			return true, nil
+		}
+		sess := sessions[idx-1]
+		msgs, err := at.store.GetMessages(sess.ID)
+		if err != nil {
+			at.addSystemMessage("Failed to load messages: " + err.Error())
+			at.refreshViewport()
+			return true, nil
+		}
+		// Close current engine.
+		if at.engine != nil {
+			at.engine.Close()
+			at.engine = nil
+		}
+		// Populate messages from loaded session.
+		at.messages = nil
+		for _, m := range msgs {
+			at.messages = append(at.messages, ChatMessage{
+				Role:       m.Role,
+				Content:    m.Content,
+				Done:       m.Done,
+				ToolName:   m.ToolName,
+				ToolArgs:   m.ToolArgs,
+				ToolStatus: m.ToolStatus,
+				ToolBody:   m.ToolBody,
+				ToolOutput: m.ToolOutput,
+				ImageCount: m.ImageCount,
+			})
+		}
+		at.sessionID = sess.ID
+		at.messagesDirty = true
+		title := sess.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		at.addSystemMessage("Session restored: " + title)
+		at.refreshViewport()
+		return true, nil
+
 	case "/clear":
+		if at.store != nil && at.sessionID != "" {
+			at.store.DeleteSession(at.sessionID)
+		}
+		at.sessionID = ""
 		at.messages = nil
 		at.streamBuffer = ""
 		at.pendingPerm = nil
@@ -2033,6 +2213,8 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		help += "| `/engine <type>` | Switch engine (claude, direct) |\n"
 		help += "| `/theme <name>` | Switch theme (flame, night, auto) |\n"
 		help += "| `/auth` | Login to OpenAI (Codex OAuth) |\n"
+		help += "| `/sessions` | List past sessions |\n"
+		help += "| `/resume N` | Resume a past session |\n"
 		help += "| `/clear` | Clear chat history |\n"
 		help += "| `/help` | Show available commands |"
 		at.messages = append(at.messages, ChatMessage{

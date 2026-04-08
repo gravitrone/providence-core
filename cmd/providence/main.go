@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gravitrone/providence-core/internal/config"
+	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui"
 )
 
@@ -85,7 +86,14 @@ func runTUI(engineType string, cfg config.Config) error {
 		fmt.Println(ui.RenderBanner())
 		return nil
 	}
-	app := ui.NewApp(engineType, cfg)
+	st, err := store.Open(store.DefaultDBPath())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: session db: %v\n", err)
+	}
+	if st != nil {
+		defer st.Close()
+	}
+	app := ui.NewApp(engineType, cfg, st)
 	if err := runBubbleTUI(app); err != nil {
 		return fmt.Errorf("tui error: %w", err)
 	}

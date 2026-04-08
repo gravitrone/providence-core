@@ -1122,6 +1122,10 @@ func (at AgentTab) renderMessages() string {
 		if msg.Role == "assistant" && strings.TrimSpace(msg.Content) == "" && msg.Done {
 			continue
 		}
+		// Skip batched tool messages (handled by batch header).
+		if msg.Role == "tool" && batchSkip[i] && !at.toolsExpanded {
+			continue
+		}
 
 		if i > 0 {
 			b.WriteString("\n")
@@ -1140,9 +1144,6 @@ func (at AgentTab) renderMessages() string {
 		case "permission":
 			b.WriteString(at.renderPermissionMessage(msg, contentW))
 		case "tool":
-			if batchSkip[i] && !at.toolsExpanded {
-				continue // skip, batch header handles it
-			}
 			if g, ok := batchStart[i]; ok && !at.toolsExpanded {
 				// Collect messages for this batch by indices.
 				batchMsgs := make([]ChatMessage, len(g.indices))

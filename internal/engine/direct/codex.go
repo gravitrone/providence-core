@@ -305,8 +305,18 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 
 			result := tool.Execute(ctx, input)
 
-			// Tool results stay internal - not emitted to UI.
-			// The tool call itself is already displayed via the assistant event above.
+			// Emit tool_result event so the UI can store the output.
+			e.events <- engine.ParsedEvent{
+				Type: "tool_result",
+				Data: &engine.ToolResultEvent{
+					Type:       "tool_result",
+					ToolCallID: tc.ID,
+					ToolName:   tc.Name,
+					Output:     result.Content,
+					IsError:    result.IsError,
+				},
+			}
+
 			// Add result to codex history for the next API call.
 			e.codexHistory = append(e.codexHistory, codexHistoryEntry{
 				Role:    "tool",

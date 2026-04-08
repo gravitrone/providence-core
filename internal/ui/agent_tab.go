@@ -64,6 +64,8 @@ type ChatMessage struct {
 	ToolBody    string // tool result body
 	ToolResult  string // summary line shown after ⎿
 	ToolPreview string // multi-line file preview content
+	ToolOutput  string // actual tool output content (file content, bash output, etc)
+	Expanded    bool   // whether this tool's result is shown expanded
 }
 
 // --- Agent Tab ---
@@ -128,6 +130,9 @@ type AgentTab struct {
 	// Queued message spring animation state (harmonica-driven hover bounce).
 	queuedBright float64
 	queuedVel    float64
+
+	// Tool expansion: ctrl+o toggles all tool results visible.
+	toolsExpanded bool
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -466,6 +471,12 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		at.input, cmd = at.input.Update(msg)
 		return at, cmd
 
+	case "ctrl+o":
+		at.toolsExpanded = !at.toolsExpanded
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, nil
+
 	case "ctrl+l":
 		if !at.streaming {
 			at.messages = nil
@@ -618,6 +629,19 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 			at.refreshViewport()
 		}
 		return at, nil
+
+	case "tool_result":
+		if tr, ok := ev.Data.(*engine.ToolResultEvent); ok {
+			// Find the last tool message matching this tool name and update its output.
+			for i := len(at.messages) - 1; i >= 0; i-- {
+				if at.messages[i].Role == "tool" && at.messages[i].ToolName == tr.ToolName && at.messages[i].ToolOutput == "" {
+					at.messages[i].ToolOutput = tr.Output
+					at.messagesDirty = true
+					break
+				}
+			}
+		}
+		return at, at.safeWaitForEvent()
 
 	case "result":
 		elapsed := int(time.Since(at.spinnerStart).Seconds())
@@ -841,6 +865,18 @@ func (at AgentTab) Hints() []components.HintItem {
 			{Key: "up", Desc: "select queue"},
 		}
 	}
+	// Show ctrl+o hint when there are tool messages.
+	for _, msg := range at.messages {
+		if msg.Role == "tool" {
+			desc := "expand tools"
+			if at.toolsExpanded {
+				desc = "collapse tools"
+			}
+			return []components.HintItem{
+				{Key: "ctrl+o", Desc: desc},
+			}
+		}
+	}
 	// No hints in idle/streaming - status line handles it.
 	return nil
 }
@@ -1026,6 +1062,40 @@ func (at AgentTab) renderMessages() string {
 		}
 	}
 
+	// Build batch groups of consecutive tool messages with the same ToolName.
+	type toolGroup struct {
+		startIdx int
+		endIdx   int
+		name     string
+		count    int
+	}
+	var groups []toolGroup
+	for i := 0; i < len(at.messages); i++ {
+		if at.messages[i].Role != "tool" {
+			continue
+		}
+		name := at.messages[i].ToolName
+		start := i
+		count := 1
+		for i+1 < len(at.messages) && at.messages[i+1].Role == "tool" && at.messages[i+1].ToolName == name {
+			i++
+			count++
+		}
+		if count >= 2 {
+			groups = append(groups, toolGroup{startIdx: start, endIdx: i, name: name, count: count})
+		}
+	}
+
+	// Create lookup sets for batch rendering.
+	batchStart := make(map[int]toolGroup) // startIdx -> group
+	batchSkip := make(map[int]bool)       // indices to skip (non-first items in batch)
+	for _, g := range groups {
+		batchStart[g.startIdx] = g
+		for j := g.startIdx + 1; j <= g.endIdx; j++ {
+			batchSkip[j] = true
+		}
+	}
+
 	for i, msg := range at.messages {
 		// Skip empty assistant messages (can happen during streaming setup).
 		if msg.Role == "assistant" && strings.TrimSpace(msg.Content) == "" && msg.Done {
@@ -1049,7 +1119,14 @@ func (at AgentTab) renderMessages() string {
 		case "permission":
 			b.WriteString(at.renderPermissionMessage(msg, contentW))
 		case "tool":
-			b.WriteString(at.renderToolMessage(msg, i == lastToolIdx))
+			if batchSkip[i] && !at.toolsExpanded {
+				continue // skip, batch header handles it
+			}
+			if g, ok := batchStart[i]; ok && !at.toolsExpanded {
+				b.WriteString(at.renderBatchToolHeader(g.name, g.count, at.messages[g.startIdx:g.endIdx+1]))
+			} else {
+				b.WriteString(at.renderToolMessage(msg, i == lastToolIdx))
+			}
 		case "thinking":
 			b.WriteString(at.renderThinkingMessage(msg))
 		}
@@ -1395,7 +1472,56 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, isLatest bool) string {
 		result = "\n" + resultPrefix + lipgloss.NewStyle().Foreground(ColorError).Italic(true).Render(msg.ToolBody+"...")
 	}
 
+	// Expandable tool output when at.toolsExpanded is true.
+	if at.toolsExpanded && msg.ToolOutput != "" {
+		outputLines := strings.Split(msg.ToolOutput, "\n")
+		maxLines := 20
+		outputStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+
+		var preview strings.Builder
+		for j, line := range outputLines {
+			if j >= maxLines {
+				preview.WriteString(outputStyle.Render(fmt.Sprintf("  ... +%d more lines", len(outputLines)-maxLines)))
+				break
+			}
+			preview.WriteString(outputStyle.Render("  "+line) + "\n")
+		}
+		result += "\n" + preview.String()
+	}
+
 	return header + result + "\n"
+}
+
+// renderBatchToolHeader renders a compressed header for a group of consecutive same-name tool calls.
+func (at AgentTab) renderBatchToolHeader(name string, count int, msgs []ChatMessage) string {
+	// Collect args from all messages in the batch.
+	var args []string
+	for _, m := range msgs {
+		if m.ToolArgs != "" {
+			args = append(args, m.ToolArgs)
+		}
+	}
+
+	// Build header: "✧ Read(5 calls)"
+	icon := lipgloss.NewStyle().Foreground(ColorFrozen).Render("✧")
+	nameStyle := lipgloss.NewStyle().Foreground(ColorFrozen).Bold(true)
+	header := icon + " " + nameStyle.Render(name) + ToolArgsStyle.Render(fmt.Sprintf("(%d calls)", count))
+
+	// Build args list: "  ⎿ file1.go, file2.go, ..."
+	argsLine := ""
+	if len(args) > 0 {
+		joined := strings.Join(args, ", ")
+		if len(joined) > 80 {
+			joined = joined[:77] + "..."
+		}
+		connector := lipgloss.NewStyle().Foreground(ColorFrozen).Render("  ⎿ ")
+		argsLine = "\n" + connector + ToolArgsStyle.Render(joined)
+	}
+
+	// Expand hint.
+	hint := lipgloss.NewStyle().Foreground(ColorMuted).Render("  [ctrl+o: expand]")
+
+	return header + hint + argsLine + "\n"
 }
 
 // RenderThinkingMessage renders a thinking indicator.

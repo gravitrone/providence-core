@@ -39,3 +39,6 @@ build/
 
 # Go
 vendor/
+
+# Internal docs
+SPEC.md

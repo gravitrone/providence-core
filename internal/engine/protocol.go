@@ -80,3 +80,12 @@ type PermissionOption struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
 }
+
+// ToolResultEvent carries the output of a completed tool execution to the UI.
+type ToolResultEvent struct {
+	Type       string `json:"type"`
+	ToolCallID string `json:"tool_call_id"`
+	ToolName   string `json:"tool_name"`
+	Output     string `json:"output"`
+	IsError    bool   `json:"is_error"`
+}

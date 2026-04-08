@@ -250,9 +250,19 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		}
 		queue.Wait()
 
-		// Collect results, add to history.
+		// Collect results, emit tool_result events, add to history.
 		var resultBlocks []anthropic.ContentBlockParamUnion
 		for _, r := range queue.Results() {
+			e.events <- engine.ParsedEvent{
+				Type: "tool_result",
+				Data: &engine.ToolResultEvent{
+					Type:       "tool_result",
+					ToolCallID: r.ID,
+					ToolName:   r.Name,
+					Output:     r.Result.Content,
+					IsError:    r.Result.IsError,
+				},
+			}
 			resultBlocks = append(resultBlocks, anthropic.NewToolResultBlock(
 				r.ID, r.Result.Content, r.Result.IsError,
 			))

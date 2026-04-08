@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -436,6 +437,136 @@ func TestRenderSelectedMessage(t *testing.T) {
 	assert.Contains(t, rendered, "del: remove")
 }
 
+// --- Batch Tool Display Tests ---
+
+func TestBatchGrouping_ConsecutiveSameTool(t *testing.T) {
+	at := NewAgentTab("")
+	at.width = 120
+	// Add 5 consecutive Read tool messages.
+	for i := 0; i < 5; i++ {
+		at.messages = append(at.messages, ChatMessage{
+			Role:       "tool",
+			ToolName:   "Read",
+			ToolArgs:   fmt.Sprintf("file%d.go", i),
+			ToolStatus: "success",
+			ToolBody:   "read ok",
+			Done:       true,
+		})
+	}
+	rendered := at.renderMessages()
+	// Should show batch header with "(5 calls)" and ctrl+o hint.
+	assert.Contains(t, rendered, "5 calls", "should show batch count")
+	assert.Contains(t, rendered, "ctrl+o", "should show expand hint")
+	// Individual tool args should appear in the compressed args line.
+	assert.Contains(t, rendered, "file0.go", "should show first file arg")
+}
+
+func TestBatchGrouping_NonConsecutiveNotGrouped(t *testing.T) {
+	at := NewAgentTab("")
+	at.width = 120
+	at.messages = append(at.messages,
+		ChatMessage{Role: "tool", ToolName: "Read", ToolArgs: "a.go", ToolStatus: "success", Done: true},
+		ChatMessage{Role: "tool", ToolName: "Write", ToolArgs: "b.go", ToolStatus: "success", Done: true},
+		ChatMessage{Role: "tool", ToolName: "Read", ToolArgs: "c.go", ToolStatus: "success", Done: true},
+	)
+	rendered := at.renderMessages()
+	// No batching should occur - each tool appears individually.
+	assert.NotContains(t, rendered, "calls)", "should not show batch header for non-consecutive tools")
+}
+
+func TestBatchGrouping_SingleToolNotGrouped(t *testing.T) {
+	at := NewAgentTab("")
+	at.width = 120
+	at.messages = append(at.messages,
+		ChatMessage{Role: "tool", ToolName: "Read", ToolArgs: "only.go", ToolStatus: "success", Done: true},
+	)
+	rendered := at.renderMessages()
+	assert.NotContains(t, rendered, "calls)", "single tool should not be batched")
+	assert.Contains(t, rendered, "only.go")
+}
+
+func TestBatchGrouping_MixedTools(t *testing.T) {
+	at := NewAgentTab("")
+	at.width = 120
+	// Read, Read, Write -> first 2 grouped, Write standalone.
+	at.messages = append(at.messages,
+		ChatMessage{Role: "tool", ToolName: "Read", ToolArgs: "a.go", ToolStatus: "success", Done: true},
+		ChatMessage{Role: "tool", ToolName: "Read", ToolArgs: "b.go", ToolStatus: "success", Done: true},
+		ChatMessage{Role: "tool", ToolName: "Write", ToolArgs: "c.go", ToolStatus: "success", Done: true},
+	)
+	rendered := at.renderMessages()
+	assert.Contains(t, rendered, "2 calls", "first 2 Read tools should be batched")
+	assert.Contains(t, rendered, "Write", "Write tool should appear standalone")
+}
+
+func TestBatchGrouping_ExpandedShowsAll(t *testing.T) {
+	at := NewAgentTab("")
+	at.width = 120
+	at.toolsExpanded = true
+	for i := 0; i < 3; i++ {
+		at.messages = append(at.messages, ChatMessage{
+			Role:       "tool",
+			ToolName:   "Read",
+			ToolArgs:   fmt.Sprintf("file%d.go", i),
+			ToolStatus: "success",
+			ToolBody:   "read ok",
+			Done:       true,
+		})
+	}
+	rendered := at.renderMessages()
+	// When expanded, all individual tools should render (no batch header).
+	assert.NotContains(t, rendered, "calls)", "expanded mode should not show batch header")
+	assert.Contains(t, rendered, "file0.go")
+	assert.Contains(t, rendered, "file1.go")
+	assert.Contains(t, rendered, "file2.go")
+}
+
+func TestCtrlOTogglesExpansion(t *testing.T) {
+	at := NewAgentTab("")
+	assert.False(t, at.toolsExpanded)
+
+	at, _ = at.handleKey(keyPress("ctrl+o"))
+	assert.True(t, at.toolsExpanded)
+
+	at, _ = at.handleKey(keyPress("ctrl+o"))
+	assert.False(t, at.toolsExpanded)
+}
+
+func TestHintsShowCtrlOWithToolMessages(t *testing.T) {
+	at := NewAgentTab("")
+	at.messages = append(at.messages, ChatMessage{Role: "tool", ToolName: "Read", Done: true})
+	hints := at.Hints()
+	require.NotEmpty(t, hints)
+	assert.Equal(t, "ctrl+o", hints[0].Key)
+	assert.Equal(t, "expand tools", hints[0].Desc)
+}
+
+func TestHintsShowCollapseWhenExpanded(t *testing.T) {
+	at := NewAgentTab("")
+	at.toolsExpanded = true
+	at.messages = append(at.messages, ChatMessage{Role: "tool", ToolName: "Read", Done: true})
+	hints := at.Hints()
+	require.NotEmpty(t, hints)
+	assert.Equal(t, "collapse tools", hints[0].Desc)
+}
+
+func TestToolOutputShownWhenExpanded(t *testing.T) {
+	at := NewAgentTab("")
+	at.width = 120
+	at.toolsExpanded = true
+	at.messages = append(at.messages, ChatMessage{
+		Role:       "tool",
+		ToolName:   "Read",
+		ToolArgs:   "main.go",
+		ToolStatus: "success",
+		ToolBody:   "read ok",
+		ToolOutput: "package main\n\nfunc main() {}",
+		Done:       true,
+	})
+	rendered := at.renderMessages()
+	assert.Contains(t, rendered, "package main", "expanded tool should show output content")
+}
+
 // keyPress builds a tea.KeyPressMsg for the given key string.
 // Supports: "enter", "escape", "up", "down", "shift+enter", and plain text.
 func keyPress(key string) tea.KeyPressMsg {
@@ -454,6 +585,8 @@ func keyPress(key string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyBackspace}
 	case "delete":
 		return tea.KeyPressMsg{Code: tea.KeyDelete}
+	case "ctrl+o":
+		return tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl}
 	default:
 		return tea.KeyPressMsg{Text: key}
 	}

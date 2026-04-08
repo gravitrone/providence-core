@@ -1991,11 +1991,11 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		switch args {
 		case "flame", "night":
 			ApplyTheme(args)
-			// Recreate glamour renderer with new theme colors.
 			at.mdRenderer, _ = glamour.NewTermRenderer(
 				glamour.WithStyles(providenceGlamourStyle()),
 				glamour.WithWordWrap(chatContentWidth(at.width)-4),
 			)
+			components.ReapplyInputStyles(&at.input)
 			at.messagesDirty = true
 			at.addSystemMessage("Theme set to: " + args)
 		case "auto":
@@ -2009,6 +2009,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				glamour.WithStyles(providenceGlamourStyle()),
 				glamour.WithWordWrap(chatContentWidth(at.width)-4),
 			)
+			components.ReapplyInputStyles(&at.input)
 			at.messagesDirty = true
 			at.addSystemMessage("Theme set to auto (currently: " + name + ")")
 		default:

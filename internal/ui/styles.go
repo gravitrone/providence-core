@@ -294,6 +294,11 @@ func reapplyStyles() {
 		BorderForeground(ColorBorder).
 		Padding(0, 1).
 		MarginRight(1)
+
+	// Update text input / spinner theme colors in components.
+	components.ThemePrimary = lipgloss.Color(ActiveTheme.Secondary)
+	components.ThemeMuted = lipgloss.Color(ActiveTheme.Muted)
+	components.ThemeText = lipgloss.Color(ActiveTheme.Text)
 }
 
 // Divider returns a horizontal line.

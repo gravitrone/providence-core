@@ -10,9 +10,10 @@ import (
 
 // Providence theme colors (flame).
 var (
-	themePrimary = lipgloss.Color("#D77757")
-	themeMuted   = lipgloss.Color("#6b5040")
-	themeText    = lipgloss.Color("#e0d0c0")
+	// Exported so the theme system can update them.
+	ThemePrimary = lipgloss.Color("#D77757")
+	ThemeMuted   = lipgloss.Color("#6b5040")
+	ThemeText    = lipgloss.Color("#e0d0c0")
 	themeBorder  = lipgloss.Color("#3a2a1a")
 )
 
@@ -23,22 +24,34 @@ func NewProvidenceTextInput(placeholder string) textinput.Model {
 	ti.Focus()
 
 	styles := textinput.DefaultDarkStyles()
-	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(themeMuted)
-	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(themePrimary)
-	styles.Focused.Text = lipgloss.NewStyle().Foreground(themeText)
-	styles.Blurred.Placeholder = lipgloss.NewStyle().Foreground(themeMuted)
-	styles.Blurred.Text = lipgloss.NewStyle().Foreground(themeMuted)
-	styles.Cursor.Color = themePrimary
+	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(ThemeMuted)
+	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(ThemePrimary)
+	styles.Focused.Text = lipgloss.NewStyle().Foreground(ThemeText)
+	styles.Blurred.Placeholder = lipgloss.NewStyle().Foreground(ThemeMuted)
+	styles.Blurred.Text = lipgloss.NewStyle().Foreground(ThemeMuted)
+	styles.Cursor.Color = ThemePrimary
 	ti.SetStyles(styles)
 
 	return ti
+}
+
+// ReapplyInputStyles updates an existing textinput with current theme colors.
+func ReapplyInputStyles(ti *textinput.Model) {
+	styles := textinput.DefaultDarkStyles()
+	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(ThemeMuted)
+	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(ThemePrimary)
+	styles.Focused.Text = lipgloss.NewStyle().Foreground(ThemeText)
+	styles.Blurred.Placeholder = lipgloss.NewStyle().Foreground(ThemeMuted)
+	styles.Blurred.Text = lipgloss.NewStyle().Foreground(ThemeMuted)
+	styles.Cursor.Color = ThemePrimary
+	ti.SetStyles(styles)
 }
 
 // NewProvidenceSpinner returns a spinner.Model styled to match the providence theme.
 func NewProvidenceSpinner() spinner.Model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(themePrimary)
+	s.Style = lipgloss.NewStyle().Foreground(ThemePrimary)
 	return s
 }
 
@@ -64,7 +77,7 @@ func NewProvidenceTable(cols []table.Column, height int) table.Model {
 		Bold(false)
 	s.Selected = s.Selected.
 		Foreground(lipgloss.Color("#0a0a0a")).
-		Background(themePrimary).
+		Background(ThemePrimary).
 		Bold(false)
 
 	t := table.New(

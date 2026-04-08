@@ -1018,7 +1018,7 @@ func (at *AgentTab) refreshViewport() {
 	// Messages re-render when dirty, streaming, animating, viz breathing, or batch tools animating.
 	// When idle with no changes, use the cached render to avoid flicker.
 	hasViz := at.hasVizMessages()
-	hasBatch := !at.toolsExpanded && at.hasBatchTools()
+	hasBatch := at.streaming && !at.toolsExpanded && at.hasBatchTools()
 	if at.messagesDirty || at.streaming || at.completionActive || hasViz || hasBatch || at.cachedMessages == "" {
 		at.cachedMessages = at.renderMessages()
 		at.messagesDirty = false
@@ -1503,25 +1503,49 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, isLatest bool) string {
 	return header + result + "\n"
 }
 
-// batchVerb returns an active-voice verb for a tool name batch.
-func batchVerb(name string, count int) string {
+// batchVerb returns an active/past-tense verb for a tool name batch.
+func batchVerb(name string, count int, past bool) string {
 	unit := "files"
 	switch name {
 	case "Read":
+		if past {
+			return fmt.Sprintf("Read %d %s", count, unit)
+		}
 		return fmt.Sprintf("Reading %d %s", count, unit)
 	case "Write":
+		if past {
+			return fmt.Sprintf("Wrote %d %s", count, unit)
+		}
 		return fmt.Sprintf("Writing %d %s", count, unit)
 	case "Edit":
+		if past {
+			return fmt.Sprintf("Edited %d %s", count, unit)
+		}
 		return fmt.Sprintf("Editing %d %s", count, unit)
 	case "Glob":
+		if past {
+			return fmt.Sprintf("Scanned %d patterns", count)
+		}
 		return fmt.Sprintf("Scanning %d patterns", count)
 	case "Grep":
+		if past {
+			return fmt.Sprintf("Searched %d queries", count)
+		}
 		return fmt.Sprintf("Searching %d queries", count)
 	case "Bash":
+		if past {
+			return fmt.Sprintf("Executed %d commands", count)
+		}
 		return fmt.Sprintf("Executing %d commands", count)
 	case "WebFetch":
+		if past {
+			return fmt.Sprintf("Fetched %d pages", count)
+		}
 		return fmt.Sprintf("Fetching %d pages", count)
 	case "WebSearch":
+		if past {
+			return fmt.Sprintf("Searched %d queries", count)
+		}
 		return fmt.Sprintf("Searching %d queries", count)
 	default:
 		return fmt.Sprintf("%s x%d", name, count)
@@ -1529,9 +1553,8 @@ func batchVerb(name string, count int) string {
 }
 
 // renderBatchToolHeader renders a "super tool" header for batched consecutive same-name tool calls.
-// Uses a unique pulsating gradient that shifts hotter than regular tools.
+// Animated while streaming (pulsating shimmer), frozen with past tense when done.
 func (at AgentTab) renderBatchToolHeader(name string, count int, msgs []ChatMessage) string {
-	// Collect args from all messages in the batch.
 	var args []string
 	for _, m := range msgs {
 		if m.ToolArgs != "" {
@@ -1539,8 +1562,30 @@ func (at AgentTab) renderBatchToolHeader(name string, count int, msgs []ChatMess
 		}
 	}
 
-	// Super tool icon: double sparkle with hot gradient color.
-	// Pulsates between holy gold and white-hot, hotter than regular tools.
+	frozen := !at.streaming
+
+	if frozen {
+		// Static frozen state: past tense, ColorFrozen, no animation.
+		icon := lipgloss.NewStyle().Foreground(ColorFrozen).Bold(true).Render("✧✧")
+		verb := batchVerb(name, count, true)
+		verbStyle := lipgloss.NewStyle().Foreground(ColorFrozen).Bold(true)
+
+		argsLine := ""
+		if len(args) > 0 {
+			joined := strings.Join(args, ", ")
+			if len(joined) > 80 {
+				joined = joined[:77] + "..."
+			}
+			connector := lipgloss.NewStyle().Foreground(ColorFrozen).Render("  ⎿ ")
+			argsStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
+			argsLine = "\n" + connector + argsStyle.Render(joined)
+		}
+
+		hint := lipgloss.NewStyle().Foreground(ColorMuted).Render("  [ctrl+o]")
+		return icon + " " + verbStyle.Render(verb) + hint + argsLine + "\n"
+	}
+
+	// Animated state: active verb with pulsating shimmer.
 	frame := at.flameFrame
 	t := (math.Sin(float64(frame)*0.3) + 1.0) / 2.0
 	r := uint8(0xFF)
@@ -1550,18 +1595,14 @@ func (at AgentTab) renderBatchToolHeader(name string, count int, msgs []ChatMess
 
 	icon := lipgloss.NewStyle().Foreground(superColor).Bold(true).Render("✦✦")
 
-	// Active verb header with per-character gradient shimmer.
-	verb := batchVerb(name, count)
+	verb := batchVerb(name, count, false)
 	var headerBuf strings.Builder
-	runes := []rune(verb)
-	for i, ch := range runes {
-		// Shift gradient across the text, faster than regular shimmer.
+	for i, ch := range []rune(verb) {
 		colorIdx := (frame*3 + i*2) % len(flameShimmerRamp)
 		style := lipgloss.NewStyle().Foreground(flameShimmerRamp[colorIdx]).Bold(true)
 		headerBuf.WriteString(style.Render(string(ch)))
 	}
 
-	// Args list below.
 	argsLine := ""
 	if len(args) > 0 {
 		joined := strings.Join(args, ", ")
@@ -1573,9 +1614,7 @@ func (at AgentTab) renderBatchToolHeader(name string, count int, msgs []ChatMess
 		argsLine = "\n" + connector + argsStyle.Render(joined)
 	}
 
-	// Expand hint.
 	hint := lipgloss.NewStyle().Foreground(ColorMuted).Render("  [ctrl+o]")
-
 	return icon + " " + headerBuf.String() + hint + argsLine + "\n"
 }
 

@@ -457,7 +457,7 @@ func TestBatchGrouping_ConsecutiveSameTool(t *testing.T) {
 	rendered := at.renderMessages()
 	// Should show batch header with "Reading 5 files" and ctrl+o hint.
 	plain := components.SanitizeText(rendered)
-	assert.Contains(t, plain, "Reading 5 files", "should show batch count")
+	assert.Contains(t, plain, "Read 5 files", "should show batch count in past tense")
 	assert.Contains(t, rendered, "ctrl+o", "should show expand hint")
 	// Individual tool args should appear in the compressed args line.
 	assert.Contains(t, rendered, "file0.go", "should show first file arg")
@@ -498,7 +498,7 @@ func TestBatchGrouping_MixedTools(t *testing.T) {
 	)
 	rendered := at.renderMessages()
 	plain := components.SanitizeText(rendered)
-	assert.Contains(t, plain, "Reading 2 files", "first 2 Read tools should be batched")
+	assert.Contains(t, plain, "Read 2 files", "first 2 Read tools should be batched in past tense")
 	assert.Contains(t, rendered, "Write", "Write tool should appear standalone")
 }
 

@@ -19,9 +19,10 @@ import (
 
 	"github.com/charmbracelet/harmonica"
 	"github.com/gravitrone/providence-core/internal/auth"
+	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/engine"
 	_ "github.com/gravitrone/providence-core/internal/engine/claude"  // register claude factory
-	_ "github.com/gravitrone/providence-core/internal/engine/direct"  // register direct factory
+	"github.com/gravitrone/providence-core/internal/engine/direct"  // register direct factory + image types
 	"github.com/gravitrone/providence-core/internal/ui/components"
 )
 
@@ -51,6 +52,12 @@ type authCompleteMsg struct {
 	Message string
 }
 
+// clipboardImageMsg carries image data read from the system clipboard.
+type clipboardImageMsg struct {
+	Data []byte
+	Err  error
+}
+
 // --- Chat Message ---
 
 // ChatMessage represents a single message in the agent chat history.
@@ -65,7 +72,8 @@ type ChatMessage struct {
 	ToolResult  string // summary line shown after ⎿
 	ToolPreview string // multi-line file preview content
 	ToolOutput  string // actual tool output content (file content, bash output, etc)
-	Expanded    bool   // whether this tool's result is shown expanded
+	Expanded   bool // whether this tool's result is shown expanded
+	ImageCount int  // number of images attached to this message
 }
 
 // --- Agent Tab ---
@@ -77,6 +85,8 @@ var slashCommands = []struct {
 }{
 	{"/model", "Switch model (Haiku, Sonnet, Opus, Codex)"},
 	{"/engine", "Switch engine (claude, direct)"},
+	{"/image", "Attach image file (png, jpg, gif, webp)"},
+	{"/theme", "Switch theme (flame, night, auto)"},
 	{"/auth", "Login to OpenAI (Codex OAuth)"},
 	{"/clear", "Clear chat history"},
 	{"/help", "Show available commands"},
@@ -133,11 +143,17 @@ type AgentTab struct {
 
 	// Tool expansion: ctrl+o toggles all tool results visible.
 	toolsExpanded bool
+
+	// Pending image attachments for next message.
+	pendingImages []ImageAttachment
+
+	// Persisted user config.
+	cfg config.Config
 }
 
 // NewAgentTab creates and returns a new AgentTab.
 // engineType overrides the default engine; pass "" for the default (claude).
-func NewAgentTab(engineType engine.EngineType) AgentTab {
+func NewAgentTab(engineType engine.EngineType, cfg config.Config) AgentTab {
 	if engineType == "" {
 		engineType = engine.EngineTypeClaude
 	}
@@ -162,6 +178,8 @@ func NewAgentTab(engineType engine.EngineType) AgentTab {
 		glamour.WithWordWrap(76),
 	)
 
+	model := cfg.Model
+
 	return AgentTab{
 		input:       ti,
 		viewport:    vp,
@@ -170,6 +188,8 @@ func NewAgentTab(engineType engine.EngineType) AgentTab {
 		mdRenderer:  mr,
 		queueCursor: -1,
 		engineType:  engineType,
+		model:       model,
+		cfg:         cfg,
 	}
 }
 
@@ -270,6 +290,23 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 
 	case authCompleteMsg:
 		at.addSystemMessage(msg.Message)
+		at.refreshViewport()
+		return at, nil
+
+	case clipboardImageMsg:
+		if msg.Err != nil {
+			at.addSystemMessage("Clipboard: " + msg.Err.Error())
+			at.refreshViewport()
+			return at, nil
+		}
+		img := ImageAttachment{
+			Name:      fmt.Sprintf("clipboard_%d.png", time.Now().Unix()),
+			MediaType: "image/png",
+			Data:      msg.Data,
+			Size:      int64(len(msg.Data)),
+		}
+		at.pendingImages = append(at.pendingImages, img)
+		at.addSystemMessage(fmt.Sprintf("Image attached: %s (%s)", img.Name, formatSize(img.Size)))
 		at.refreshViewport()
 		return at, nil
 	}
@@ -423,10 +460,12 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			}
 		}
 		at.input.SetValue("")
+		imgCount := len(at.pendingImages)
 		at.messages = append(at.messages, ChatMessage{
-			Role:    "user",
-			Content: text,
-			Done:    true,
+			Role:       "user",
+			Content:    text,
+			Done:       true,
+			ImageCount: imgCount,
 		})
 		at.messagesDirty = true
 		at.streaming = true
@@ -442,8 +481,12 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 
 		// Create session on first use.
 		if at.engine == nil {
+			// Images will be transferred after engine creation via handleEngineCreated.
 			return at, tea.Batch(createEngineAndSend(text, at.model, at.engineType), spinnerTick())
 		}
+
+		// Transfer images to engine before sending.
+		at.transferImagesToEngine()
 
 		// Send to existing session.
 		if err := at.engine.Send(text); err != nil {
@@ -470,6 +513,13 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		var cmd tea.Cmd
 		at.input, cmd = at.input.Update(msg)
 		return at, cmd
+
+	case "ctrl+i":
+		// Paste image from clipboard (macOS only).
+		return at, func() tea.Msg {
+			data, err := readClipboardImage()
+			return clipboardImageMsg{Data: data, Err: err}
+		}
 
 	case "ctrl+o":
 		at.toolsExpanded = !at.toolsExpanded
@@ -930,10 +980,12 @@ func (at AgentTab) StatusLine() string {
 
 // PrepareSend sets up state for sending a message. Call before sendCmd.
 func (at *AgentTab) prepareSend(text string) {
+	imgCount := len(at.pendingImages)
 	at.messages = append(at.messages, ChatMessage{
-		Role:    "user",
-		Content: text,
-		Done:    true,
+		Role:       "user",
+		Content:    text,
+		Done:       true,
+		ImageCount: imgCount,
 	})
 	at.streaming = true
 	at.streamBuffer = ""
@@ -943,6 +995,36 @@ func (at *AgentTab) prepareSend(text string) {
 	at.spinnerStart = time.Now()
 	at.spinnerLastVerb = time.Now()
 	at.refreshViewport()
+}
+
+// transferImagesToEngine moves pending images from the UI to the engine (if supported).
+// Returns the number of images transferred.
+func (at *AgentTab) transferImagesToEngine() int {
+	if len(at.pendingImages) == 0 || at.engine == nil {
+		return 0
+	}
+	type imageSetter interface {
+		SetPendingImages([]direct.ImageData)
+	}
+	if setter, ok := at.engine.(imageSetter); ok {
+		images := make([]direct.ImageData, len(at.pendingImages))
+		for i, img := range at.pendingImages {
+			images[i] = direct.ImageData{
+				MediaType: img.MediaType,
+				Data:      img.Data,
+			}
+		}
+		setter.SetPendingImages(images)
+		n := len(at.pendingImages)
+		at.pendingImages = nil
+		return n
+	}
+	// Engine doesn't support images (e.g. claude headless) - warn and clear.
+	if len(at.pendingImages) > 0 {
+		at.addSystemMessage("Images not supported by this engine, sending text only")
+		at.pendingImages = nil
+	}
+	return 0
 }
 
 // SendCmd returns the tea.Cmd to send a message (create session or send to existing).
@@ -1193,24 +1275,25 @@ func (at AgentTab) renderUserMessage(msg ChatMessage, contentW int, isLatest boo
 			Padding(0, 1)
 	} else {
 		// Frozen: static warm gradient with ColorFrozen, no animation.
+		frozenEdge := lipgloss.Color(darkenHex(ActiveTheme.Primary, 0.4))
 		boxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForegroundBlend(
-				lipgloss.Color("#6b3a1a"),
+				frozenEdge,
 				ColorFrozen,
-				lipgloss.Color("#6b3a1a"),
+				frozenEdge,
 			).
 			Padding(0, 1)
 	}
 
-	textStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#e0d0c0")).Bold(true)
+	textStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
 
 	// ❯ prefix in flame color (animated when streaming, frozen otherwise).
 	var prefixHex string
 	if at.streaming && isLatest {
 		prefixHex = flameColor(at.flameFrame)
 	} else {
-		prefixHex = "#A0704A"
+		prefixHex = ActiveTheme.Frozen
 	}
 	prefix := lipgloss.NewStyle().Foreground(lipgloss.Color(prefixHex)).Bold(true).Render("\u27E9 ")
 
@@ -1220,7 +1303,24 @@ func (at AgentTab) renderUserMessage(msg ChatMessage, contentW int, isLatest boo
 	}
 	text := wordWrap(msg.Content, wrapW)
 
-	return boxStyle.Render(prefix+textStyle.Render(text)) + "\n"
+	// Prepend image labels if this message had images.
+	var imageLabels string
+	if msg.ImageCount > 0 {
+		imgStyle := lipgloss.NewStyle().
+			Foreground(ColorBackground).
+			Background(ColorSecondary).
+			Bold(true).
+			Padding(0, 1)
+		for i := range msg.ImageCount {
+			if i > 0 {
+				imageLabels += " "
+			}
+			imageLabels += imgStyle.Render(fmt.Sprintf("Image #%d", i+1))
+		}
+		imageLabels += "\n"
+	}
+
+	return boxStyle.Render(imageLabels+prefix+textStyle.Render(text)) + "\n"
 }
 
 // RenderAssistantMessage renders assistant text with glamour markdown rendering.
@@ -1360,17 +1460,17 @@ func (at AgentTab) renderQueuedMessages(contentW int) string {
 		fc := lipgloss.Color(flameColor(at.flameFrame))
 
 		var label, hint string
-		var textColor string
+		var textColor color.Color
 		if msg.Steered {
-			textColor = "#FFD700" // Bright gold for steered.
+			textColor = ColorAccent
 			label = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#0a0a0a")).
+				Foreground(ColorBackground).
 				Background(lipgloss.Color(flameColor(at.flameFrame))).
 				Bold(true).
 				Padding(0, 1).
 				Render("Steer")
 			if isSelected {
-				hint = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("#888")).Italic(true).
+				hint = "\n" + lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).
 					Render("  already steered  del: remove")
 			}
 			// Hotter gradient for steered: shift further into bright range.
@@ -1378,9 +1478,9 @@ func (at AgentTab) renderQueuedMessages(contentW int) string {
 			b = flameGradientStops[(offset+3)%len(flameGradientStops)]
 			c = flameGradientStops[(offset+5)%len(flameGradientStops)]
 		} else {
-			textColor = "#FFA600" // Amber for queued.
+			textColor = ColorPrimary
 			label = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#0a0a0a")).
+				Foreground(ColorBackground).
 				Background(lipgloss.Color(flameColor(at.flameFrame))).
 				Bold(true).
 				Padding(0, 1).
@@ -1390,7 +1490,7 @@ func (at AgentTab) renderQueuedMessages(contentW int) string {
 					Render("  enter: steer  del: remove")
 			}
 		}
-		textStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(textColor))
+		textStyle := lipgloss.NewStyle().Foreground(textColor)
 
 		chevron := lipgloss.NewStyle().Foreground(fc).Bold(true).Render("\u27E9")
 		content := label + " " + chevron + " " + textStyle.Render(wrapped) + hint
@@ -1604,10 +1704,8 @@ func (at AgentTab) renderBatchToolHeader(name string, count int, msgs []ChatMess
 	// Animated state: active verb with pulsating shimmer.
 	frame := at.flameFrame
 	t := (math.Sin(float64(frame)*0.3) + 1.0) / 2.0
-	r := uint8(0xFF)
-	g := uint8(0xD7 + t*float64(0xFF-0xD7))
-	b := uint8(0x00 + t*float64(0x80-0x00))
-	superColor := lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", r, g, b))
+	// Blend from accent to lightened accent for pulsing super-tool color.
+	superColor := lipgloss.Color(blendHex(ActiveTheme.Accent, lightenHex(ActiveTheme.Accent, 0.5), t))
 
 	icon := lipgloss.NewStyle().Foreground(superColor).Bold(true).Render("✦✦")
 
@@ -1836,6 +1934,9 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				at.engine.Close()
 				at.engine = nil
 			}
+			// Persist to config.
+			at.cfg.Model = resolved
+			_ = at.cfg.Save()
 		}
 		at.refreshViewport()
 		return true, nil
@@ -1852,6 +1953,9 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				}
 				at.engineType = newType
 				at.addSystemMessage("Engine set to: " + string(newType))
+				// Persist to config.
+				at.cfg.Engine = string(newType)
+				_ = at.cfg.Save()
 			default:
 				at.addSystemMessage("Unknown engine: " + args + " (valid: claude, direct)")
 			}
@@ -1878,6 +1982,40 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				Message: fmt.Sprintf("OpenAI login successful! Account: %s", acct),
 			}
 		}
+	case "/theme":
+		if args == "" {
+			at.addSystemMessage("Current theme: " + currentThemeName)
+			at.refreshViewport()
+			return true, nil
+		}
+		switch args {
+		case "flame", "night":
+			ApplyTheme(args)
+			// Recreate glamour renderer with new theme colors.
+			at.mdRenderer, _ = glamour.NewTermRenderer(
+				glamour.WithStyles(providenceGlamourStyle()),
+				glamour.WithWordWrap(chatContentWidth(at.width)-4),
+			)
+			at.messagesDirty = true
+			at.addSystemMessage("Theme set to: " + args)
+		case "auto":
+			hour := time.Now().Hour()
+			name := "flame"
+			if hour < 6 || hour >= 18 {
+				name = "night"
+			}
+			ApplyTheme(name)
+			at.mdRenderer, _ = glamour.NewTermRenderer(
+				glamour.WithStyles(providenceGlamourStyle()),
+				glamour.WithWordWrap(chatContentWidth(at.width)-4),
+			)
+			at.messagesDirty = true
+			at.addSystemMessage("Theme set to auto (currently: " + name + ")")
+		default:
+			at.addSystemMessage("Unknown theme: " + args + " (valid: flame, night, auto)")
+		}
+		at.refreshViewport()
+		return true, nil
 	case "/clear":
 		at.messages = nil
 		at.streamBuffer = ""
@@ -1892,6 +2030,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		help += "|---------|-------------|\n"
 		help += "| `/model <name>` | Switch model (Haiku, Sonnet, Opus, Codex) |\n"
 		help += "| `/engine <type>` | Switch engine (claude, direct) |\n"
+		help += "| `/theme <name>` | Switch theme (flame, night, auto) |\n"
 		help += "| `/auth` | Login to OpenAI (Codex OAuth) |\n"
 		help += "| `/clear` | Clear chat history |\n"
 		help += "| `/help` | Show available commands |"
@@ -1991,6 +2130,8 @@ func createEngineAndSend(prompt, model string, engineType engine.EngineType) tea
 // handleEngineCreated is called from Update when an engineCreatedMsg arrives.
 func (at *AgentTab) handleEngineCreated(msg engineCreatedMsg) tea.Cmd {
 	at.engine = msg.engine
+	// Transfer any pending images to the newly created engine.
+	at.transferImagesToEngine()
 	if err := at.engine.Send(msg.prompt); err != nil {
 		at.addSystemMessage(fmt.Sprintf("send error: %s", err))
 		at.streaming = false

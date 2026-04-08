@@ -40,6 +40,9 @@ type DirectEngine struct {
 	steered []string
 	steerMu sync.Mutex
 
+	// Pending images to include with the next user message.
+	pendingImages []ImageData
+
 	// Codex mode: use OpenAI Codex API instead of Anthropic.
 	codexMode    bool
 	codexHistory []codexHistoryEntry
@@ -104,6 +107,14 @@ func (e *DirectEngine) SetRegistry(r *tools.Registry) {
 	e.registry = r
 }
 
+// SetPendingImages stores images to include with the next user message.
+// Images are consumed on the next Send call.
+func (e *DirectEngine) SetPendingImages(images []ImageData) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pendingImages = images
+}
+
 // Send sends a user message to the AI and starts the agent loop.
 func (e *DirectEngine) Send(text string) error {
 	e.mu.Lock()
@@ -114,6 +125,9 @@ func (e *DirectEngine) Send(text string) error {
 	e.status = engine.StatusRunning
 	// Reset context for this turn.
 	e.ctx, e.cancel = context.WithCancel(context.Background())
+	// Consume pending images.
+	images := e.pendingImages
+	e.pendingImages = nil
 	e.mu.Unlock()
 
 	if e.codexMode {
@@ -123,7 +137,11 @@ func (e *DirectEngine) Send(text string) error {
 		})
 		go e.codexAgentLoop(e.ctx)
 	} else {
-		e.history.AddUser(text)
+		if len(images) > 0 {
+			e.history.AddUserWithImages(text, images)
+		} else {
+			e.history.AddUser(text)
+		}
 		go e.agentLoop(e.ctx)
 	}
 	return nil

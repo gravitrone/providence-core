@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
+	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/ui"
 )
 
@@ -24,18 +25,49 @@ var engineFlag string
 
 // NewRootCommand builds the root cobra command.
 func newRootCommand() *cobra.Command {
+	cfg := config.Load()
+
+	// Default engine from config, fallback to "claude".
+	engineDefault := "claude"
+	if cfg.Engine != "" {
+		engineDefault = cfg.Engine
+	}
+
 	root := &cobra.Command{
 		Use:   "providence",
 		Short: "The Profaned Core - autonomous AI harness",
 		Long:  "providence: autonomous AI harness - terminal, web, and beyond.",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return runTUI(engineFlag)
+			return runTUI(engineFlag, cfg)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 
-	root.Flags().StringVar(&engineFlag, "engine", "claude", "AI engine backend (claude, direct, openai)")
+	root.Flags().StringVar(&engineFlag, "engine", engineDefault, "AI engine backend (claude, direct, openai)")
+
+	root.RegisterFlagCompletionFunc("engine", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return []string{"claude", "direct"}, cobra.ShellCompDirectiveNoFileComp
+	})
+
+	completionCmd := &cobra.Command{
+		Use:   "completion [bash|zsh|fish]",
+		Short: "Generate shell completion script",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			switch args[0] {
+			case "bash":
+				return root.GenBashCompletion(os.Stdout)
+			case "zsh":
+				return root.GenZshCompletion(os.Stdout)
+			case "fish":
+				return root.GenFishCompletion(os.Stdout, true)
+			default:
+				return fmt.Errorf("unsupported shell: %s", args[0])
+			}
+		},
+	}
+	root.AddCommand(completionCmd)
 
 	return root
 }
@@ -48,12 +80,12 @@ var runBubbleTUI = func(app tea.Model) error {
 }
 
 // RunTUI launches the fullscreen Bubble Tea TUI.
-func runTUI(engineType string) error {
+func runTUI(engineType string, cfg config.Config) error {
 	if !isInteractiveTerminal(os.Stdout) {
 		fmt.Println(ui.RenderBanner())
 		return nil
 	}
-	app := ui.NewApp(engineType)
+	app := ui.NewApp(engineType, cfg)
 	if err := runBubbleTUI(app); err != nil {
 		return fmt.Errorf("tui error: %w", err)
 	}

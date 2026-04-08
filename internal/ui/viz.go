@@ -15,7 +15,6 @@ import (
 )
 
 // vizBlockRe matches ```providence-viz ... ``` fenced code blocks.
-// Captures the JSON content between the fences.
 var vizBlockRe = regexp.MustCompile("(?s)```providence-viz\\s*\n(.*?)```")
 
 // VizData is the universal envelope for all visualization types.
@@ -27,7 +26,6 @@ type VizData struct {
 	Rows    [][]string      `json:"rows,omitempty"`
 	Root    *TreeNode       `json:"root,omitempty"`
 	Items   []string        `json:"items,omitempty"`
-	// Fields for new viz types.
 	Value    json.RawMessage `json:"value,omitempty"`
 	Max      float64         `json:"max,omitempty"`
 	Unit     string          `json:"unit,omitempty"`
@@ -57,7 +55,6 @@ type KVPair struct {
 	Value string `json:"value"`
 }
 
-// vizValue extracts the Value field as float64 (returns 0 if string/missing).
 func (v VizData) vizValueFloat() float64 {
 	if len(v.Value) == 0 {
 		return 0
@@ -69,7 +66,6 @@ func (v VizData) vizValueFloat() float64 {
 	return 0
 }
 
-// vizValueString extracts the Value field as a display string.
 func (v VizData) vizValueString() string {
 	if len(v.Value) == 0 {
 		return "0"
@@ -91,16 +87,12 @@ type TreeNode struct {
 	Children []*TreeNode `json:"children,omitempty"`
 }
 
-// vizTitleStyle renders the visualization title.
+// vizTitleStyle - note: uses dynamic color in RenderVisualization, this is just a base.
 var vizTitleStyle = lipgloss.NewStyle().
-	Foreground(ColorAccent).
 	Bold(true).
 	Underline(true).
 	MarginBottom(1)
 
-// ProcessVizBlocks finds all ```providence-viz blocks in content,
-// renders them, and replaces them with the rendered output.
-// Returns the processed content string.
 func ProcessVizBlocks(content string, width int, frame int) string {
 	return vizBlockRe.ReplaceAllStringFunc(content, func(match string) string {
 		subs := vizBlockRe.FindStringSubmatch(match)
@@ -109,15 +101,12 @@ func ProcessVizBlocks(content string, width int, frame int) string {
 		}
 		rendered := RenderVisualization(strings.TrimSpace(subs[1]), width, frame)
 		if rendered == "" {
-			return match // failed to render, leave the raw block
+			return match
 		}
 		return rendered
 	})
 }
 
-// ExtractAndRenderVizBlocks replaces viz blocks with unique placeholders,
-// renders each viz, and returns the modified content + a map of placeholder -> rendered output.
-// This allows glamour to process the markdown without mangling ANSI codes in viz output.
 func ExtractAndRenderVizBlocks(content string, width int, frame int) (string, map[string]string) {
 	vizMap := make(map[string]string)
 	idx := 0
@@ -141,38 +130,51 @@ func ExtractAndRenderVizBlocks(content string, width int, frame int) (string, ma
 // vizBorderGradient is a precomputed gradient for viz block borders.
 var vizBorderGradient []color.Color
 
-func init() {
-	vizBorderGradient = lipgloss.Blend1D(20,
-		lipgloss.Color("#3a2518"),
-		lipgloss.Color("#6b5040"),
-		lipgloss.Color("#A0704A"),
-		lipgloss.Color("#6b5040"),
-		lipgloss.Color("#3a2518"),
-	)
-}
-
 // vizBarGradient is a precomputed per-character gradient for bar fills.
 var vizBarGradient []color.Color
 
-func init() {
-	vizBarGradient = lipgloss.Blend1D(40,
-		lipgloss.Color("#8B4513"),
-		lipgloss.Color("#D77757"),
-		lipgloss.Color("#FFA600"),
-		lipgloss.Color("#FFD700"),
-		lipgloss.Color("#FFEC80"),
+// sparkBlocks maps normalized values (0-7) to block characters.
+var sparkBlocks = []rune{'\u2581', '\u2582', '\u2583', '\u2584', '\u2585', '\u2586', '\u2587', '\u2588'}
+
+// sparkColors is the gradient for sparkline rendering.
+var sparkColors []color.Color
+
+// recomputeVizGradients rebuilds all viz-related precomputed gradients.
+func recomputeVizGradients() {
+	vizBorderGradient = lipgloss.Blend1D(20,
+		c(ActiveTheme.Border),
+		c(ActiveTheme.Muted),
+		c(ActiveTheme.Frozen),
+		c(ActiveTheme.Muted),
+		c(ActiveTheme.Border),
 	)
+
+	vizBarGradient = lipgloss.Blend1D(40,
+		c(darkenHex(ActiveTheme.Secondary, 0.5)),
+		c(ActiveTheme.Secondary),
+		c(ActiveTheme.Primary),
+		c(ActiveTheme.Accent),
+		c(lightenHex(ActiveTheme.Accent, 0.5)),
+	)
+
+	sparkColors = []color.Color{
+		c(ActiveTheme.Border),
+		c(ActiveTheme.Muted),
+		c(ActiveTheme.Frozen),
+		c(darkenHex(ActiveTheme.Secondary, 0.7)),
+		c(ActiveTheme.Secondary),
+		c(ActiveTheme.Primary),
+		c(ActiveTheme.Accent),
+		c(lightenHex(ActiveTheme.Accent, 0.5)),
+	}
 }
 
-// RenderVisualization parses vizJSON and dispatches to the correct renderer.
-// Returns empty string on any parse/render failure.
 func RenderVisualization(vizJSON string, width int, frame int) string {
 	var v VizData
 	if err := json.Unmarshal([]byte(vizJSON), &v); err != nil {
 		return ""
 	}
 
-	// Clamp width to something reasonable.
 	if width <= 0 {
 		width = 80
 	}
@@ -216,7 +218,6 @@ func RenderVisualization(vizJSON string, width int, frame int) string {
 
 	var b strings.Builder
 	if v.Title != "" {
-		// Title with ember breathing color.
 		titleColor := emberBreathe(frame)
 		titleStyle := lipgloss.NewStyle().
 			Foreground(titleColor).
@@ -224,7 +225,6 @@ func RenderVisualization(vizJSON string, width int, frame int) string {
 		b.WriteString(titleStyle.Render(v.Title))
 		b.WriteString("\n")
 
-		// Gradient divider under title.
 		titleLen := lipgloss.Width(v.Title)
 		if titleLen > 0 {
 			for i := range titleLen {
@@ -233,7 +233,7 @@ func RenderVisualization(vizJSON string, width int, frame int) string {
 					gIdx = len(vizBorderGradient) - 1
 				}
 				style := lipgloss.NewStyle().Foreground(vizBorderGradient[gIdx])
-				b.WriteString(style.Render("─"))
+				b.WriteString(style.Render("\u2500"))
 			}
 			b.WriteString("\n")
 		}
@@ -242,7 +242,6 @@ func RenderVisualization(vizJSON string, width int, frame int) string {
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
 
-// renderBarChart renders horizontal bars with block chars.
 func renderBarChart(v VizData, width int) string {
 	var items []BarItem
 	if err := json.Unmarshal(v.Data, &items); err != nil {
@@ -252,7 +251,6 @@ func renderBarChart(v VizData, width int) string {
 		return ""
 	}
 
-	// Find max value and longest label for alignment.
 	maxVal := 0.0
 	maxLabel := 0
 	for _, item := range items {
@@ -267,10 +265,8 @@ func renderBarChart(v VizData, width int) string {
 		maxVal = 1
 	}
 
-	// Reserve space: label + " " + bar + " " + value
-	// Value display is max ~7 chars (e.g. " 100.0")
 	valueWidth := 7
-	barMaxWidth := width - maxLabel - valueWidth - 3 // padding
+	barMaxWidth := width - maxLabel - valueWidth - 3
 	if barMaxWidth < 10 {
 		barMaxWidth = 10
 	}
@@ -285,7 +281,6 @@ func renderBarChart(v VizData, width int) string {
 			barLen = 1
 		}
 
-		// Per-character gradient: dark ember on left → bright gold on right.
 		var bar strings.Builder
 		for j := range barLen {
 			gIdx := j * len(vizBarGradient) / barLen
@@ -293,7 +288,7 @@ func renderBarChart(v VizData, width int) string {
 				gIdx = len(vizBarGradient) - 1
 			}
 			style := lipgloss.NewStyle().Foreground(vizBarGradient[gIdx])
-			bar.WriteString(style.Render("█"))
+			bar.WriteString(style.Render("\u2588"))
 		}
 
 		label := labelStyle.Render(item.Label)
@@ -304,7 +299,6 @@ func renderBarChart(v VizData, width int) string {
 	return b.String()
 }
 
-// renderTable renders a styled table with rounded borders and flame theme.
 func renderTable(v VizData, width int) string {
 	if len(v.Headers) == 0 && len(v.Rows) == 0 {
 		return ""
@@ -318,7 +312,8 @@ func renderTable(v VizData, width int) string {
 
 	cellStyle := lipgloss.NewStyle().Padding(0, 1)
 	oddStyle := cellStyle.Foreground(ColorText)
-	evenStyle := cellStyle.Foreground(lipgloss.Color("#A0907A")) // warm muted, not as dim as ColorMuted
+	altRowColor := lipgloss.Color(blendHex(ActiveTheme.Text, ActiveTheme.Muted, 0.4))
+	evenStyle := cellStyle.Foreground(altRowColor)
 
 	t := table.New().
 		Border(lipgloss.RoundedBorder()).
@@ -345,22 +340,6 @@ func renderTable(v VizData, width int) string {
 	return t.String()
 }
 
-// sparkBlocks maps normalized values (0-7) to block characters.
-var sparkBlocks = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
-
-// sparkColors is the flame gradient for sparkline rendering.
-var sparkColors = []color.Color{
-	lipgloss.Color("#3a2518"), // low - dark ember
-	lipgloss.Color("#6b5040"), // ember ash
-	lipgloss.Color("#A0704A"), // cooled ember
-	lipgloss.Color("#C45A3C"), // deep flame
-	lipgloss.Color("#D77757"), // flame orange
-	lipgloss.Color("#FFA600"), // profaned amber
-	lipgloss.Color("#FFD700"), // holy gold
-	lipgloss.Color("#FFEC80"), // white-hot peak
-}
-
-// renderSparkline renders an inline sparkline using block characters with flame gradient.
 func renderSparkline(v VizData, _ int) string {
 	var values []float64
 	if err := json.Unmarshal(v.Data, &values); err != nil {
@@ -387,14 +366,12 @@ func renderSparkline(v VizData, _ int) string {
 
 	var b strings.Builder
 	for _, val := range values {
-		// Normalize to 0-7 range for block selection.
 		norm := (val - minVal) / valRange
 		idx := int(math.Round(norm * 7))
 		if idx > 7 {
 			idx = 7
 		}
 
-		// Pick color from flame gradient based on normalized value.
 		colorIdx := int(math.Round(norm * float64(len(sparkColors)-1)))
 		if colorIdx >= len(sparkColors) {
 			colorIdx = len(sparkColors) - 1
@@ -404,14 +381,12 @@ func renderSparkline(v VizData, _ int) string {
 		b.WriteString(style.Render(string(sparkBlocks[idx])))
 	}
 
-	// Add min/max annotation.
 	annotStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	b.WriteString(annotStyle.Render(fmt.Sprintf("  %.0f-%.0f", minVal, maxVal)))
 
 	return b.String()
 }
 
-// renderTree renders a tree visualization using lipgloss/tree.
 func renderTree(v VizData) string {
 	if v.Root == nil {
 		return ""
@@ -431,7 +406,6 @@ func renderTree(v VizData) string {
 	return t.String()
 }
 
-// addTreeChildren recursively adds children to a lipgloss tree.
 func addTreeChildren(t *tree.Tree, children []*TreeNode) {
 	for _, child := range children {
 		if len(child.Children) > 0 {
@@ -444,7 +418,6 @@ func addTreeChildren(t *tree.Tree, children []*TreeNode) {
 	}
 }
 
-// renderProgress renders a percentage progress bar.
 func renderProgress(v VizData, width int) string {
 	maxVal := v.Max
 	if maxVal == 0 {
@@ -463,7 +436,6 @@ func renderProgress(v VizData, width int) string {
 		label = "Progress"
 	}
 
-	// Bar width: total - label - " " - " " - "100%" - padding
 	barWidth := width - len(label) - 10
 	if barWidth < 10 {
 		barWidth = 10
@@ -476,7 +448,6 @@ func renderProgress(v VizData, width int) string {
 	labelStyle := lipgloss.NewStyle().Foreground(ColorText)
 	pctStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
-	// Per-character gradient on filled portion.
 	var barBuf strings.Builder
 	for j := range filled {
 		gIdx := j * len(vizBarGradient) / max(filled, 1)
@@ -484,13 +455,12 @@ func renderProgress(v VizData, width int) string {
 			gIdx = len(vizBarGradient) - 1
 		}
 		style := lipgloss.NewStyle().Foreground(vizBarGradient[gIdx])
-		barBuf.WriteString(style.Render("█"))
+		barBuf.WriteString(style.Render("\u2588"))
 	}
-	bar := barBuf.String() + emptyStyle.Render(strings.Repeat("░", empty))
+	bar := barBuf.String() + emptyStyle.Render(strings.Repeat("\u2591", empty))
 	return labelStyle.Render(label) + " " + bar + " " + pctStyle.Render(fmt.Sprintf("%.0f%%", pct*100)) + "\n"
 }
 
-// renderGauge renders a meter-style gauge for a single value.
 func renderGauge(v VizData, width int) string {
 	maxVal := v.Max
 	if maxVal == 0 {
@@ -508,7 +478,6 @@ func renderGauge(v VizData, width int) string {
 		label = "Value"
 	}
 
-	// Build gauge: [████████░░░░] 75/100 unit
 	gaugeWidth := width/2 - 4
 	if gaugeWidth < 10 {
 		gaugeWidth = 10
@@ -517,14 +486,13 @@ func renderGauge(v VizData, width int) string {
 	filled := int(math.Round(pct * float64(gaugeWidth)))
 	empty := gaugeWidth - filled
 
-	// Per-character gauge gradient: ember -> amber -> brimstone (left to right).
 	gaugeGradientRamp := lipgloss.Blend1D(max(filled, 1),
-		lipgloss.Color("#6b5040"),
-		lipgloss.Color("#A0704A"),
-		lipgloss.Color("#D77757"),
-		lipgloss.Color("#FFA600"),
-		lipgloss.Color("#FF6B35"),
-		lipgloss.Color("#FF4444"),
+		c(ActiveTheme.Muted),
+		c(ActiveTheme.Frozen),
+		c(ActiveTheme.Secondary),
+		c(ActiveTheme.Primary),
+		c(ActiveTheme.Error),
+		c(darkenHex(ActiveTheme.Error, 0.7)),
 	)
 
 	emptyStyle := lipgloss.NewStyle().Foreground(ColorBorder)
@@ -539,9 +507,9 @@ func renderGauge(v VizData, width int) string {
 			gIdx = len(gaugeGradientRamp) - 1
 		}
 		style := lipgloss.NewStyle().Foreground(gaugeGradientRamp[gIdx])
-		barBuf.WriteString(style.Render("█"))
+		barBuf.WriteString(style.Render("\u2588"))
 	}
-	barBuf.WriteString(emptyStyle.Render(strings.Repeat("░", empty)))
+	barBuf.WriteString(emptyStyle.Render(strings.Repeat("\u2591", empty)))
 	barBuf.WriteString("]")
 	bar := barBuf.String()
 	valStr := fmt.Sprintf("%.0f/%.0f", val, maxVal)
@@ -552,9 +520,7 @@ func renderGauge(v VizData, width int) string {
 	return labelStyle.Render(label) + "\n" + bar + " " + valueStyle.Render(valStr) + "\n"
 }
 
-// renderHeatmap renders a grid with color intensity.
 func renderHeatmap(v VizData, _ int) string {
-	// Data is [][]float64 (rows of values)
 	var grid [][]float64
 	if err := json.Unmarshal(v.Data, &grid); err != nil {
 		return ""
@@ -563,7 +529,6 @@ func renderHeatmap(v VizData, _ int) string {
 		return ""
 	}
 
-	// Find min/max across all cells
 	minVal, maxVal := grid[0][0], grid[0][0]
 	for _, row := range grid {
 		for _, val := range row {
@@ -580,18 +545,16 @@ func renderHeatmap(v VizData, _ int) string {
 		valRange = 1
 	}
 
-	// Heatmap gradient: dark ember -> flame -> gold -> white-hot
 	heatColors := []color.Color{
-		lipgloss.Color("#2a1810"),
-		lipgloss.Color("#4c2210"),
-		lipgloss.Color("#6b5040"),
-		lipgloss.Color("#D77757"),
-		lipgloss.Color("#FFA600"),
-		lipgloss.Color("#FFD700"),
-		lipgloss.Color("#FFEC80"),
+		c(darkenHex(ActiveTheme.Border, 0.7)),
+		c(darkenHex(ActiveTheme.Border, 0.5)),
+		c(ActiveTheme.Muted),
+		c(ActiveTheme.Secondary),
+		c(ActiveTheme.Primary),
+		c(ActiveTheme.Accent),
+		c(lightenHex(ActiveTheme.Accent, 0.5)),
 	}
 
-	// Find max row label width for alignment.
 	maxLabelW := 2
 	for i := range grid {
 		label := fmt.Sprintf("%d", i)
@@ -604,7 +567,6 @@ func renderHeatmap(v VizData, _ int) string {
 	}
 
 	var b strings.Builder
-	// Column headers if available
 	if len(v.Headers) > 0 {
 		headerStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 		b.WriteString(strings.Repeat(" ", maxLabelW+1))
@@ -615,7 +577,6 @@ func renderHeatmap(v VizData, _ int) string {
 	}
 
 	for i, row := range grid {
-		// Row label
 		rowLabel := fmt.Sprintf("%d", i)
 		if i < len(v.Items) {
 			rowLabel = v.Items[i]
@@ -630,45 +591,42 @@ func renderHeatmap(v VizData, _ int) string {
 				colorIdx = len(heatColors) - 1
 			}
 			style := lipgloss.NewStyle().Foreground(heatColors[colorIdx])
-			b.WriteString(style.Render("██") + "  ")
+			b.WriteString(style.Render("\u2588\u2588") + "  ")
 		}
 		b.WriteString("\n")
 	}
 	return b.String()
 }
 
-// renderTimeline renders chronological events.
 func renderTimeline(v VizData) string {
 	if len(v.Events) == 0 {
 		return ""
 	}
 
 	timeStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
-	lineStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6b5040")) // ember ash connector
+	lineStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	dotStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
 	textStyle := lipgloss.NewStyle().Foreground(ColorText)
 
 	var b strings.Builder
 	for i, event := range v.Events {
 		b.WriteString(timeStyle.Render(event.Time))
-		b.WriteString(" " + dotStyle.Render("●") + " ")
+		b.WriteString(" " + dotStyle.Render("\u25CF") + " ")
 		b.WriteString(textStyle.Render(event.Label))
 		b.WriteString("\n")
 		if i < len(v.Events)-1 {
 			padding := strings.Repeat(" ", len(event.Time)+1)
-			b.WriteString(padding + lineStyle.Render("│") + "\n")
+			b.WriteString(padding + lineStyle.Render("\u2502") + "\n")
 		}
 	}
 	return b.String()
 }
 
-// renderKV renders styled key-value pairs.
 func renderKV(v VizData) string {
 	if len(v.Entries) == 0 {
 		return ""
 	}
 
-	// Find max key width for alignment
 	maxKey := 0
 	for _, e := range v.Entries {
 		if len(e.Key) > maxKey {
@@ -677,7 +635,7 @@ func renderKV(v VizData) string {
 	}
 
 	keyStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true).Width(maxKey).Align(lipgloss.Right)
-	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6b5040"))
+	sepStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 	valStyle := lipgloss.NewStyle().Foreground(ColorText)
 
 	var b strings.Builder
@@ -690,7 +648,6 @@ func renderKV(v VizData) string {
 	return b.String()
 }
 
-// renderStat renders a big number card with label and optional delta.
 func renderStat(v VizData) string {
 	label := v.Label
 	if label == "" {
@@ -712,10 +669,10 @@ func renderStat(v VizData) string {
 
 	if v.Delta != "" {
 		var deltaColor color.Color
-		if strings.HasPrefix(v.Delta, "+") || strings.HasPrefix(v.Delta, "▲") {
-			deltaColor = lipgloss.Color("#FFD700") // holy gold - positive
-		} else if strings.HasPrefix(v.Delta, "-") || strings.HasPrefix(v.Delta, "▼") {
-			deltaColor = lipgloss.Color("#D77757") // flame orange - negative
+		if strings.HasPrefix(v.Delta, "+") || strings.HasPrefix(v.Delta, "\u25B2") {
+			deltaColor = c(ActiveTheme.Accent)
+		} else if strings.HasPrefix(v.Delta, "-") || strings.HasPrefix(v.Delta, "\u25BC") {
+			deltaColor = c(ActiveTheme.Secondary)
 		} else {
 			deltaColor = ColorMuted
 		}
@@ -725,28 +682,24 @@ func renderStat(v VizData) string {
 	return b.String()
 }
 
-// renderDiff renders a colorized inline diff view.
 func renderDiff(v VizData) string {
 	if len(v.OldLines) == 0 && len(v.NewLines) == 0 {
 		return ""
 	}
 
-	removeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#D77757")) // flame orange for removed
-	addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700"))    // holy gold for added
+	removeStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
+	addStyle := lipgloss.NewStyle().Foreground(ColorAccent)
 	contextStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	var b strings.Builder
 
-	// Show removed lines
 	for _, line := range v.OldLines {
 		b.WriteString(removeStyle.Render("- " + line) + "\n")
 	}
-	// Show added lines
 	for _, line := range v.NewLines {
 		b.WriteString(addStyle.Render("+ " + line) + "\n")
 	}
 
-	// If both exist, show summary
 	if len(v.OldLines) > 0 && len(v.NewLines) > 0 {
 		summary := fmt.Sprintf("%d removed, %d added", len(v.OldLines), len(v.NewLines))
 		b.WriteString(contextStyle.Render(summary) + "\n")
@@ -754,9 +707,7 @@ func renderDiff(v VizData) string {
 	return b.String()
 }
 
-// renderList renders a styled bullet list using lipgloss/list.
 func renderList(v VizData) string {
-	// Try items field first, fall back to data field.
 	items := v.Items
 	if len(items) == 0 {
 		if err := json.Unmarshal(v.Data, &items); err != nil {
@@ -770,7 +721,6 @@ func renderList(v VizData) string {
 	enumStyle := lipgloss.NewStyle().Foreground(ColorSecondary).MarginRight(1)
 	itemStyle := lipgloss.NewStyle().Foreground(ColorText)
 
-	// Convert to []any for list.New.
 	anyItems := make([]any, len(items))
 	for i, item := range items {
 		anyItems[i] = item

@@ -11,25 +11,33 @@ import (
 )
 
 // SpinnerFrames cycles through pulse block patterns at 120ms per frame.
-var spinnerFrames = []rune{'█', '▓', '▒', '░', '▒', '▓'}
+var spinnerFrames = []rune{'\u2588', '\u2593', '\u2592', '\u2591', '\u2592', '\u2593'}
 
-// FlameColors is the Providence flame gradient: subtle warm range, not epileptic.
-var flameColors = []struct{ r, g, b uint8 }{
-	{180, 90, 40},  // warm ember
-	{200, 105, 55}, // mid flame
-	{215, 119, 87}, // #D77757 flame orange
-	{230, 140, 70}, // bright flame
-	{215, 119, 87}, // #D77757 flame orange
-	{200, 105, 55}, // mid flame
+// flameColors is the gradient for spinner color cycling.
+// Recomputed on theme switch.
+var flameColors []struct{ r, g, b uint8 }
+
+// recomputeSpinnerColors rebuilds flameColors from the active theme.
+func recomputeSpinnerColors() {
+	darkR, darkG, darkB := hexToRGB(darkenHex(ActiveTheme.Secondary, 0.55))
+	midR, midG, midB := hexToRGB(ActiveTheme.Secondary)
+	secR, secG, secB := hexToRGB(blendHex(ActiveTheme.Secondary, ActiveTheme.Primary, 0.5))
+	brightR, brightG, brightB := hexToRGB(ActiveTheme.Primary)
+
+	flameColors = []struct{ r, g, b uint8 }{
+		{darkR, darkG, darkB},
+		{secR, secG, secB},
+		{midR, midG, midB},
+		{brightR, brightG, brightB},
+		{midR, midG, midB},
+		{secR, secG, secB},
+	}
 }
 
-// FlameColor returns the current flame color based on a frame counter.
-// Uses sine wave interpolation for smooth breathing effect.
+// flameColor returns the current flame color based on a frame counter.
 func flameColor(frame int) string {
-	// Sine wave oscillation: 0→1→0 over ~2 seconds (16 frames at 120ms).
-	t := (math.Sin(float64(frame)*0.4) + 1.0) / 2.0 // 0.0 to 1.0
+	t := (math.Sin(float64(frame)*0.4) + 1.0) / 2.0
 
-	// Interpolate between dark ember and gold.
 	idx := t * float64(len(flameColors)-1)
 	lo := int(idx)
 	hi := lo + 1
@@ -45,27 +53,24 @@ func flameColor(frame int) string {
 	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
 }
 
-// FlameTickMsg is sent every 80ms to advance the flame animation.
+// flameTickMsg is sent every 80ms to advance the flame animation.
 type flameTickMsg struct{}
 
-// FlameTick returns a Cmd that fires a flameTickMsg after 80ms.
 func flameTick() tea.Cmd {
 	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
 		return flameTickMsg{}
 	})
 }
 
-// FlameBlockFrames simulates fire flickering with varying width blocks.
-var flameBlockFrames = []rune{'▌', '▍', '▎', '▏', '▎', '▍', '▌', '█', '▊', '▋', '▌'}
+// flameBlockFrames simulates fire flickering with varying width blocks.
+var flameBlockFrames = []rune{'\u258C', '\u258D', '\u258E', '\u258F', '\u258E', '\u258D', '\u258C', '\u2588', '\u258A', '\u258B', '\u258C'}
 
-// FlameBlock returns the current flame block character and color for the given frame.
 func flameBlock(frame int) (string, string) {
 	ch := string(flameBlockFrames[frame%len(flameBlockFrames)])
 	color := flameColor(frame)
 	return ch, color
 }
 
-// SpinnerVerbs is the Providence + Calamity themed verb list.
 var spinnerVerbs = []string{
 	"Profaning",
 	"Purifying",
@@ -82,7 +87,6 @@ var spinnerVerbs = []string{
 	"Calamitizing",
 }
 
-// VizVerbs is the Providence + Calamity themed verb list for visualizations.
 var vizVerbs = []string{
 	"Conjuring the flames",
 	"Forging divine sight",
@@ -98,17 +102,14 @@ var vizVerbs = []string{
 	"Scorching reality into form",
 }
 
-// SpinnerTickMsg is sent every 120ms to advance the spinner animation.
 type spinnerTickMsg struct{}
 
-// SpinnerTick returns a Cmd that fires a spinnerTickMsg after 120ms.
 func spinnerTick() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg {
 		return spinnerTickMsg{}
 	})
 }
 
-// RandomVerb picks a random verb from spinnerVerbs, avoiding the current one if possible.
 func randomVerb(current string) string {
 	if len(spinnerVerbs) == 1 {
 		return spinnerVerbs[0]
@@ -121,7 +122,6 @@ func randomVerb(current string) string {
 	}
 }
 
-// RandomVizVerb picks a random viz verb, avoiding the current one.
 func randomVizVerb(current string) string {
 	if len(vizVerbs) == 1 {
 		return vizVerbs[0]
@@ -134,9 +134,6 @@ func randomVizVerb(current string) string {
 	}
 }
 
-// RenderSpinner returns the spinner line string, or "" if not streaming.
-// Uses the original pulse block animation (█▓▒░) for thinking verbs.
-// When visualizing, shows viz verbs with a hotter flame color.
 func (at AgentTab) renderSpinner() string {
 	if !at.streaming {
 		return ""
@@ -147,7 +144,6 @@ func (at AgentTab) renderSpinner() string {
 	timerStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
 	if at.visualizing {
-		// Hotter flame for viz: gold/amber range instead of yellow.
 		vizSpinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(flameColor(at.spinnerFrame))).Bold(true)
 		vizVerbStyle := lipgloss.NewStyle().Foreground(ColorAccent).Italic(true)
 		return "  " + vizSpinnerStyle.Render(frame) + " " +

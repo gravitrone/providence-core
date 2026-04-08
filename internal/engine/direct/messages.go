@@ -1,10 +1,17 @@
 package direct
 
 import (
+	"encoding/base64"
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
+
+// ImageData holds the data needed to include an image in a message.
+type ImageData struct {
+	MediaType string
+	Data      []byte
+}
 
 // ConversationHistory manages the message history for a direct engine conversation.
 // It is safe for concurrent access.
@@ -25,6 +32,22 @@ func (h *ConversationHistory) AddUser(text string) {
 	h.messages = append(h.messages, anthropic.NewUserMessage(
 		anthropic.NewTextBlock(text),
 	))
+}
+
+// AddUserWithImages appends a user message with image content blocks followed by a text block.
+func (h *ConversationHistory) AddUserWithImages(text string, images []ImageData) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var blocks []anthropic.ContentBlockParamUnion
+	for _, img := range images {
+		blocks = append(blocks, anthropic.NewImageBlockBase64(
+			img.MediaType,
+			base64.StdEncoding.EncodeToString(img.Data),
+		))
+	}
+	blocks = append(blocks, anthropic.NewTextBlock(text))
+	h.messages = append(h.messages, anthropic.NewUserMessage(blocks...))
 }
 
 // AddAssistant appends an assistant message (from a completed API response) to the history.

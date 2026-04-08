@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -17,23 +18,31 @@ var bannerLines = []string{
 	"░░░░░        ░░░░░   ░░░░░    ░░░░░░░         ░░░      ░░░░░ ░░░░░░░░░░   ░░░░░░░░░░ ░░░░░    ░░░░░   ░░░░░░░░░  ░░░░░░░░░░ ",
 }
 
-// Gradient from profaned fire top to deep ember bottom.
-var bannerGradient = []string{
-	"#D77757",
-	"#c46a4a",
-	"#b05e3e",
-	"#9c5232",
-	"#884628",
-	"#743a1e",
-	"#602e16",
-	"#4c2210",
+// bannerGradient is a top-to-bottom gradient for the static banner.
+// Recomputed on theme switch.
+var bannerGradient []string
+
+// recomputeBannerGradient rebuilds the static banner gradient from the active theme.
+func recomputeBannerGradient() {
+	steps := 8
+	secR, secG, secB := hexToRGB(ActiveTheme.Secondary)
+	darkHex := darkenHex(ActiveTheme.Secondary, 0.3)
+	darkR, darkG, darkB := hexToRGB(darkHex)
+
+	bannerGradient = make([]string, steps)
+	for i := range steps {
+		t := float64(i) / float64(steps-1)
+		r := uint8(float64(secR) + t*float64(int(darkR)-int(secR)))
+		g := uint8(float64(secG) + t*float64(int(darkG)-int(secG)))
+		b := uint8(float64(secB) + t*float64(int(darkB)-int(secB)))
+		bannerGradient[i] = fmt.Sprintf("#%02x%02x%02x", r, g, b)
+	}
 }
 
-// RenderBanner returns the styled ASCII banner with a flame gradient and underline.
+// RenderBanner returns the styled ASCII banner with a gradient and underline.
 func RenderBanner() string {
 	rendered := "\n"
 
-	// Trim trailing spaces so centering is based on visible content.
 	trimmed := make([]string, len(bannerLines))
 	maxW := 0
 	for i, line := range bannerLines {
@@ -44,12 +53,11 @@ func RenderBanner() string {
 	}
 
 	for i, line := range trimmed {
-		color := bannerGradient[i]
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+		clr := bannerGradient[i]
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color(clr))
 		rendered += style.Render(line) + "\n"
 	}
 
-	// Blank line + subtitle + underline.
 	rendered += "\n"
 	subtitleText := "The Profaned Core"
 	subtitleWidth := lipgloss.Width(subtitleText)
@@ -64,7 +72,7 @@ func RenderBanner() string {
 		Foreground(ColorBorder).
 		Width(maxW).
 		Align(lipgloss.Center)
-	rendered += underlineStyle.Render(strings.Repeat("─", subtitleWidth)) + "\n"
+	rendered += underlineStyle.Render(strings.Repeat("\u2500", subtitleWidth)) + "\n"
 
 	return rendered
 }

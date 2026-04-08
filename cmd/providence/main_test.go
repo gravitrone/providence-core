@@ -21,9 +21,10 @@ func TestRootCommandShortDescription(t *testing.T) {
 	assert.Contains(t, root.Long, "providence")
 }
 
-func TestRootCommandHasNoSubcommands(t *testing.T) {
+func TestRootCommandHasCompletionSubcommand(t *testing.T) {
 	root := newRootCommand()
-	assert.Empty(t, root.Commands(), "root command should have no subcommands")
+	require.Len(t, root.Commands(), 1, "root should have exactly one subcommand")
+	assert.Equal(t, "completion [bash|zsh|fish]", root.Commands()[0].Use)
 }
 
 func TestRootCommandRunsWithoutError(t *testing.T) {

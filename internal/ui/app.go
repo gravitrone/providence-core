@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 )
@@ -20,10 +21,10 @@ type App struct {
 
 // NewApp creates and returns a new App model.
 // engineType sets the initial AI backend; pass "" for the default (claude).
-func NewApp(engineType string) App {
+func NewApp(engineType string, cfg config.Config) App {
 	return App{
 		keys:     DefaultKeyMap(),
-		agentTab: NewAgentTab(engine.EngineType(engineType)),
+		agentTab: NewAgentTab(engine.EngineType(engineType), cfg),
 	}
 }
 

@@ -1073,12 +1073,13 @@ func (at AgentTab) renderMessages() string {
 		}
 	}
 
-	// Build batch groups of consecutive tool messages with the same ToolName.
+	// Build batch groups of same-name tool messages.
+	// Groups tools even if assistant/system messages sit between them,
+	// as long as no user message or different tool name interrupts.
 	type toolGroup struct {
-		startIdx int
-		endIdx   int
-		name     string
-		count    int
+		indices []int // all message indices in this group
+		name    string
+		count   int
 	}
 	var groups []toolGroup
 	for i := 0; i < len(at.messages); i++ {
@@ -1086,24 +1087,33 @@ func (at AgentTab) renderMessages() string {
 			continue
 		}
 		name := at.messages[i].ToolName
-		start := i
-		count := 1
-		for i+1 < len(at.messages) && at.messages[i+1].Role == "tool" && at.messages[i+1].ToolName == name {
-			i++
-			count++
+		indices := []int{i}
+		// Look ahead: skip assistant/system, collect same-name tools.
+		for j := i + 1; j < len(at.messages); j++ {
+			if at.messages[j].Role == "tool" {
+				if at.messages[j].ToolName == name {
+					indices = append(indices, j)
+				} else {
+					break // different tool name, stop
+				}
+			} else if at.messages[j].Role == "user" {
+				break // user message, stop
+			}
+			// assistant/system messages: skip, keep looking
 		}
-		if count >= 2 {
-			groups = append(groups, toolGroup{startIdx: start, endIdx: i, name: name, count: count})
+		if len(indices) >= 2 {
+			groups = append(groups, toolGroup{indices: indices, name: name, count: len(indices)})
+			i = indices[len(indices)-1] // skip past the last tool in this group
 		}
 	}
 
 	// Create lookup sets for batch rendering.
-	batchStart := make(map[int]toolGroup) // startIdx -> group
-	batchSkip := make(map[int]bool)       // indices to skip (non-first items in batch)
+	batchStart := make(map[int]toolGroup) // first tool index -> group
+	batchSkip := make(map[int]bool)       // non-first tool indices to skip
 	for _, g := range groups {
-		batchStart[g.startIdx] = g
-		for j := g.startIdx + 1; j <= g.endIdx; j++ {
-			batchSkip[j] = true
+		batchStart[g.indices[0]] = g
+		for _, idx := range g.indices[1:] {
+			batchSkip[idx] = true
 		}
 	}
 
@@ -1134,7 +1144,12 @@ func (at AgentTab) renderMessages() string {
 				continue // skip, batch header handles it
 			}
 			if g, ok := batchStart[i]; ok && !at.toolsExpanded {
-				b.WriteString(at.renderBatchToolHeader(g.name, g.count, at.messages[g.startIdx:g.endIdx+1]))
+				// Collect messages for this batch by indices.
+				batchMsgs := make([]ChatMessage, len(g.indices))
+				for bi, idx := range g.indices {
+					batchMsgs[bi] = at.messages[idx]
+				}
+				b.WriteString(at.renderBatchToolHeader(g.name, g.count, batchMsgs))
 			} else {
 				b.WriteString(at.renderToolMessage(msg, i == lastToolIdx))
 			}

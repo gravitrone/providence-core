@@ -2,20 +2,21 @@ package components
 
 import "charm.land/lipgloss/v2"
 
+// Exported style vars so the theme system can update them.
 var (
-	hintDescStyle = lipgloss.NewStyle().
+	HintDescStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#6b5040"))
-	keyCapStyle = lipgloss.NewStyle().
+	KeyCapStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#0a0a0a")).
 			Background(lipgloss.Color("#D77757")).
 			Bold(true).
 			Padding(0, 1)
-	segmentStyle = lipgloss.NewStyle().
+	SegmentStyle = lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder()).
 			BorderForeground(lipgloss.Color("#3a2a1a")).
 			Padding(0, 1).
 			MarginRight(1)
-	statusBarBorder = lipgloss.NewStyle()
+	StatusBarBorder = lipgloss.NewStyle()
 )
 
 // HintItem represents a single keybind hint with a key and description.
@@ -37,25 +38,25 @@ func StatusBarFromItems(items []HintItem, width int) string {
 func StatusBar(hints []string, width int) string {
 	segments := make([]string, 0, len(hints))
 	for _, h := range hints {
-		segments = append(segments, segmentStyle.Render(h))
+		segments = append(segments, SegmentStyle.Render(h))
 	}
 	if width <= 0 {
 		content := lipgloss.JoinHorizontal(lipgloss.Top, segments...)
-		return statusBarBorder.Render(content)
+		return StatusBarBorder.Render(content)
 	}
-	available := width - statusBarBorder.GetHorizontalFrameSize()
+	available := width - StatusBarBorder.GetHorizontalFrameSize()
 	if available <= 0 {
 		available = width
 	}
 	clamped := clampStatusSegments(segments, available)
 	content := lipgloss.JoinHorizontal(lipgloss.Top, clamped...)
-	return statusBarBorder.Width(width).Align(lipgloss.Center).Render(content)
+	return StatusBarBorder.Width(width).Align(lipgloss.Center).Render(content)
 }
 
 // Hint formats a single keybind hint.
 func Hint(key, desc string) string {
-	keyText := keyCapStyle.Render(key)
-	return hintDescStyle.Render(desc+" ") + keyText
+	keyText := KeyCapStyle.Render(key)
+	return HintDescStyle.Render(desc+" ") + keyText
 }
 
 func clampStatusSegments(segments []string, width int) []string {
@@ -75,7 +76,7 @@ func clampStatusSegments(segments []string, width int) []string {
 		return out
 	}
 
-	overflow := segmentStyle.Render(hintDescStyle.Render("More ") + keyCapStyle.Render("..."))
+	overflow := SegmentStyle.Render(HintDescStyle.Render("More ") + KeyCapStyle.Render("..."))
 	for len(out) > 0 && statusSegmentsWidth(append(append([]string{}, out...), overflow)) > width {
 		out = out[:len(out)-1]
 	}

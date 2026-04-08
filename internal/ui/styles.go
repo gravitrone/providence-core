@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/gravitrone/providence-core/internal/ui/components"
 )
 
 // --- Theme System (Providence - The Profaned Goddess) ---
@@ -280,6 +281,19 @@ func reapplyStyles() {
 	InputPrefixStyle = lipgloss.NewStyle().
 		Foreground(ColorPrimary).
 		Bold(true)
+
+	// Update component styles (separate package, can't access theme directly).
+	components.HintDescStyle = lipgloss.NewStyle().Foreground(ColorMuted)
+	components.KeyCapStyle = lipgloss.NewStyle().
+		Foreground(ColorBackground).
+		Background(ColorSecondary).
+		Bold(true).
+		Padding(0, 1)
+	components.SegmentStyle = lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(ColorBorder).
+		Padding(0, 1).
+		MarginRight(1)
 }
 
 // Divider returns a horizontal line.

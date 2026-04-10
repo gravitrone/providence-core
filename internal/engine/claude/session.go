@@ -278,3 +278,11 @@ func (s *Session) Status() engine.SessionStatus {
 	defer s.mu.Unlock()
 	return s.status
 }
+
+// RestoreHistory is a no-op for the claude headless backend. The Claude Code
+// CLI manages its own conversation state internally and there is no protocol
+// hook to inject prior turns, so resumed sessions will not share memory with
+// the underlying process. The UI still repopulates its visual history.
+func (s *Session) RestoreHistory(messages []engine.RestoredMessage) error {
+	return nil
+}

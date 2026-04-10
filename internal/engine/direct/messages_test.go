@@ -52,3 +52,13 @@ func TestConversationHistory_EstimateTokensEmpty(t *testing.T) {
 	h := NewConversationHistory()
 	assert.Equal(t, 0, h.EstimateTokens())
 }
+
+func TestConversationHistory_AddAssistantText(t *testing.T) {
+	h := NewConversationHistory()
+	h.AddAssistantText("hi there")
+	msgs := h.Messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, anthropic.MessageParamRoleAssistant, msgs[0].Role)
+	require.Len(t, msgs[0].Content, 1)
+	assert.Equal(t, "hi there", msgs[0].Content[0].OfText.Text)
+}

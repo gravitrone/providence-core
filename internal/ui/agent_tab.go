@@ -298,6 +298,18 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 		cmd := at.handleEngineCreated(msg)
 		return at, cmd
 
+	case engineRestoredMsg:
+		if msg.err != nil {
+			at.addSystemMessage("Resume error: " + msg.err.Error())
+			at.refreshViewport()
+			return at, nil
+		}
+		at.engine = msg.engine
+		at.transferImagesToEngine()
+		// No Send here - engine waits for the next user turn. Start the event
+		// pump anyway so system init / later events are drained.
+		return at, at.safeWaitForEvent()
+
 	case authCompleteMsg:
 		at.addSystemMessage(msg.Message)
 		at.refreshViewport()
@@ -1925,6 +1937,11 @@ var availableModels = []struct {
 	{"gpt-5.2", []string{"gpt5.2"}, "GPT-5.2 via Codex"},
 	{"gpt-5.1-codex-max", []string{"codex-max", "codex-5.1-max"}, "GPT-5.1 Codex Max"},
 	{"gpt-5.1-codex-mini", []string{"codex-5.1", "codex-5.1-mini"}, "GPT-5.1 Codex Mini"},
+	{"anthropic/claude-sonnet-4-5", []string{"or-sonnet"}, "Claude Sonnet via OpenRouter"},
+	{"openai/gpt-5.4", []string{"or-gpt5"}, "GPT-5.4 via OpenRouter"},
+	{"google/gemini-2.5-pro", []string{"or-gemini"}, "Gemini 2.5 Pro via OpenRouter"},
+	{"deepseek/deepseek-chat", []string{"or-deepseek"}, "DeepSeek Chat via OpenRouter (cheap)"},
+	{"meta-llama/llama-3.3-70b-instruct", []string{"or-llama"}, "Llama 3.3 70B via OpenRouter"},
 }
 
 // resolveModelAlias resolves an alias or model name to the full model name.
@@ -2168,8 +2185,11 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			at.engine.Close()
 			at.engine = nil
 		}
-		// Populate messages from loaded session.
+		// Populate UI messages from loaded session and build the restored
+		// engine history in parallel. Only user/assistant text turns are
+		// replayed into the engine - tool calls are lost on restore (MVP).
 		at.messages = nil
+		var restored []engine.RestoredMessage
 		for _, m := range msgs {
 			at.messages = append(at.messages, ChatMessage{
 				Role:       m.Role,
@@ -2182,6 +2202,12 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				ToolOutput: m.ToolOutput,
 				ImageCount: m.ImageCount,
 			})
+			if (m.Role == "user" || m.Role == "assistant") && m.Content != "" {
+				restored = append(restored, engine.RestoredMessage{
+					Role:    m.Role,
+					Content: m.Content,
+				})
+			}
 		}
 		at.sessionID = sess.ID
 		at.messagesDirty = true
@@ -2191,7 +2217,9 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		}
 		at.addSystemMessage("Session restored: " + title)
 		at.refreshViewport()
-		return true, nil
+		// Spin up a fresh engine and rehydrate its history so the model
+		// actually remembers this conversation on the next turn.
+		return true, createEngineAndRestore(restored, at.model, at.engineType)
 
 	case "/clear":
 		if at.store != nil && at.sessionID != "" {
@@ -2265,9 +2293,30 @@ type engineCreatedMsg struct {
 	prompt string
 }
 
+// engineRestoredMsg carries a new engine that has been pre-populated with
+// restored history. Unlike engineCreatedMsg it does not trigger a Send - the
+// engine is simply installed on the tab and waits for the next user turn.
+type engineRestoredMsg struct {
+	engine engine.Engine
+	err    error
+}
+
 // isCodexModel returns true if the model name indicates an OpenAI/Codex model.
+// OpenRouter models (e.g. "openai/gpt-5.4") are routed separately and must
+// NOT match here, otherwise they'd be sent to the Codex endpoint.
 func isCodexModel(model string) bool {
+	if isOpenRouterModel(model) {
+		return false
+	}
 	return strings.HasPrefix(model, "gpt-")
+}
+
+// isOpenRouterModel returns true if the model name is in OpenRouter's
+// namespaced format (e.g. "anthropic/claude-sonnet-4-5"). OpenRouter always
+// uses "<provider>/<model>" slugs, so the presence of "/" is a reliable
+// marker versus Anthropic's "claude-..." and Codex's "gpt-..." naming.
+func isOpenRouterModel(model string) bool {
+	return strings.Contains(model, "/")
 }
 
 // createEngineAndSend spawns a new engine session and sends the first prompt.
@@ -2302,11 +2351,62 @@ func createEngineAndSend(prompt, model string, engineType engine.EngineType) tea
 			}
 		}
 
+		// Detect OpenRouter models ("provider/model" slugs) and configure
+		// the openrouter provider. Key comes from env first, then config.
+		if isOpenRouterModel(model) {
+			cfg.Type = engine.EngineTypeDirect
+			cfg.Provider = engine.ProviderOpenRouter
+			cfg.OpenRouterAPIKey = os.Getenv("OPENROUTER_API_KEY")
+		}
+
 		eng, err := engine.NewEngine(cfg)
 		if err != nil {
 			return AgentErrorMsg{Err: fmt.Errorf("failed to create session: %w", err)}
 		}
 		return engineCreatedMsg{engine: eng, prompt: prompt}
+	}
+}
+
+// createEngineAndRestore spawns a new engine session and immediately
+// populates its history with the supplied restored messages. The engine is
+// left idle and ready for the next Send. Used by /resume so the model
+// actually remembers the prior conversation.
+func createEngineAndRestore(restored []engine.RestoredMessage, model string, engineType engine.EngineType) tea.Cmd {
+	return func() tea.Msg {
+		var allowedTools []string
+		if engineType == engine.EngineTypeClaude {
+			allowedTools = []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebSearch", "WebFetch"}
+		}
+
+		wd, _ := os.Getwd()
+
+		cfg := engine.EngineConfig{
+			Type:         engineType,
+			SystemPrompt: engine.BuildSystemPrompt(nil),
+			AllowedTools: allowedTools,
+			Model:        model,
+			APIKey:       os.Getenv("ANTHROPIC_API_KEY"),
+			WorkDir:      wd,
+		}
+
+		if isCodexModel(model) {
+			cfg.Type = engine.EngineTypeDirect
+			cfg.Provider = "openai"
+			if tokens, err := auth.EnsureValidOpenAITokens(); err == nil {
+				cfg.OpenAIAccessToken = tokens.AccessToken
+				cfg.OpenAIAccountID = tokens.AccountID
+			}
+		}
+
+		eng, err := engine.NewEngine(cfg)
+		if err != nil {
+			return engineRestoredMsg{err: fmt.Errorf("failed to create session: %w", err)}
+		}
+		if err := eng.RestoreHistory(restored); err != nil {
+			eng.Close()
+			return engineRestoredMsg{err: fmt.Errorf("failed to restore history: %w", err)}
+		}
+		return engineRestoredMsg{engine: eng}
 	}
 }
 

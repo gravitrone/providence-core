@@ -10,6 +10,13 @@ const (
 	EngineTypeDirect EngineType = "direct"
 )
 
+// Provider identifiers for use with EngineConfig.Provider.
+const (
+	ProviderAnthropic  = "anthropic"
+	ProviderOpenAI     = "openai"
+	ProviderOpenRouter = "openrouter"
+)
+
 // EngineConfig holds creation parameters for any engine.
 type EngineConfig struct {
 	Type         EngineType
@@ -20,9 +27,20 @@ type EngineConfig struct {
 	WorkDir      string
 
 	// OpenAI/Codex fields - used when Provider is "openai".
-	Provider           string // "anthropic" (default) or "openai"
+	Provider           string // "anthropic" (default), "openai", or "openrouter"
 	OpenAIAccessToken  string
 	OpenAIAccountID    string
+
+	// OpenRouter fields - used when Provider is "openrouter".
+	OpenRouterAPIKey string
+}
+
+// RestoredMessage is a minimal role+content pair used to rehydrate engine
+// history from a persisted session. Tool calls and other block types are not
+// preserved - only plain text user/assistant turns are restored (MVP).
+type RestoredMessage struct {
+	Role    string
+	Content string
 }
 
 // Engine is the interface all AI backends must implement.
@@ -42,6 +60,12 @@ type Engine interface {
 	Close()
 	// Status returns the current engine status.
 	Status() SessionStatus
+	// RestoreHistory replaces the engine's conversation history with the given
+	// messages. Used when resuming a past session so the model has memory of
+	// prior turns. Tool calls and non-text blocks are lost on restore.
+	// Engines that cannot inject history (e.g. claude headless) should
+	// implement this as a no-op.
+	RestoreHistory(messages []RestoredMessage) error
 }
 
 // ParsedEvent is a decoded event from an AI engine.

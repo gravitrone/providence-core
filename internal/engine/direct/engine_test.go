@@ -102,3 +102,46 @@ func TestDirectEngine_RespondPermission(t *testing.T) {
 	err = e.RespondPermission("nonexistent", "allow")
 	assert.NoError(t, err)
 }
+
+func TestDirectEngine_RestoreHistory(t *testing.T) {
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:   engine.EngineTypeDirect,
+		Model:  "claude-sonnet-4-20250514",
+		APIKey: "test-key-not-real",
+	})
+	require.NoError(t, err)
+
+	// Seed some pre-existing history so we can verify the restore wipes it.
+	e.history.AddUser("stale")
+
+	restored := []engine.RestoredMessage{
+		{Role: "user", Content: "first user turn"},
+		{Role: "assistant", Content: "first assistant reply"},
+		{Role: "user", Content: "second user turn"},
+		{Role: "assistant", Content: "second assistant reply"},
+		// Non user/assistant roles must be silently skipped - they do not
+		// map to valid Anthropic API message roles.
+		{Role: "system", Content: "should be skipped"},
+		{Role: "tool", Content: "should be skipped"},
+		{Role: "permission", Content: "should be skipped"},
+	}
+
+	require.NoError(t, e.RestoreHistory(restored))
+
+	msgs := e.history.Messages()
+	require.Len(t, msgs, 4, "only user/assistant messages should survive restore")
+
+	// Spot check roles and content.
+	assert.Equal(t, "first user turn", msgs[0].Content[0].OfText.Text)
+	assert.Equal(t, "first assistant reply", msgs[1].Content[0].OfText.Text)
+	assert.Equal(t, "second user turn", msgs[2].Content[0].OfText.Text)
+	assert.Equal(t, "second assistant reply", msgs[3].Content[0].OfText.Text)
+
+	// Restoring again should replace, not append.
+	require.NoError(t, e.RestoreHistory([]engine.RestoredMessage{
+		{Role: "user", Content: "fresh"},
+	}))
+	msgs = e.history.Messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "fresh", msgs[0].Content[0].OfText.Text)
+}

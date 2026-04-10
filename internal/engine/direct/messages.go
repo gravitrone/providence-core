@@ -57,6 +57,16 @@ func (h *ConversationHistory) AddAssistant(msg anthropic.Message) {
 	h.messages = append(h.messages, msg.ToParam())
 }
 
+// AddAssistantText appends a plain text assistant message (no tool calls).
+// Used when restoring past sessions where only text content is preserved.
+func (h *ConversationHistory) AddAssistantText(text string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.messages = append(h.messages, anthropic.NewAssistantMessage(
+		anthropic.NewTextBlock(text),
+	))
+}
+
 // AddToolResults appends a user message containing tool result blocks.
 func (h *ConversationHistory) AddToolResults(results []anthropic.ContentBlockParamUnion) {
 	h.mu.Lock()

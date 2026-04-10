@@ -8,9 +8,10 @@ import (
 
 // Config holds user preferences persisted to ~/.providence/config.json.
 type Config struct {
-	Engine string `json:"engine,omitempty"` // "claude" or "direct"
-	Model  string `json:"model,omitempty"`  // model alias
-	Theme  string `json:"theme,omitempty"`  // "flame" or "night"
+	Engine           string `json:"engine,omitempty"`             // "claude" or "direct"
+	Model            string `json:"model,omitempty"`              // model alias
+	Theme            string `json:"theme,omitempty"`              // "flame" or "night"
+	OpenRouterAPIKey string `json:"openrouter_api_key,omitempty"` // optional; env OPENROUTER_API_KEY takes precedence
 }
 
 // DefaultPath returns the default config file location.

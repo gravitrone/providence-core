@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -46,14 +47,29 @@ type DirectEngine struct {
 	// Codex mode: use OpenAI Codex API instead of Anthropic.
 	codexMode    bool
 	codexHistory []codexHistoryEntry
+
+	// OpenRouter mode: use OpenRouter OpenAI-compatible API.
+	openrouterMode    bool
+	openrouterAPIKey  string
+	openrouterHistory []openrouterHistoryEntry
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
 func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	isCodex := cfg.Provider == "openai"
+	isOpenRouter := cfg.Provider == "openrouter"
+
+	// Resolve OpenRouter API key: explicit cfg field > env var.
+	openrouterKey := cfg.OpenRouterAPIKey
+	if isOpenRouter && openrouterKey == "" {
+		openrouterKey = os.Getenv("OPENROUTER_API_KEY")
+	}
+	if isOpenRouter && openrouterKey == "" {
+		return nil, fmt.Errorf("openrouter provider requires OPENROUTER_API_KEY env var or OpenRouterAPIKey config")
+	}
 
 	var client anthropic.Client
-	if !isCodex {
+	if !isCodex && !isOpenRouter {
 		opts := []option.RequestOption{}
 		if cfg.APIKey != "" {
 			opts = append(opts, option.WithAPIKey(cfg.APIKey))
@@ -63,9 +79,12 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 
 	model := cfg.Model
 	if model == "" {
-		if isCodex {
+		switch {
+		case isCodex:
 			model = "gpt-5.4"
-		} else {
+		case isOpenRouter:
+			model = "anthropic/claude-sonnet-4-5"
+		default:
 			model = string(anthropic.ModelClaudeSonnet4_20250514)
 		}
 	}
@@ -86,19 +105,21 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &DirectEngine{
-		client:      client,
-		model:       model,
-		system:      cfg.SystemPrompt,
-		events:      make(chan engine.ParsedEvent, 64),
-		history:     NewConversationHistory(),
-		registry:    registry,
-		permissions: NewPermissionHandler(),
-		workDir:     cfg.WorkDir,
-		sessionID:   uuid.New().String(),
-		status:      engine.StatusIdle,
-		ctx:         ctx,
-		cancel:      cancel,
-		codexMode:   isCodex,
+		client:           client,
+		model:            model,
+		system:           cfg.SystemPrompt,
+		events:           make(chan engine.ParsedEvent, 64),
+		history:          NewConversationHistory(),
+		registry:         registry,
+		permissions:      NewPermissionHandler(),
+		workDir:          cfg.WorkDir,
+		sessionID:        uuid.New().String(),
+		status:           engine.StatusIdle,
+		ctx:              ctx,
+		cancel:           cancel,
+		codexMode:        isCodex,
+		openrouterMode:   isOpenRouter,
+		openrouterAPIKey: openrouterKey,
 	}, nil
 }
 
@@ -136,6 +157,12 @@ func (e *DirectEngine) Send(text string) error {
 			Content: text,
 		})
 		go e.codexAgentLoop(e.ctx)
+	} else if e.openrouterMode {
+		e.openrouterHistory = append(e.openrouterHistory, openrouterHistoryEntry{
+			Role:    "user",
+			Content: text,
+		})
+		go e.openrouterAgentLoop(e.ctx)
 	} else {
 		if len(images) > 0 {
 			e.history.AddUserWithImages(text, images)
@@ -186,6 +213,55 @@ func (e *DirectEngine) Status() engine.SessionStatus {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.status
+}
+
+// RestoreHistory replaces the engine's conversation history with the given
+// restored messages. Intended for resuming a past session so the model has
+// memory of prior turns. Tool calls and other non-text blocks are lost on
+// restore (MVP limitation) - only plain text user/assistant turns survive.
+// Non user/assistant roles (tool, system, permission) are skipped because
+// they do not map to valid API message roles.
+func (e *DirectEngine) RestoreHistory(messages []engine.RestoredMessage) error {
+	e.history = NewConversationHistory()
+	// Also reset codex/openrouter histories so all modes stay consistent.
+	e.codexHistory = nil
+	e.openrouterHistory = nil
+	for _, m := range messages {
+		switch m.Role {
+		case "user":
+			e.history.AddUser(m.Content)
+			if e.codexMode {
+				e.codexHistory = append(e.codexHistory, codexHistoryEntry{
+					Role:    "user",
+					Content: m.Content,
+				})
+			}
+			if e.openrouterMode {
+				e.openrouterHistory = append(e.openrouterHistory, openrouterHistoryEntry{
+					Role:    "user",
+					Content: m.Content,
+				})
+			}
+		case "assistant":
+			// Plain text only. Tool calls from the past session are lost.
+			e.history.AddAssistantText(m.Content)
+			if e.codexMode {
+				e.codexHistory = append(e.codexHistory, codexHistoryEntry{
+					Role:    "assistant",
+					Content: m.Content,
+				})
+			}
+			if e.openrouterMode {
+				e.openrouterHistory = append(e.openrouterHistory, openrouterHistoryEntry{
+					Role:    "assistant",
+					Content: m.Content,
+				})
+			}
+		default:
+			// Skip tool/system/permission - not valid API roles.
+		}
+	}
+	return nil
 }
 
 // agentLoop is the core loop: call API, stream response, execute tools, repeat.

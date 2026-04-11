@@ -1921,44 +1921,63 @@ func wordWrap(text string, width int) string {
 
 // --- Slash Commands ---
 
-// availableModels is the hardcoded list of supported Claude models with aliases.
-var availableModels = []struct {
+// availableModels is the UI view of the shared engine model catalog.
+var availableModels = func() []struct {
 	Name    string
 	Aliases []string
 	Desc    string
-}{
-	{"claude-sonnet-4-6", []string{"sonnet"}, "Fast + capable (default)"},
-	{"claude-opus-4-6", []string{"opus"}, "Most capable, slower"},
-	{"claude-haiku-4-5-20251001", []string{"haiku"}, "Fastest, cheapest"},
-	{"gpt-5.4", []string{"codex", "gpt5"}, "GPT-5.4 via Codex (ChatGPT sub)"},
-	{"gpt-5.4-mini", []string{"codex-mini", "gpt5-mini"}, "GPT-5.4 Mini via Codex"},
-	{"gpt-5.3-codex", []string{"codex-5.3"}, "GPT-5.3 Codex"},
-	{"gpt-5.2-codex", []string{"codex-5.2"}, "GPT-5.2 Codex"},
-	{"gpt-5.2", []string{"gpt5.2"}, "GPT-5.2 via Codex"},
-	{"gpt-5.1-codex-max", []string{"codex-max", "codex-5.1-max"}, "GPT-5.1 Codex Max"},
-	{"gpt-5.1-codex-mini", []string{"codex-5.1", "codex-5.1-mini"}, "GPT-5.1 Codex Mini"},
-	{"anthropic/claude-sonnet-4-5", []string{"or-sonnet"}, "Claude Sonnet via OpenRouter"},
-	{"openai/gpt-5.4", []string{"or-gpt5"}, "GPT-5.4 via OpenRouter"},
-	{"google/gemini-2.5-pro", []string{"or-gemini"}, "Gemini 2.5 Pro via OpenRouter"},
-	{"deepseek/deepseek-chat", []string{"or-deepseek"}, "DeepSeek Chat via OpenRouter (cheap)"},
-	{"meta-llama/llama-3.3-70b-instruct", []string{"or-llama"}, "Llama 3.3 70B via OpenRouter"},
+} {
+	models := make([]struct {
+		Name    string
+		Aliases []string
+		Desc    string
+	}, 0, len(engine.ModelCatalog))
+
+	for _, spec := range engine.ModelCatalog {
+		models = append(models, struct {
+			Name    string
+			Aliases []string
+			Desc    string
+		}{
+			Name:    spec.Name,
+			Aliases: spec.Aliases,
+			Desc:    availableModelDescription(spec),
+		})
+	}
+
+	return models
+}()
+
+func availableModelDescription(spec engine.ModelSpec) string {
+	provider := spec.Provider
+	switch spec.Provider {
+	case "anthropic":
+		provider = "Anthropic"
+	case "openai":
+		provider = "OpenAI"
+	case "openrouter":
+		provider = "OpenRouter"
+	}
+
+	switch spec.Tier {
+	case engine.TierFast:
+		return fmt.Sprintf("Fast tier via %s", provider)
+	case engine.TierMedium:
+		return fmt.Sprintf("Balanced tier via %s", provider)
+	case engine.TierCapable:
+		return fmt.Sprintf("Most capable tier via %s", provider)
+	default:
+		return fmt.Sprintf("Model via %s", provider)
+	}
 }
 
 // resolveModelAlias resolves an alias or model name to the full model name.
 // Returns the full name and true if found, or the original string and false if not.
 func resolveModelAlias(input string) (string, bool) {
-	lower := strings.ToLower(strings.TrimSpace(input))
-	for _, m := range availableModels {
-		if strings.ToLower(m.Name) == lower {
-			return m.Name, true
-		}
-		for _, alias := range m.Aliases {
-			if alias == lower {
-				return m.Name, true
-			}
-		}
+	if spec := engine.SpecFor(input); spec != nil {
+		return engine.ResolveAlias(input), true
 	}
-	return input, false
+	return engine.ResolveAlias(input), false
 }
 
 func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
@@ -2307,22 +2326,19 @@ type engineRestoredMsg struct {
 	err    error
 }
 
-// isCodexModel returns true if the model name indicates an OpenAI/Codex model.
+// isCodexModel returns true if the model resolves to an OpenAI/Codex model.
 // OpenRouter models (e.g. "openai/gpt-5.4") are routed separately and must
 // NOT match here, otherwise they'd be sent to the Codex endpoint.
 func isCodexModel(model string) bool {
-	if isOpenRouterModel(model) {
-		return false
-	}
-	return strings.HasPrefix(model, "gpt-")
+	spec := engine.SpecFor(model)
+	return spec != nil && spec.Provider == "openai"
 }
 
-// isOpenRouterModel returns true if the model name is in OpenRouter's
-// namespaced format (e.g. "anthropic/claude-sonnet-4-5"). OpenRouter always
-// uses "<provider>/<model>" slugs, so the presence of "/" is a reliable
-// marker versus Anthropic's "claude-..." and Codex's "gpt-..." naming.
+// isOpenRouterModel returns true if the model resolves to an OpenRouter
+// catalog entry, whether it was provided as a canonical slug or alias.
 func isOpenRouterModel(model string) bool {
-	return strings.Contains(model, "/")
+	spec := engine.SpecFor(model)
+	return spec != nil && spec.Provider == "openrouter"
 }
 
 // createEngineAndSend spawns a new engine session and sends the first prompt.

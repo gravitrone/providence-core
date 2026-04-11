@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gravitrone/providence-core/internal/auth"
@@ -17,13 +18,13 @@ import (
 
 // codexRequest is the request body for the Codex API.
 type codexRequest struct {
-	Model        string             `json:"model"`
-	Store        bool               `json:"store"`
-	Stream       bool               `json:"stream"`
-	Instructions string             `json:"instructions"`
-	Input        []json.RawMessage  `json:"input"`
-	ToolChoice   string             `json:"tool_choice,omitempty"`
-	Tools        []codexTool        `json:"tools,omitempty"`
+	Model        string            `json:"model"`
+	Store        bool              `json:"store"`
+	Stream       bool              `json:"stream"`
+	Instructions string            `json:"instructions"`
+	Input        []json.RawMessage `json:"input"`
+	ToolChoice   string            `json:"tool_choice,omitempty"`
+	Tools        []codexTool       `json:"tools,omitempty"`
 }
 
 type codexMessage struct {
@@ -46,9 +47,9 @@ type codexSSEEvent struct {
 
 // codexResponseDelta is a text delta from the Codex SSE stream.
 type codexResponseDelta struct {
-	Type    string `json:"type"`
+	Type   string `json:"type"`
 	ItemID string `json:"item_id"`
-	Delta   string `json:"delta"`
+	Delta  string `json:"delta"`
 }
 
 // codexResponseItem is a completed item from the stream.
@@ -59,14 +60,14 @@ type codexResponseItem struct {
 
 // codexItem represents a completed output item.
 type codexItem struct {
-	Type      string          `json:"type"`
-	ID        string          `json:"id"`
-	Content   []codexContent  `json:"content,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	CallID    string          `json:"call_id,omitempty"`
-	Arguments string          `json:"arguments,omitempty"`
-	Output    string          `json:"output,omitempty"`
-	Status    string          `json:"status,omitempty"`
+	Type      string         `json:"type"`
+	ID        string         `json:"id"`
+	Content   []codexContent `json:"content,omitempty"`
+	Name      string         `json:"name,omitempty"`
+	CallID    string         `json:"call_id,omitempty"`
+	Arguments string         `json:"arguments,omitempty"`
+	Output    string         `json:"output,omitempty"`
+	Status    string         `json:"status,omitempty"`
 }
 
 type codexContent struct {
@@ -74,11 +75,12 @@ type codexContent struct {
 	Text string `json:"text,omitempty"`
 }
 
-// codexDone is the response.done event.
+// codexDone is the response.done or response.completed event.
 type codexDone struct {
 	Type     string `json:"type"`
 	Response struct {
-		Status string `json:"status"`
+		Status string         `json:"status"`
+		Usage  map[string]any `json:"usage"`
 	} `json:"response"`
 }
 
@@ -260,10 +262,10 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 		// Add function_call items to history so codex can match call_ids.
 		for _, tc := range toolCalls {
 			e.codexHistory = append(e.codexHistory, codexHistoryEntry{
-				Role:       "function_call",
-				Content:    tc.RawArgs,
-				CallID:     tc.ID,
-				FuncName:   tc.Name,
+				Role:     "function_call",
+				Content:  tc.RawArgs,
+				CallID:   tc.ID,
+				FuncName: tc.Name,
 			})
 		}
 
@@ -467,8 +469,13 @@ func (e *DirectEngine) parseCodexStream(ctx context.Context, body io.Reader) ([]
 				}
 			}
 
-		case "response.done":
-			// Stream complete.
+		case "response.done", "response.completed":
+			var done codexDone
+			if err := json.Unmarshal([]byte(data), &done); err == nil {
+				if inputTokens, outputTokens, ok := extractCodexUsage(done); ok {
+					e.emitUsageUpdate(inputTokens, outputTokens, 0, 0)
+				}
+			}
 		}
 	}
 
@@ -476,6 +483,41 @@ func (e *DirectEngine) parseCodexStream(ctx context.Context, body io.Reader) ([]
 		return textParts, toolCalls, fmt.Errorf("read codex stream: %w", err)
 	}
 	return textParts, toolCalls, nil
+}
+
+func extractCodexUsage(done codexDone) (int, int, bool) {
+	if done.Response.Usage == nil {
+		return 0, 0, false
+	}
+
+	inputTokens, inputOK := parseCodexTokenCount(done.Response.Usage["input_tokens"])
+	outputTokens, outputOK := parseCodexTokenCount(done.Response.Usage["output_tokens"])
+	return inputTokens, outputTokens, inputOK || outputOK
+}
+
+func parseCodexTokenCount(value any) (int, bool) {
+	switch v := value.(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(n), true
+	case string:
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	default:
+		return 0, false
+	}
 }
 
 // drainSteeredMessagesCodex drains steered messages into the codex history.
@@ -492,7 +534,6 @@ func (e *DirectEngine) drainSteeredMessagesCodex() {
 		})
 	}
 }
-
 
 // truncate shortens a string to maxLen, appending "..." if truncated.
 func truncate(s string, maxLen int) string {

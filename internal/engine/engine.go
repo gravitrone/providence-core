@@ -27,9 +27,9 @@ type EngineConfig struct {
 	WorkDir      string
 
 	// OpenAI/Codex fields - used when Provider is "openai".
-	Provider           string // "anthropic" (default), "openai", or "openrouter"
-	OpenAIAccessToken  string
-	OpenAIAccountID    string
+	Provider          string // "anthropic" (default), "openai", or "openrouter"
+	OpenAIAccessToken string
+	OpenAIAccountID   string
 
 	// OpenRouter fields - used when Provider is "openrouter".
 	OpenRouterAPIKey string
@@ -81,6 +81,16 @@ type ParsedEvent struct {
 	Data any
 	Raw  string
 	Err  error
+}
+
+// UsageUpdateEvent carries token usage totals from a provider response.
+type UsageUpdateEvent struct {
+	Type              string `json:"type"`
+	InputTokens       int    `json:"input_tokens"`
+	OutputTokens      int    `json:"output_tokens"`
+	TotalTokens       int    `json:"total_tokens"`
+	CacheReadTokens   int    `json:"cache_read_tokens,omitempty"`
+	CacheCreateTokens int    `json:"cache_create_tokens,omitempty"`
 }
 
 // SessionStatus represents the lifecycle state of an engine session.

@@ -19,10 +19,11 @@ const OpenRouterEndpoint = "https://openrouter.ai/api/v1/chat/completions"
 
 // openrouterRequest is the request body for OpenRouter's OpenAI-compatible API.
 type openrouterRequest struct {
-	Model    string              `json:"model"`
-	Messages []openrouterMessage `json:"messages"`
-	Stream   bool                `json:"stream"`
-	Tools    []openrouterTool    `json:"tools,omitempty"`
+	Model         string                   `json:"model"`
+	Messages      []openrouterMessage      `json:"messages"`
+	Stream        bool                     `json:"stream"`
+	StreamOptions *openrouterStreamOptions `json:"stream_options,omitempty"`
+	Tools         []openrouterTool         `json:"tools,omitempty"`
 }
 
 // openrouterMessage is a single message in the OpenAI chat completions format.
@@ -58,6 +59,10 @@ type openrouterToolFunction struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	Parameters  map[string]any `json:"parameters"`
+}
+
+type openrouterStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // openrouterHistoryEntry is a message in the OpenRouter conversation history.
@@ -161,10 +166,11 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 		}
 
 		reqBody := openrouterRequest{
-			Model:    e.model,
-			Messages: buildOpenRouterMessages(e.system, e.openrouterHistory),
-			Stream:   true,
-			Tools:    buildOpenRouterTools(e.registry),
+			Model:         e.model,
+			Messages:      buildOpenRouterMessages(e.system, e.openrouterHistory),
+			Stream:        true,
+			StreamOptions: &openrouterStreamOptions{IncludeUsage: true},
+			Tools:         buildOpenRouterTools(e.registry),
 		}
 
 		bodyBytes, err := json.Marshal(reqBody)
@@ -360,10 +366,19 @@ func (e *DirectEngine) parseOpenRouterStream(ctx context.Context, body io.Reader
 				} `json:"delta"`
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
+			Usage *struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+				TotalTokens      int `json:"total_tokens"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			// Some providers send heartbeat comments or malformed lines;
 			// skip rather than aborting the whole stream.
+			continue
+		}
+		if len(chunk.Choices) == 0 && chunk.Usage != nil {
+			e.emitUsageUpdate(chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, 0, 0)
 			continue
 		}
 

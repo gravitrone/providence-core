@@ -331,6 +331,12 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			e.emitError(err)
 			return
 		}
+		e.emitUsageUpdate(
+			int(accumulated.Usage.InputTokens),
+			int(accumulated.Usage.OutputTokens),
+			int(accumulated.Usage.CacheReadInputTokens),
+			int(accumulated.Usage.CacheCreationInputTokens),
+		)
 
 		// Add assistant message to history.
 		e.history.AddAssistant(accumulated)
@@ -444,6 +450,26 @@ func (e *DirectEngine) emitAssistant(msg anthropic.Message) {
 		Data: &engine.AssistantEvent{
 			Type:    "assistant",
 			Message: engine.AssistantMsg{Content: parts},
+		},
+	}
+}
+
+func (e *DirectEngine) emitUsageUpdate(inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens int) {
+	if inputTokens == 0 && outputTokens == 0 && cacheReadTokens == 0 && cacheCreateTokens == 0 {
+		return
+	}
+	if e.history != nil {
+		e.history.SetReportedTokens(inputTokens, outputTokens)
+	}
+	e.events <- engine.ParsedEvent{
+		Type: "usage_update",
+		Data: &engine.UsageUpdateEvent{
+			Type:              "usage_update",
+			InputTokens:       inputTokens,
+			OutputTokens:      outputTokens,
+			TotalTokens:       inputTokens + outputTokens,
+			CacheReadTokens:   cacheReadTokens,
+			CacheCreateTokens: cacheCreateTokens,
 		},
 	}
 }

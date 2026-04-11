@@ -2,6 +2,7 @@ package claude
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -284,5 +285,10 @@ func (s *Session) Status() engine.SessionStatus {
 // hook to inject prior turns, so resumed sessions will not share memory with
 // the underlying process. The UI still repopulates its visual history.
 func (s *Session) RestoreHistory(messages []engine.RestoredMessage) error {
+	return nil
+}
+
+// TriggerCompact is a no-op for the claude headless backend.
+func (s *Session) TriggerCompact(_ context.Context) error {
 	return nil
 }

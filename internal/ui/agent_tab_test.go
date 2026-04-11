@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/engine"
+	"github.com/gravitrone/providence-core/internal/engine/direct"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -92,6 +93,18 @@ func TestAgentTabHintsPermissionPending(t *testing.T) {
 	}
 	assert.Contains(t, keys, "y", "permission mode should have approve hint")
 	assert.Contains(t, keys, "n", "permission mode should have deny hint")
+}
+
+func TestAgentTabStatusLineShowsContextPillWhenEngineActive(t *testing.T) {
+	at := NewAgentTab("", config.Config{}, nil)
+	at.model = "sonnet"
+	at.engine = &direct.DirectEngine{}
+	at.currentTokens = 120000
+
+	out := at.StatusLine()
+
+	assert.Contains(t, out, "60%")
+	assert.Contains(t, out, "ctx")
 }
 
 func TestAgentTabResize(t *testing.T) {

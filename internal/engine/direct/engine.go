@@ -248,6 +248,17 @@ func (e *DirectEngine) Status() engine.SessionStatus {
 	return e.status
 }
 
+// TriggerCompact requests immediate context compaction when available.
+func (e *DirectEngine) TriggerCompact(ctx context.Context) error {
+	if e.compactor == nil {
+		return fmt.Errorf("compaction not available for this engine mode")
+	}
+	if !e.compactor.TriggerNow(ctx) {
+		return fmt.Errorf("compaction already running or not ready")
+	}
+	return nil
+}
+
 // RestoreHistory replaces the engine's conversation history with the given
 // restored messages. User and assistant turns are restored directly, while
 // persisted tool rows are synthesized into assistant text so resumed sessions

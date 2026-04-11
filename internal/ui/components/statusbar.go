@@ -1,6 +1,10 @@
 package components
 
-import "charm.land/lipgloss/v2"
+import (
+	"image/color"
+
+	"charm.land/lipgloss/v2"
+)
 
 // Exported style vars so the theme system can update them.
 var (
@@ -21,15 +25,25 @@ var (
 
 // HintItem represents a single keybind hint with a key and description.
 type HintItem struct {
-	Key  string
-	Desc string
+	Key   string
+	Desc  string
+	Color color.Color
+}
+
+// TintedHint constructs a hint item with a tinted key cap.
+func TintedHint(key, desc string, color color.Color) HintItem {
+	return HintItem{
+		Key:   key,
+		Desc:  desc,
+		Color: color,
+	}
 }
 
 // StatusBarFromItems renders a StatusBar from a slice of HintItem.
 func StatusBarFromItems(items []HintItem, width int) string {
 	hints := make([]string, len(items))
 	for i, item := range items {
-		hints[i] = Hint(item.Key, item.Desc)
+		hints[i] = renderHintItem(item)
 	}
 	return StatusBar(hints, width)
 }
@@ -57,6 +71,15 @@ func StatusBar(hints []string, width int) string {
 func Hint(key, desc string) string {
 	keyText := KeyCapStyle.Render(key)
 	return HintDescStyle.Render(desc+" ") + keyText
+}
+
+func renderHintItem(item HintItem) string {
+	if item.Color == nil {
+		return Hint(item.Key, item.Desc)
+	}
+
+	keyText := KeyCapStyle.Background(item.Color).Render(item.Key)
+	return HintDescStyle.Render(item.Desc+" ") + keyText
 }
 
 func clampStatusSegments(segments []string, width int) []string {

@@ -3,6 +3,7 @@ package direct
 import (
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -124,6 +125,20 @@ func TestDirectEngine_RespondPermission(t *testing.T) {
 	// RespondPermission should not error even for unknown question IDs.
 	err = e.RespondPermission("nonexistent", "allow")
 	assert.NoError(t, err)
+}
+
+func TestSystemBlocksHaveCacheControl(t *testing.T) {
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:         engine.EngineTypeDirect,
+		SystemPrompt: engine.BuildSystemPrompt(nil),
+		Model:        "claude-sonnet-4-20250514",
+		APIKey:       "test-key-not-real",
+	})
+	require.NoError(t, err)
+
+	blocks := e.systemBlocks()
+	require.NotEmpty(t, blocks)
+	assert.Equal(t, anthropic.NewCacheControlEphemeralParam(), blocks[len(blocks)-1].CacheControl)
 }
 
 func TestRestoreHistory_WithTools(t *testing.T) {

@@ -540,7 +540,31 @@ func (e *DirectEngine) systemBlocks() []anthropic.TextBlockParam {
 	if e.system == "" {
 		return nil
 	}
-	return []anthropic.TextBlockParam{{Text: e.system}}
+
+	systemPrompt := e.system
+	blocks := engine.BuildSystemBlocks(nil)
+	if systemPrompt != engine.BuildSystemPrompt(nil) {
+		blocks = []engine.SystemBlock{{
+			Text:      systemPrompt,
+			Cacheable: true,
+		}}
+	}
+
+	params := make([]anthropic.TextBlockParam, 0, len(blocks))
+	lastCacheable := -1
+	for _, block := range blocks {
+		if block.Text == "" {
+			continue
+		}
+		params = append(params, anthropic.TextBlockParam{Text: block.Text})
+		if block.Cacheable {
+			lastCacheable = len(params) - 1
+		}
+	}
+	if lastCacheable >= 0 {
+		params[lastCacheable].CacheControl = anthropic.NewCacheControlEphemeralParam()
+	}
+	return params
 }
 
 // drainSteeredMessages checks for mid-turn steering messages and adds them as user messages.

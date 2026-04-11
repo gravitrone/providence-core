@@ -172,6 +172,8 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 		}
 
 		// Build request.
+		// Note: OpenAI Codex (chatgpt.com/backend-api) does not support prompt caching
+		// via cache_control. The system prompt is sent as plain text. See W3 implementation notes.
 		reqBody := codexRequest{
 			Model:        e.model,
 			Store:        false,

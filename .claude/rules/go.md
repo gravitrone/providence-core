@@ -1,5 +1,5 @@
 ---
-paths: ["cli/**/*.go"]
+paths: ["internal/**/*.go", "cmd/**/*.go"]
 ---
 
 # Go Conventions

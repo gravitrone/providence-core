@@ -35,12 +35,15 @@ type EngineConfig struct {
 	OpenRouterAPIKey string
 }
 
-// RestoredMessage is a minimal role+content pair used to rehydrate engine
-// history from a persisted session. Tool calls and other block types are not
-// preserved - only plain text user/assistant turns are restored (MVP).
+// RestoredMessage is the persisted message shape used to rehydrate engine
+// history from a stored session. Tool metadata is optional and additive so
+// older persisted rows remain valid.
 type RestoredMessage struct {
-	Role    string
-	Content string
+	Role       string
+	Content    string
+	ToolCallID string
+	ToolName   string
+	ToolInput  string
 }
 
 // Engine is the interface all AI backends must implement.
@@ -62,7 +65,8 @@ type Engine interface {
 	Status() SessionStatus
 	// RestoreHistory replaces the engine's conversation history with the given
 	// messages. Used when resuming a past session so the model has memory of
-	// prior turns. Tool calls and non-text blocks are lost on restore.
+	// prior turns. Engines may synthesize text for tool history when they
+	// cannot replay native tool-call blocks safely.
 	// Engines that cannot inject history (e.g. claude headless) should
 	// implement this as a no-op.
 	RestoreHistory(messages []RestoredMessage) error

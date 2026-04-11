@@ -2186,10 +2186,11 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			at.engine = nil
 		}
 		// Populate UI messages from loaded session and build the restored
-		// engine history in parallel. Only user/assistant text turns are
-		// replayed into the engine - tool calls are lost on restore (MVP).
+		// engine history in parallel. Each stored row maps 1:1 into the
+		// restore payload so direct engines can synthesize prior tool output
+		// back into model-visible context.
 		at.messages = nil
-		var restored []engine.RestoredMessage
+		restored := make([]engine.RestoredMessage, 0, len(msgs))
 		for _, m := range msgs {
 			at.messages = append(at.messages, ChatMessage{
 				Role:       m.Role,
@@ -2202,12 +2203,17 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				ToolOutput: m.ToolOutput,
 				ImageCount: m.ImageCount,
 			})
-			if (m.Role == "user" || m.Role == "assistant") && m.Content != "" {
-				restored = append(restored, engine.RestoredMessage{
-					Role:    m.Role,
-					Content: m.Content,
-				})
+
+			restoredMessage := engine.RestoredMessage{
+				Role:    m.Role,
+				Content: m.Content,
 			}
+			if m.Role == "tool" {
+				restoredMessage.ToolName = m.ToolName
+				restoredMessage.ToolInput = m.ToolArgs
+				restoredMessage.Content = m.ToolOutput
+			}
+			restored = append(restored, restoredMessage)
 		}
 		at.sessionID = sess.ID
 		at.messagesDirty = true

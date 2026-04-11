@@ -103,7 +103,7 @@ func TestDirectEngine_RespondPermission(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestDirectEngine_RestoreHistory(t *testing.T) {
+func TestRestoreHistory_WithTools(t *testing.T) {
 	e, err := NewDirectEngine(engine.EngineConfig{
 		Type:   engine.EngineTypeDirect,
 		Model:  "claude-sonnet-4-20250514",
@@ -116,32 +116,68 @@ func TestDirectEngine_RestoreHistory(t *testing.T) {
 
 	restored := []engine.RestoredMessage{
 		{Role: "user", Content: "first user turn"},
+		{
+			Role:      "tool",
+			ToolName:  "ReadFile",
+			ToolInput: "main.go",
+			Content:   "package main",
+		},
 		{Role: "assistant", Content: "first assistant reply"},
-		{Role: "user", Content: "second user turn"},
-		{Role: "assistant", Content: "second assistant reply"},
-		// Non user/assistant roles must be silently skipped - they do not
-		// map to valid Anthropic API message roles.
 		{Role: "system", Content: "should be skipped"},
-		{Role: "tool", Content: "should be skipped"},
 		{Role: "permission", Content: "should be skipped"},
 	}
 
 	require.NoError(t, e.RestoreHistory(restored))
 
 	msgs := e.history.Messages()
-	require.Len(t, msgs, 4, "only user/assistant messages should survive restore")
+	require.Len(t, msgs, 3, "tool restore should synthesize an assistant text message")
 
 	// Spot check roles and content.
 	assert.Equal(t, "first user turn", msgs[0].Content[0].OfText.Text)
-	assert.Equal(t, "first assistant reply", msgs[1].Content[0].OfText.Text)
-	assert.Equal(t, "second user turn", msgs[2].Content[0].OfText.Text)
-	assert.Equal(t, "second assistant reply", msgs[3].Content[0].OfText.Text)
+	assert.Equal(t, "[Tool: ReadFile(main.go) -> package main]", msgs[1].Content[0].OfText.Text)
+	assert.Equal(t, "first assistant reply", msgs[2].Content[0].OfText.Text)
 
 	// Restoring again should replace, not append.
 	require.NoError(t, e.RestoreHistory([]engine.RestoredMessage{
 		{Role: "user", Content: "fresh"},
+		{Role: "tool", ToolName: "Bash", ToolInput: "pwd", Content: "/tmp/project"},
 	}))
 	msgs = e.history.Messages()
-	require.Len(t, msgs, 1)
+	require.Len(t, msgs, 2)
 	assert.Equal(t, "fresh", msgs[0].Content[0].OfText.Text)
+	assert.Equal(t, "[Tool: Bash(pwd) -> /tmp/project]", msgs[1].Content[0].OfText.Text)
+}
+
+func TestRestoreHistory_CodexMode(t *testing.T) {
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:     engine.EngineTypeDirect,
+		Provider: "openai",
+		Model:    "gpt-5.4",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, e.RestoreHistory([]engine.RestoredMessage{
+		{Role: "user", Content: "inspect the entrypoint"},
+		{
+			Role:      "tool",
+			ToolName:  "ReadFile",
+			ToolInput: "cmd/main.go",
+			Content:   "package main\n\nfunc main() {}",
+		},
+	}))
+
+	msgs := e.history.Messages()
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "inspect the entrypoint", msgs[0].Content[0].OfText.Text)
+	assert.Equal(t, "[Tool: ReadFile(cmd/main.go) -> package main\n\nfunc main() {}]", msgs[1].Content[0].OfText.Text)
+
+	require.Len(t, e.codexHistory, 2)
+	assert.Equal(t, codexHistoryEntry{
+		Role:    "user",
+		Content: "inspect the entrypoint",
+	}, e.codexHistory[0])
+	assert.Equal(t, codexHistoryEntry{
+		Role:    "assistant",
+		Content: "[Tool: ReadFile(cmd/main.go) -> package main\n\nfunc main() {}]",
+	}, e.codexHistory[1])
 }

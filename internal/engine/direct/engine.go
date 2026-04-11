@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -216,11 +217,9 @@ func (e *DirectEngine) Status() engine.SessionStatus {
 }
 
 // RestoreHistory replaces the engine's conversation history with the given
-// restored messages. Intended for resuming a past session so the model has
-// memory of prior turns. Tool calls and other non-text blocks are lost on
-// restore (MVP limitation) - only plain text user/assistant turns survive.
-// Non user/assistant roles (tool, system, permission) are skipped because
-// they do not map to valid API message roles.
+// restored messages. User and assistant turns are restored directly, while
+// persisted tool rows are synthesized into assistant text so resumed sessions
+// retain prior tool outcomes without replaying provider-specific tool blocks.
 func (e *DirectEngine) RestoreHistory(messages []engine.RestoredMessage) error {
 	e.history = NewConversationHistory()
 	// Also reset codex/openrouter histories so all modes stay consistent.
@@ -229,39 +228,67 @@ func (e *DirectEngine) RestoreHistory(messages []engine.RestoredMessage) error {
 	for _, m := range messages {
 		switch m.Role {
 		case "user":
-			e.history.AddUser(m.Content)
-			if e.codexMode {
-				e.codexHistory = append(e.codexHistory, codexHistoryEntry{
-					Role:    "user",
-					Content: m.Content,
-				})
-			}
-			if e.openrouterMode {
-				e.openrouterHistory = append(e.openrouterHistory, openrouterHistoryEntry{
-					Role:    "user",
-					Content: m.Content,
-				})
-			}
+			e.restoreUserText(m.Content)
 		case "assistant":
-			// Plain text only. Tool calls from the past session are lost.
-			e.history.AddAssistantText(m.Content)
-			if e.codexMode {
-				e.codexHistory = append(e.codexHistory, codexHistoryEntry{
-					Role:    "assistant",
-					Content: m.Content,
-				})
-			}
-			if e.openrouterMode {
-				e.openrouterHistory = append(e.openrouterHistory, openrouterHistoryEntry{
-					Role:    "assistant",
-					Content: m.Content,
-				})
-			}
+			e.restoreAssistantText(m.Content)
+		case "tool":
+			e.restoreAssistantText(formatRestoredToolMessage(m))
 		default:
-			// Skip tool/system/permission - not valid API roles.
+			// Skip system/permission and other non-conversation roles.
 		}
 	}
 	return nil
+}
+
+func (e *DirectEngine) restoreUserText(text string) {
+	if text == "" {
+		return
+	}
+
+	e.history.AddUser(text)
+	if e.codexMode {
+		e.codexHistory = append(e.codexHistory, codexHistoryEntry{
+			Role:    "user",
+			Content: text,
+		})
+	}
+	if e.openrouterMode {
+		e.openrouterHistory = append(e.openrouterHistory, openrouterHistoryEntry{
+			Role:    "user",
+			Content: text,
+		})
+	}
+}
+
+func (e *DirectEngine) restoreAssistantText(text string) {
+	if text == "" {
+		return
+	}
+
+	e.history.AddAssistantText(text)
+	if e.codexMode {
+		e.codexHistory = append(e.codexHistory, codexHistoryEntry{
+			Role:    "assistant",
+			Content: text,
+		})
+	}
+	if e.openrouterMode {
+		e.openrouterHistory = append(e.openrouterHistory, openrouterHistoryEntry{
+			Role:    "assistant",
+			Content: text,
+		})
+	}
+}
+
+func formatRestoredToolMessage(message engine.RestoredMessage) string {
+	toolName := strings.TrimSpace(message.ToolName)
+	if toolName == "" {
+		toolName = "Tool"
+	}
+	if message.ToolInput != "" {
+		toolName = fmt.Sprintf("%s(%s)", toolName, message.ToolInput)
+	}
+	return fmt.Sprintf("[Tool: %s -> %s]", toolName, message.Content)
 }
 
 // agentLoop is the core loop: call API, stream response, execute tools, repeat.

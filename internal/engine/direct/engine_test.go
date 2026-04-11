@@ -52,6 +52,29 @@ func TestDirectEngine_EventsChannel(t *testing.T) {
 	assert.NotNil(t, ch)
 }
 
+func TestUsageEventEmitted(t *testing.T) {
+	e := &DirectEngine{
+		events:  make(chan engine.ParsedEvent, 1),
+		history: NewConversationHistory(),
+	}
+
+	e.emitUsageUpdate(11, 4, 2, 1)
+
+	assert.Equal(t, 15, e.history.CurrentTokens())
+
+	event := <-e.events
+	assert.Equal(t, "usage_update", event.Type)
+
+	usage, ok := event.Data.(*engine.UsageUpdateEvent)
+	require.True(t, ok)
+	assert.Equal(t, "usage_update", usage.Type)
+	assert.Equal(t, 11, usage.InputTokens)
+	assert.Equal(t, 4, usage.OutputTokens)
+	assert.Equal(t, 15, usage.TotalTokens)
+	assert.Equal(t, 2, usage.CacheReadTokens)
+	assert.Equal(t, 1, usage.CacheCreateTokens)
+}
+
 func TestDirectEngine_InterruptIdempotent(t *testing.T) {
 	e, err := NewDirectEngine(engine.EngineConfig{
 		Type:   engine.EngineTypeDirect,

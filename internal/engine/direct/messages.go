@@ -16,8 +16,11 @@ type ImageData struct {
 // ConversationHistory manages the message history for a direct engine conversation.
 // It is safe for concurrent access.
 type ConversationHistory struct {
-	messages []anthropic.MessageParam
-	mu       sync.Mutex
+	messages           []anthropic.MessageParam
+	lastReportedTokens int
+	lastInputTokens    int
+	lastOutputTokens   int
+	mu                 sync.Mutex
 }
 
 // NewConversationHistory creates an empty conversation history.
@@ -88,6 +91,32 @@ func (h *ConversationHistory) EstimateTokens() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	return h.estimateTokensLocked()
+}
+
+// CurrentTokens returns the last provider-reported total when available,
+// falling back to a rough estimate from the current message history.
+func (h *ConversationHistory) CurrentTokens() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.lastReportedTokens > 0 {
+		return h.lastReportedTokens
+	}
+	return h.estimateTokensLocked()
+}
+
+// SetReportedTokens stores the latest provider-reported input and output totals.
+func (h *ConversationHistory) SetReportedTokens(input, output int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.lastInputTokens = input
+	h.lastOutputTokens = output
+	h.lastReportedTokens = input + output
+}
+
+func (h *ConversationHistory) estimateTokensLocked() int {
 	charCount := 0
 	for _, msg := range h.messages {
 		for _, block := range msg.Content {

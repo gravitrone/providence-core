@@ -53,6 +53,30 @@ func TestConversationHistory_EstimateTokensEmpty(t *testing.T) {
 	assert.Equal(t, 0, h.EstimateTokens())
 }
 
+func TestCurrentTokensFallbackToEstimate(t *testing.T) {
+	h := NewConversationHistory()
+	h.AddUser("hello world!")
+
+	assert.Equal(t, 16, h.CurrentTokens())
+}
+
+func TestCurrentTokensFromReported(t *testing.T) {
+	h := NewConversationHistory()
+	h.AddUser("hello world!")
+	h.SetReportedTokens(11, 4)
+
+	assert.Equal(t, 15, h.CurrentTokens())
+}
+
+func TestSetReportedTokens(t *testing.T) {
+	h := NewConversationHistory()
+	h.SetReportedTokens(12, 8)
+
+	assert.Equal(t, 12, h.lastInputTokens)
+	assert.Equal(t, 8, h.lastOutputTokens)
+	assert.Equal(t, 20, h.lastReportedTokens)
+}
+
 func TestConversationHistory_AddAssistantText(t *testing.T) {
 	h := NewConversationHistory()
 	h.AddAssistantText("hi there")

@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -187,6 +190,100 @@ func TestParseOpenRouterStream_SkipsMalformedLines(t *testing.T) {
 	assert.Empty(t, toolCalls)
 }
 
+func TestOpenRouterUsageParsing(t *testing.T) {
+	requests := make(chan openrouterRequest, 1)
+
+	server := newSandboxSafeServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		var req openrouterRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		requests <- req
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		if _, err := io.WriteString(w, strings.Join([]string{
+			`data: {"choices":[{"delta":{"content":"Hello"}}]}`,
+			`data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4,"total_tokens":15}}`,
+			`data: [DONE]`,
+			"",
+		}, "\n")); err != nil {
+			t.Errorf("write sse response: %v", err)
+		}
+	}))
+	if server == nil {
+		return
+	}
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	originalClient := http.DefaultClient
+	http.DefaultClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			cloned := req.Clone(req.Context())
+			cloned.URL.Scheme = serverURL.Scheme
+			cloned.URL.Host = serverURL.Host
+			return http.DefaultTransport.RoundTrip(cloned)
+		}),
+	}
+	defer func() {
+		http.DefaultClient = originalClient
+	}()
+
+	e := &DirectEngine{
+		events:           make(chan engine.ParsedEvent, 64),
+		history:          NewConversationHistory(),
+		registry:         tools.NewRegistry(),
+		permissions:      NewPermissionHandler(),
+		model:            "anthropic/claude-sonnet-4-5",
+		system:           "be helpful",
+		openrouterAPIKey: "test-key",
+		openrouterHistory: []openrouterHistoryEntry{
+			{Role: "user", Content: "hello"},
+		},
+	}
+
+	e.openrouterAgentLoop(context.Background())
+
+	select {
+	case req := <-requests:
+		require.NotNil(t, req.StreamOptions)
+		assert.True(t, req.StreamOptions.IncludeUsage)
+		assert.True(t, req.Stream)
+	default:
+		t.Fatal("expected an OpenRouter request")
+	}
+
+	assert.Equal(t, 15, e.history.CurrentTokens())
+
+	var usageEvent *engine.UsageUpdateEvent
+	for len(e.events) > 0 {
+		event := <-e.events
+		if event.Type != "usage_update" {
+			continue
+		}
+
+		var ok bool
+		usageEvent, ok = event.Data.(*engine.UsageUpdateEvent)
+		require.True(t, ok)
+	}
+
+	require.NotNil(t, usageEvent)
+	assert.Equal(t, 11, usageEvent.InputTokens)
+	assert.Equal(t, 4, usageEvent.OutputTokens)
+	assert.Equal(t, 15, usageEvent.TotalTokens)
+}
+
 // newOpenRouterTestEngine builds a minimal DirectEngine just for stream parser
 // tests - only the pieces parseOpenRouterStream actually touches are wired.
 func newOpenRouterTestEngine() *DirectEngine {
@@ -209,4 +306,24 @@ func drainEvents(e *DirectEngine) func() {
 		}
 	}()
 	return func() { close(stop) }
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func newSandboxSafeServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+
+	var server *httptest.Server
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Skipf("httptest.NewServer unavailable in this sandbox: %v", recovered)
+		}
+	}()
+
+	server = httptest.NewServer(handler)
+	return server
 }

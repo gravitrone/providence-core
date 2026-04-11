@@ -17,13 +17,13 @@ import (
 
 // codexRequest is the request body for the Codex API.
 type codexRequest struct {
-	Model        string             `json:"model"`
-	Store        bool               `json:"store"`
-	Stream       bool               `json:"stream"`
-	Instructions string             `json:"instructions"`
-	Input        []json.RawMessage  `json:"input"`
-	ToolChoice   string             `json:"tool_choice,omitempty"`
-	Tools        []codexTool        `json:"tools,omitempty"`
+	Model        string            `json:"model"`
+	Store        bool              `json:"store"`
+	Stream       bool              `json:"stream"`
+	Instructions string            `json:"instructions"`
+	Input        []json.RawMessage `json:"input"`
+	ToolChoice   string            `json:"tool_choice,omitempty"`
+	Tools        []codexTool       `json:"tools,omitempty"`
 }
 
 type codexMessage struct {
@@ -46,9 +46,9 @@ type codexSSEEvent struct {
 
 // codexResponseDelta is a text delta from the Codex SSE stream.
 type codexResponseDelta struct {
-	Type    string `json:"type"`
+	Type   string `json:"type"`
 	ItemID string `json:"item_id"`
-	Delta   string `json:"delta"`
+	Delta  string `json:"delta"`
 }
 
 // codexResponseItem is a completed item from the stream.
@@ -59,14 +59,14 @@ type codexResponseItem struct {
 
 // codexItem represents a completed output item.
 type codexItem struct {
-	Type      string          `json:"type"`
-	ID        string          `json:"id"`
-	Content   []codexContent  `json:"content,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	CallID    string          `json:"call_id,omitempty"`
-	Arguments string          `json:"arguments,omitempty"`
-	Output    string          `json:"output,omitempty"`
-	Status    string          `json:"status,omitempty"`
+	Type      string         `json:"type"`
+	ID        string         `json:"id"`
+	Content   []codexContent `json:"content,omitempty"`
+	Name      string         `json:"name,omitempty"`
+	CallID    string         `json:"call_id,omitempty"`
+	Arguments string         `json:"arguments,omitempty"`
+	Output    string         `json:"output,omitempty"`
+	Status    string         `json:"status,omitempty"`
 }
 
 type codexContent struct {
@@ -170,6 +170,8 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 		}
 
 		// Build request.
+		// Note: OpenAI Codex (chatgpt.com/backend-api) does not support prompt caching
+		// via cache_control. The system prompt is sent as plain text. See W3 implementation notes.
 		reqBody := codexRequest{
 			Model:        e.model,
 			Store:        false,
@@ -260,10 +262,10 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 		// Add function_call items to history so codex can match call_ids.
 		for _, tc := range toolCalls {
 			e.codexHistory = append(e.codexHistory, codexHistoryEntry{
-				Role:       "function_call",
-				Content:    tc.RawArgs,
-				CallID:     tc.ID,
-				FuncName:   tc.Name,
+				Role:     "function_call",
+				Content:  tc.RawArgs,
+				CallID:   tc.ID,
+				FuncName: tc.Name,
 			})
 		}
 
@@ -492,7 +494,6 @@ func (e *DirectEngine) drainSteeredMessagesCodex() {
 		})
 	}
 }
-
 
 // truncate shortens a string to maxLen, appending "..." if truncated.
 func truncate(s string, maxLen int) string {

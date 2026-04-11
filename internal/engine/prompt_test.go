@@ -15,6 +15,26 @@ func TestBuildSystemPromptContainsIdentity(t *testing.T) {
 	assert.Contains(t, prompt, "Profaned")
 }
 
+func TestBuildSystemBlocksReturnsBlocks(t *testing.T) {
+	blocks := BuildSystemBlocks(nil)
+	require.NotEmpty(t, blocks)
+	assert.GreaterOrEqual(t, len(blocks), 1)
+	assert.NotEmpty(t, blocks[0].Text)
+}
+
+func TestBuildSystemBlocksAllCacheable(t *testing.T) {
+	blocks := BuildSystemBlocks(nil)
+	require.NotEmpty(t, blocks)
+	for _, block := range blocks {
+		assert.True(t, block.Cacheable)
+		assert.NotEmpty(t, block.Text)
+	}
+}
+
+func TestBuildSystemPromptStillWorks(t *testing.T) {
+	assert.NotEmpty(t, BuildSystemPrompt(nil))
+}
+
 func TestBuildSystemPromptContainsViz(t *testing.T) {
 	prompt := BuildSystemPrompt(nil)
 	assert.Contains(t, prompt, "providence-viz")

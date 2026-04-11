@@ -30,10 +30,20 @@ type openrouterRequest struct {
 // use role "tool" with `tool_call_id`.
 type openrouterMessage struct {
 	Role       string                  `json:"role"`
-	Content    string                  `json:"content,omitempty"`
+	Content    any                     `json:"content,omitempty"`
 	Name       string                  `json:"name,omitempty"`
 	ToolCallID string                  `json:"tool_call_id,omitempty"`
 	ToolCalls  []openrouterToolCallMsg `json:"tool_calls,omitempty"`
+}
+
+type openrouterSystemContentBlock struct {
+	Type         string                  `json:"type"`
+	Text         string                  `json:"text"`
+	CacheControl *openrouterCacheControl `json:"cache_control,omitempty"`
+}
+
+type openrouterCacheControl struct {
+	Type string `json:"type"`
 }
 
 // openrouterToolCallMsg is the assistant-side tool call representation.
@@ -109,11 +119,15 @@ func buildOpenRouterTools(registry *tools.Registry) []openrouterTool {
 // buildOpenRouterMessages converts internal history to OpenAI chat messages.
 // A system message is prepended when non-empty.
 func buildOpenRouterMessages(system string, history []openrouterHistoryEntry) []openrouterMessage {
+	return buildOpenRouterMessagesForModel("", system, history)
+}
+
+func buildOpenRouterMessagesForModel(model string, system string, history []openrouterHistoryEntry) []openrouterMessage {
 	msgs := make([]openrouterMessage, 0, len(history)+1)
 	if system != "" {
 		msgs = append(msgs, openrouterMessage{
 			Role:    "system",
-			Content: system,
+			Content: buildOpenRouterSystemContent(model, system),
 		})
 	}
 	for _, entry := range history {
@@ -143,6 +157,42 @@ func buildOpenRouterMessages(system string, history []openrouterHistoryEntry) []
 	return msgs
 }
 
+func buildOpenRouterSystemContent(model string, system string) any {
+	if !strings.HasPrefix(model, "anthropic/") {
+		return system
+	}
+
+	blocks := engine.BuildSystemBlocks(nil)
+	if system != engine.BuildSystemPrompt(nil) {
+		blocks = []engine.SystemBlock{{
+			Text:      system,
+			Cacheable: true,
+		}}
+	}
+
+	content := make([]openrouterSystemContentBlock, 0, len(blocks))
+	lastCacheable := -1
+	for _, block := range blocks {
+		if block.Text == "" {
+			continue
+		}
+		content = append(content, openrouterSystemContentBlock{
+			Type: "text",
+			Text: block.Text,
+		})
+		if block.Cacheable {
+			lastCacheable = len(content) - 1
+		}
+	}
+	if len(content) == 0 {
+		return system
+	}
+	if lastCacheable >= 0 {
+		content[lastCacheable].CacheControl = &openrouterCacheControl{Type: "ephemeral"}
+	}
+	return content
+}
+
 // openrouterAgentLoop runs the agent loop using the OpenRouter API.
 func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 	defer e.emitResult()
@@ -162,7 +212,7 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 
 		reqBody := openrouterRequest{
 			Model:    e.model,
-			Messages: buildOpenRouterMessages(e.system, e.openrouterHistory),
+			Messages: buildOpenRouterMessagesForModel(e.model, e.system, e.openrouterHistory),
 			Stream:   true,
 			Tools:    buildOpenRouterTools(e.registry),
 		}

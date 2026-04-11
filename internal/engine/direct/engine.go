@@ -240,6 +240,7 @@ func (e *DirectEngine) RestoreHistory(messages []engine.RestoredMessage) error {
 	return nil
 }
 
+// restoreUserText adds a user text message to all active history modes.
 func (e *DirectEngine) restoreUserText(text string) {
 	if text == "" {
 		return
@@ -260,6 +261,7 @@ func (e *DirectEngine) restoreUserText(text string) {
 	}
 }
 
+// restoreAssistantText adds an assistant text message to all active history modes.
 func (e *DirectEngine) restoreAssistantText(text string) {
 	if text == "" {
 		return
@@ -280,6 +282,7 @@ func (e *DirectEngine) restoreAssistantText(text string) {
 	}
 }
 
+// formatRestoredToolMessage formats a persisted tool message for display in restored history.
 func formatRestoredToolMessage(message engine.RestoredMessage) string {
 	toolName := strings.TrimSpace(message.ToolName)
 	if toolName == "" {

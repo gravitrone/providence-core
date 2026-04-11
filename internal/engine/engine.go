@@ -39,8 +39,11 @@ type EngineConfig struct {
 // history from a stored session. Tool metadata is optional and additive so
 // older persisted rows remain valid.
 type RestoredMessage struct {
-	Role       string
-	Content    string
+	Role    string
+	Content string
+	// Tool metadata: ToolCallID, ToolName, and ToolInput are optional fields
+	// populated when restoring tool rows (Role == "tool") to allow engines to
+	// synthesize prior tool outcomes back into model-visible context.
 	ToolCallID string
 	ToolName   string
 	ToolInput  string

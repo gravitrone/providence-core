@@ -12,6 +12,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/uuid"
 	"github.com/gravitrone/providence-core/internal/engine"
+	"github.com/gravitrone/providence-core/internal/engine/compact"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
 )
 
@@ -28,6 +29,7 @@ type DirectEngine struct {
 	system      string
 	events      chan engine.ParsedEvent
 	history     *ConversationHistory
+	compactor   *compact.Orchestrator
 	registry    *tools.Registry
 	permissions *PermissionHandler
 	workDir     string
@@ -104,13 +106,14 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	history := NewConversationHistory()
 
-	return &DirectEngine{
+	e := &DirectEngine{
 		client:           client,
 		model:            model,
 		system:           cfg.SystemPrompt,
 		events:           make(chan engine.ParsedEvent, 64),
-		history:          NewConversationHistory(),
+		history:          history,
 		registry:         registry,
 		permissions:      NewPermissionHandler(),
 		workDir:          cfg.WorkDir,
@@ -121,7 +124,36 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		codexMode:        isCodex,
 		openrouterMode:   isOpenRouter,
 		openrouterAPIKey: openrouterKey,
-	}, nil
+	}
+
+	if !isCodex && !isOpenRouter {
+		provider := newAnthropicCompactProvider(e.history, e.client, e.model)
+		e.compactor = compact.New(provider, func(phase compact.Phase, err error) {
+			event := engine.ParsedEvent{
+				Type: "compaction",
+				Data: &engine.CompactionEvent{
+					Type:  "compaction",
+					Phase: string(phase),
+					Err:   err,
+				},
+			}
+
+			compactionEvent := event.Data.(*engine.CompactionEvent)
+			switch phase {
+			case compact.PhaseRunning:
+				compactionEvent.TokensBefore = e.history.CurrentTokens()
+			default:
+				compactionEvent.TokensAfter = e.history.CurrentTokens()
+			}
+
+			select {
+			case e.events <- event:
+			default:
+			}
+		})
+	}
+
+	return e, nil
 }
 
 // SetRegistry replaces the tool registry (for use before first Send).
@@ -306,6 +338,13 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		default:
 		}
 
+		if e.compactor != nil {
+			if err := e.compactor.WaitForPending(ctx); err != nil {
+				e.emitError(err)
+				return
+			}
+		}
+
 		// Build tool params.
 		toolParams := e.toolParams()
 
@@ -340,6 +379,9 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		// Add assistant message to history.
 		e.history.AddAssistant(accumulated)
+		if e.compactor != nil {
+			e.compactor.TriggerIfNeeded(ctx)
+		}
 
 		// Emit full assistant event.
 		e.emitAssistant(accumulated)

@@ -93,6 +93,15 @@ type UsageUpdateEvent struct {
 	CacheCreateTokens int    `json:"cache_create_tokens,omitempty"`
 }
 
+// CompactionEvent carries lifecycle updates from the async compaction pipeline.
+type CompactionEvent struct {
+	Type         string
+	Phase        string
+	TokensBefore int
+	TokensAfter  int
+	Err          error
+}
+
 // SessionStatus represents the lifecycle state of an engine session.
 type SessionStatus int
 

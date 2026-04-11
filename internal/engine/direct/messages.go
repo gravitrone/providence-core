@@ -186,3 +186,41 @@ func (h *ConversationHistory) CompressLongToolResults(minLen int) int {
 
 	return compressed
 }
+
+// --- W4 compaction support ---
+
+// ReplaceTail replaces the compacted prefix before cutIndex with a single
+// replacement message while preserving the recent tail starting at cutIndex.
+func (h *ConversationHistory) ReplaceTail(replacement anthropic.MessageParam, cutIndex int) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if cutIndex <= 0 || cutIndex > len(h.messages) {
+		return fmt.Errorf("cut index out of range: %d", cutIndex)
+	}
+
+	tail := append([]anthropic.MessageParam(nil), h.messages[cutIndex:]...)
+	h.messages = append([]anthropic.MessageParam{replacement}, tail...)
+	h.lastReportedTokens = 0
+	h.lastInputTokens = 0
+	h.lastOutputTokens = 0
+
+	return nil
+}
+
+// MessagesBefore returns a copy of the messages before idx.
+func (h *ConversationHistory) MessagesBefore(idx int) []anthropic.MessageParam {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if idx <= 0 {
+		return nil
+	}
+	if idx > len(h.messages) {
+		idx = len(h.messages)
+	}
+
+	out := make([]anthropic.MessageParam, idx)
+	copy(out, h.messages[:idx])
+	return out
+}

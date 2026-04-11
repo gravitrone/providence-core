@@ -126,32 +126,39 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		openrouterAPIKey: openrouterKey,
 	}
 
-	if !isCodex && !isOpenRouter {
-		provider := newAnthropicCompactProvider(e.history, e.client, e.model)
-		e.compactor = compact.New(provider, func(phase compact.Phase, err error) {
-			event := engine.ParsedEvent{
-				Type: "compaction",
-				Data: &engine.CompactionEvent{
-					Type:  "compaction",
-					Phase: string(phase),
-					Err:   err,
-				},
-			}
-
-			compactionEvent := event.Data.(*engine.CompactionEvent)
-			switch phase {
-			case compact.PhaseRunning:
-				compactionEvent.TokensBefore = e.history.CurrentTokens()
-			default:
-				compactionEvent.TokensAfter = e.history.CurrentTokens()
-			}
-
-			select {
-			case e.events <- event:
-			default:
-			}
-		})
+	var provider compact.Provider
+	switch {
+	case isCodex:
+		provider = newCodexCompactProvider(&e.codexHistory, e.model)
+	case isOpenRouter:
+		provider = newOpenRouterCompactProvider(&e.openrouterHistory, e.openrouterAPIKey, e.model)
+	default:
+		provider = newAnthropicCompactProvider(e.history, e.client, e.model)
 	}
+
+	e.compactor = compact.New(provider, func(phase compact.Phase, err error) {
+		event := engine.ParsedEvent{
+			Type: "compaction",
+			Data: &engine.CompactionEvent{
+				Type:  "compaction",
+				Phase: string(phase),
+				Err:   err,
+			},
+		}
+
+		compactionEvent := event.Data.(*engine.CompactionEvent)
+		switch phase {
+		case compact.PhaseRunning:
+			compactionEvent.TokensBefore = provider.CurrentTokens()
+		default:
+			compactionEvent.TokensAfter = provider.CurrentTokens()
+		}
+
+		select {
+		case e.events <- event:
+		default:
+		}
+	})
 
 	return e, nil
 }
@@ -179,6 +186,19 @@ func (e *DirectEngine) Send(text string) error {
 	e.status = engine.StatusRunning
 	// Reset context for this turn.
 	e.ctx, e.cancel = context.WithCancel(context.Background())
+	e.mu.Unlock()
+
+	if e.compactor != nil && (e.codexMode || e.openrouterMode) {
+		if err := e.compactor.WaitForPending(e.ctx); err != nil {
+			e.cancel()
+			e.mu.Lock()
+			e.status = engine.StatusIdle
+			e.mu.Unlock()
+			return err
+		}
+	}
+
+	e.mu.Lock()
 	// Consume pending images.
 	images := e.pendingImages
 	e.pendingImages = nil
@@ -526,6 +546,10 @@ func (e *DirectEngine) emitResult() {
 		e.status = engine.StatusCompleted
 	}
 	e.mu.Unlock()
+
+	if wasRunning && e.compactor != nil && (e.codexMode || e.openrouterMode) {
+		e.compactor.TriggerIfNeeded(context.Background())
+	}
 
 	e.events <- engine.ParsedEvent{
 		Type: "result",

@@ -1,6 +1,9 @@
 package engine
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // EngineType identifies the backend.
 type EngineType string
@@ -73,6 +76,8 @@ type Engine interface {
 	// Engines that cannot inject history (e.g. claude headless) should
 	// implement this as a no-op.
 	RestoreHistory(messages []RestoredMessage) error
+	// TriggerCompact requests manual context compaction when supported.
+	TriggerCompact(ctx context.Context) error
 }
 
 // ParsedEvent is a decoded event from an AI engine.

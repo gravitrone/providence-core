@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"image/color"
 	"math/rand/v2"
@@ -19,14 +20,14 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/charmbracelet/harmonica"
+	"github.com/google/uuid"
 	"github.com/gravitrone/providence-core/internal/auth"
 	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/engine"
-	_ "github.com/gravitrone/providence-core/internal/engine/claude"  // register claude factory
-	"github.com/gravitrone/providence-core/internal/engine/direct"  // register direct factory + image types
+	_ "github.com/gravitrone/providence-core/internal/engine/claude" // register claude factory
+	"github.com/gravitrone/providence-core/internal/engine/direct"   // register direct factory + image types
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
-	"github.com/google/uuid"
 )
 
 // completionSpring is a critically-damped spring for the completion cool-down animation.
@@ -55,6 +56,12 @@ type authCompleteMsg struct {
 	Message string
 }
 
+// compactTriggerMsg reports whether a manual compaction request started.
+type compactTriggerMsg struct {
+	AwaitEvents bool
+	Err         error
+}
+
 // clipboardImageMsg carries image data read from the system clipboard.
 type clipboardImageMsg struct {
 	Data []byte
@@ -75,8 +82,8 @@ type ChatMessage struct {
 	ToolResult  string // summary line shown after ⎿
 	ToolPreview string // multi-line file preview content
 	ToolOutput  string // actual tool output content (file content, bash output, etc)
-	Expanded   bool // whether this tool's result is shown expanded
-	ImageCount int  // number of images attached to this message
+	Expanded    bool   // whether this tool's result is shown expanded
+	ImageCount  int    // number of images attached to this message
 }
 
 // --- Agent Tab ---
@@ -93,6 +100,7 @@ var slashCommands = []struct {
 	{"/auth", "Login to OpenAI (Codex OAuth)"},
 	{"/sessions", "List past sessions"},
 	{"/resume", "Resume a past session"},
+	{"/compact", "Manually trigger context compaction"},
 	{"/clear", "Clear chat history"},
 	{"/help", "Show available commands"},
 }
@@ -117,6 +125,8 @@ type AgentTab struct {
 	mdRenderer    *glamour.TermRenderer
 	follow        bool
 	model         string
+	currentTokens int
+	compacting    bool
 	flameFrame    int
 	// Spinner state.
 	spinnerFrame    int
@@ -305,6 +315,8 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 			return at, nil
 		}
 		at.engine = msg.engine
+		at.currentTokens = 0
+		at.compacting = false
 		at.transferImagesToEngine()
 		// No Send here - engine waits for the next user turn. Start the event
 		// pump anyway so system init / later events are drained.
@@ -312,6 +324,19 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 
 	case authCompleteMsg:
 		at.addSystemMessage(msg.Message)
+		at.refreshViewport()
+		return at, nil
+
+	case compactTriggerMsg:
+		if msg.Err != nil {
+			at.addSystemMessage("Compaction error: " + msg.Err.Error())
+			at.refreshViewport()
+			return at, nil
+		}
+		if msg.AwaitEvents {
+			return at, at.safeWaitForEvent()
+		}
+		at.addSystemMessage("Manual compaction is only available on the direct engine")
 		at.refreshViewport()
 		return at, nil
 
@@ -621,6 +646,42 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		_ = ev.Data
 		return at, at.safeWaitForEvent()
 
+	case "usage_update":
+		if usage, ok := ev.Data.(*engine.UsageUpdateEvent); ok {
+			at.currentTokens = usage.TotalTokens
+			at.messagesDirty = true
+		}
+		return at, at.safeWaitForEvent()
+
+	case "compaction":
+		if compaction, ok := ev.Data.(*engine.CompactionEvent); ok {
+			switch compaction.Phase {
+			case "running":
+				at.compacting = true
+				if compaction.TokensBefore > 0 {
+					at.currentTokens = compaction.TokensBefore
+				}
+				at.addSystemMessage("Context compaction started")
+				at.refreshViewport()
+			case "idle":
+				at.compacting = false
+				if compaction.TokensAfter > 0 {
+					at.currentTokens = compaction.TokensAfter
+				}
+				at.addSystemMessage("Context compaction complete")
+				at.refreshViewport()
+			case "failed":
+				at.compacting = false
+				if compaction.Err != nil {
+					at.addSystemMessage("Context compaction failed: " + compaction.Err.Error())
+				} else {
+					at.addSystemMessage("Context compaction failed")
+				}
+				at.refreshViewport()
+			}
+		}
+		return at, at.safeWaitForEvent()
+
 	case "stream_event":
 		if se, ok := ev.Data.(*engine.StreamEvent); ok {
 			if se.Event.Delta != nil && se.Event.Delta.Type == "text_delta" {
@@ -830,10 +891,14 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		}
 
 		at.refreshViewport()
+		if at.compacting {
+			return at, at.safeWaitForEvent()
+		}
 		return at, nil
 
 	case "closed":
 		at.streaming = false
+		at.compacting = false
 		at.spinnerVerb = ""
 		at.addSystemMessage("Session closed")
 		at.refreshViewport()
@@ -1014,7 +1079,9 @@ func (at AgentTab) StatusLine() string {
 
 	session := "idle"
 	if at.engine != nil {
-		if at.streaming {
+		if at.compacting {
+			session = "compacting"
+		} else if at.streaming {
 			session = "streaming"
 		} else {
 			session = "active"
@@ -1024,6 +1091,24 @@ func (at AgentTab) StatusLine() string {
 	items := []components.HintItem{
 		{Key: modelName, Desc: "model"},
 		{Key: session, Desc: "session"},
+	}
+	if at.engine != nil {
+		ctxWindow := engine.ContextWindowFor(at.model)
+		if ctxWindow > 0 {
+			pct := at.currentTokens * 100 / ctxWindow
+
+			pillColor := ColorMuted
+			switch {
+			case pct >= 85:
+				pillColor = ColorError
+			case pct >= 70:
+				pillColor = ColorWarning
+			case pct >= 50:
+				pillColor = ColorPrimary
+			}
+
+			items = append(items, components.TintedHint(fmt.Sprintf("%d%%", pct), "ctx", pillColor))
+		}
 	}
 	return components.StatusBarFromItems(items, 0)
 }
@@ -2246,6 +2331,22 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		// actually remembers this conversation on the next turn.
 		return true, createEngineAndRestore(restored, at.model, at.engineType)
 
+	case "/compact":
+		if at.engine == nil {
+			at.addSystemMessage("No active session to compact")
+			at.refreshViewport()
+			return true, nil
+		}
+
+		eng := at.engine
+		awaitEvents := at.engineType == engine.EngineTypeDirect
+		return true, func() tea.Msg {
+			return compactTriggerMsg{
+				AwaitEvents: awaitEvents,
+				Err:         eng.TriggerCompact(context.Background()),
+			}
+		}
+
 	case "/clear":
 		if at.store != nil && at.sessionID != "" {
 			at.store.DeleteSession(at.sessionID)
@@ -2268,6 +2369,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		help += "| `/auth` | Login to OpenAI (Codex OAuth) |\n"
 		help += "| `/sessions` | List past sessions |\n"
 		help += "| `/resume N` | Resume a past session |\n"
+		help += "| `/compact` | Manually trigger context compaction |\n"
 		help += "| `/clear` | Clear chat history |\n"
 		help += "| `/help` | Show available commands |"
 		at.messages = append(at.messages, ChatMessage{
@@ -2435,6 +2537,8 @@ func createEngineAndRestore(restored []engine.RestoredMessage, model string, eng
 // handleEngineCreated is called from Update when an engineCreatedMsg arrives.
 func (at *AgentTab) handleEngineCreated(msg engineCreatedMsg) tea.Cmd {
 	at.engine = msg.engine
+	at.currentTokens = 0
+	at.compacting = false
 	// Transfer any pending images to the newly created engine.
 	at.transferImagesToEngine()
 	if err := at.engine.Send(msg.prompt); err != nil {

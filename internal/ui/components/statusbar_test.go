@@ -3,6 +3,7 @@ package components
 import (
 	"testing"
 
+	"charm.land/lipgloss/v2"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -27,6 +28,19 @@ func TestHintMultiCharKey(t *testing.T) {
 	out := Hint("ctrl+c", "exit")
 	assert.Contains(t, out, "ctrl+c")
 	assert.Contains(t, out, "exit")
+}
+
+func TestTintedHintRendering(t *testing.T) {
+	tinted := StatusBarFromItems([]HintItem{
+		TintedHint("70%", "ctx", lipgloss.Color("#FFD700")),
+	}, 80)
+	plain := StatusBarFromItems([]HintItem{
+		{Key: "70%", Desc: "ctx"},
+	}, 80)
+
+	assert.Contains(t, tinted, "70%")
+	assert.Contains(t, tinted, "ctx")
+	assert.NotEqual(t, plain, tinted)
 }
 
 // --- StatusBar ---

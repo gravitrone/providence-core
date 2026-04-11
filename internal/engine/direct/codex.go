@@ -152,6 +152,32 @@ type codexHistoryEntry struct {
 	FuncName string // for function_call items
 }
 
+// compressCodexToolResults replaces oversized older tool outputs with a stub.
+func compressCodexToolResults(items []codexHistoryEntry, minLen int) int {
+	if len(items) <= 4 {
+		return 0
+	}
+
+	compressed := 0
+	for i := 0; i < len(items)-4; i++ {
+		if items[i].Role != "tool" {
+			continue
+		}
+		if len(items[i].Content) <= minLen {
+			continue
+		}
+
+		items[i].Content = fmt.Sprintf(
+			"[compressed: %d chars from call_id=%s]",
+			len(items[i].Content),
+			items[i].CallID,
+		)
+		compressed++
+	}
+
+	return compressed
+}
+
 // codexAgentLoop runs the agent loop using the Codex API.
 func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 	defer e.emitResult()
@@ -273,6 +299,7 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 
 		// If no tool calls, we're done.
 		if len(toolCalls) == 0 {
+			compressCodexToolResults(e.codexHistory, 2000)
 			return
 		}
 
@@ -328,6 +355,7 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 				CallID:  tc.ID,
 			})
 		}
+		compressCodexToolResults(e.codexHistory, 2000)
 
 		// Drain steered messages.
 		e.drainSteeredMessagesCodex()

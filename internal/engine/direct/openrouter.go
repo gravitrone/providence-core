@@ -162,6 +162,37 @@ func buildOpenRouterMessagesForModel(model string, system string, history []open
 	return msgs
 }
 
+// compressOpenRouterToolResults replaces oversized older tool outputs with a stub.
+func compressOpenRouterToolResults(msgs []openrouterMessage, minLen int) int {
+	if len(msgs) <= 4 {
+		return 0
+	}
+
+	compressed := 0
+	for i := 0; i < len(msgs)-4; i++ {
+		if msgs[i].Role != "tool" {
+			continue
+		}
+
+		content, ok := msgs[i].Content.(string)
+		if !ok {
+			continue
+		}
+		if len(content) <= minLen {
+			continue
+		}
+
+		msgs[i].Content = fmt.Sprintf(
+			"[compressed: %d chars from tool_call_id=%s]",
+			len(content),
+			msgs[i].ToolCallID,
+		)
+		compressed++
+	}
+
+	return compressed
+}
+
 func buildOpenRouterSystemContent(model string, system string) any {
 	if !strings.HasPrefix(model, "anthropic/") {
 		return system
@@ -313,6 +344,15 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 
 		// No tool calls -> turn is complete.
 		if len(toolCalls) == 0 {
+			openrouterMsgs := buildOpenRouterMessages("", e.openrouterHistory)
+			if compressOpenRouterToolResults(openrouterMsgs, 2000) > 0 {
+				for i := range e.openrouterHistory {
+					content, ok := openrouterMsgs[i].Content.(string)
+					if ok && openrouterMsgs[i].Role == "tool" {
+						e.openrouterHistory[i].Content = content
+					}
+				}
+			}
 			return
 		}
 
@@ -364,6 +404,15 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 				Content: result.Content,
 				CallID:  tc.ID,
 			})
+		}
+		openrouterMsgs := buildOpenRouterMessages("", e.openrouterHistory)
+		if compressOpenRouterToolResults(openrouterMsgs, 2000) > 0 {
+			for i := range e.openrouterHistory {
+				content, ok := openrouterMsgs[i].Content.(string)
+				if ok && openrouterMsgs[i].Role == "tool" {
+					e.openrouterHistory[i].Content = content
+				}
+			}
 		}
 
 		e.drainSteeredMessagesOpenRouter()

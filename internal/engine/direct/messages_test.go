@@ -1,6 +1,7 @@
 package direct
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -85,4 +86,53 @@ func TestConversationHistory_AddAssistantText(t *testing.T) {
 	assert.Equal(t, anthropic.MessageParamRoleAssistant, msgs[0].Role)
 	require.Len(t, msgs[0].Content, 1)
 	assert.Equal(t, "hi there", msgs[0].Content[0].OfText.Text)
+}
+
+func TestCompressLongToolResults(t *testing.T) {
+	longResult := strings.Repeat("x", 5000)
+	shortResult := strings.Repeat("y", 300)
+
+	h := NewConversationHistory()
+	h.AddUser("user-0")
+	h.AddToolResults([]anthropic.ContentBlockParamUnion{
+		anthropic.NewToolResultBlock("tool_old_long", longResult, false),
+	})
+	h.AddToolResults([]anthropic.ContentBlockParamUnion{
+		anthropic.NewToolResultBlock("tool_old_short", shortResult, false),
+	})
+	h.AddAssistantText("assistant-3")
+	h.AddToolResults([]anthropic.ContentBlockParamUnion{
+		anthropic.NewToolResultBlock("tool_recent_long", longResult, false),
+	})
+	h.AddUser("user-5")
+	h.AddAssistantText("assistant-6")
+	h.SetReportedTokens(12, 8)
+
+	compressed := h.CompressLongToolResults(2000)
+	require.Equal(t, 1, compressed)
+
+	msgs := h.Messages()
+	require.Len(t, msgs, 7)
+
+	oldLong := msgs[1].Content[0].OfToolResult
+	require.NotNil(t, oldLong)
+	require.Len(t, oldLong.Content, 1)
+	require.NotNil(t, oldLong.Content[0].OfText)
+	assert.Equal(t, "[compressed: 5000 chars from tool_use_id=tool_old_long]", oldLong.Content[0].OfText.Text)
+
+	oldShort := msgs[2].Content[0].OfToolResult
+	require.NotNil(t, oldShort)
+	require.Len(t, oldShort.Content, 1)
+	require.NotNil(t, oldShort.Content[0].OfText)
+	assert.Equal(t, shortResult, oldShort.Content[0].OfText.Text)
+
+	recentLong := msgs[4].Content[0].OfToolResult
+	require.NotNil(t, recentLong)
+	require.Len(t, recentLong.Content, 1)
+	require.NotNil(t, recentLong.Content[0].OfText)
+	assert.Equal(t, longResult, recentLong.Content[0].OfText.Text)
+
+	assert.Zero(t, h.lastInputTokens)
+	assert.Zero(t, h.lastOutputTokens)
+	assert.Zero(t, h.lastReportedTokens)
 }

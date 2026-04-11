@@ -2,6 +2,7 @@ package direct
 
 import (
 	"encoding/base64"
+	"fmt"
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -133,4 +134,55 @@ func (h *ConversationHistory) estimateTokensLocked() int {
 		}
 	}
 	return charCount * 4 / 3
+}
+
+// --- W5 microcompact ---
+
+// CompressLongToolResults replaces oversized older tool_result blocks with a stub.
+func (h *ConversationHistory) CompressLongToolResults(minLen int) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if len(h.messages) <= 4 {
+		return 0
+	}
+
+	compressed := 0
+	for i := 0; i < len(h.messages)-4; i++ {
+		for j := range h.messages[i].Content {
+			toolResult := h.messages[i].Content[j].OfToolResult
+			if toolResult == nil {
+				continue
+			}
+
+			totalLen := 0
+			for _, inner := range toolResult.Content {
+				if inner.OfText != nil {
+					totalLen += len(inner.OfText.Text)
+				}
+			}
+			if totalLen <= minLen {
+				continue
+			}
+
+			toolResult.Content = []anthropic.ToolResultBlockParamContentUnion{{
+				OfText: &anthropic.TextBlockParam{
+					Text: fmt.Sprintf(
+						"[compressed: %d chars from tool_use_id=%s]",
+						totalLen,
+						toolResult.ToolUseID,
+					),
+				},
+			}}
+			compressed++
+		}
+	}
+
+	if compressed > 0 {
+		h.lastReportedTokens = 0
+		h.lastInputTokens = 0
+		h.lastOutputTokens = 0
+	}
+
+	return compressed
 }

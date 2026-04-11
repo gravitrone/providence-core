@@ -108,6 +108,28 @@ func TestBuildOpenRouterMessages_ToolCallRoundTrip(t *testing.T) {
 	assert.Contains(t, string(raw), `"call_1"`)
 }
 
+func TestCompressOpenRouterToolResults(t *testing.T) {
+	longResult := strings.Repeat("x", 5000)
+	shortResult := strings.Repeat("y", 300)
+
+	msgs := []openrouterMessage{
+		{Role: "user", Content: "user-0"},
+		{Role: "tool", Content: longResult, ToolCallID: "call_old_long"},
+		{Role: "tool", Content: shortResult, ToolCallID: "call_old_short"},
+		{Role: "assistant", Content: "assistant-3"},
+		{Role: "tool", Content: longResult, ToolCallID: "call_recent_long"},
+		{Role: "user", Content: "user-5"},
+		{Role: "assistant", Content: "assistant-6"},
+	}
+
+	compressed := compressOpenRouterToolResults(msgs, 2000)
+	require.Equal(t, 1, compressed)
+
+	assert.Equal(t, "[compressed: 5000 chars from tool_call_id=call_old_long]", msgs[1].Content)
+	assert.Equal(t, shortResult, msgs[2].Content)
+	assert.Equal(t, longResult, msgs[4].Content)
+}
+
 func TestParseOpenRouterStream_TextOnly(t *testing.T) {
 	sse := strings.Join([]string{
 		`data: {"choices":[{"delta":{"content":"Hello"}}]}`,

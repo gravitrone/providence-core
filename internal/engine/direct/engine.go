@@ -346,6 +346,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		// If no tool use, we're done.
 		if accumulated.StopReason != anthropic.StopReasonToolUse {
+			e.history.CompressLongToolResults(2000)
 			return
 		}
 
@@ -398,6 +399,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			))
 		}
 		e.history.AddToolResults(resultBlocks)
+		e.history.CompressLongToolResults(2000)
 
 		// Check for steered messages.
 		e.drainSteeredMessages()

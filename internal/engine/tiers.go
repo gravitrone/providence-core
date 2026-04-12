@@ -44,9 +44,9 @@ type ModelSpec struct {
 
 // ModelCatalog is the provider-agnostic catalog of supported models.
 var ModelCatalog = []ModelSpec{
-	{Name: "claude-haiku-4-5-20251001", Aliases: []string{"haiku"}, Provider: "anthropic", Tier: TierFast, ContextWindow: 200000, Display: "haiku"},
-	{Name: "claude-sonnet-4-6", Aliases: []string{"sonnet"}, Provider: "anthropic", Tier: TierMedium, ContextWindow: 200000, Display: "sonnet"},
-	{Name: "claude-opus-4-6", Aliases: []string{"opus"}, Provider: "anthropic", Tier: TierCapable, ContextWindow: 200000, Display: "opus"},
+	{Name: "claude-haiku-4-5-20251001", Aliases: []string{"haiku"}, Provider: "anthropic", Tier: TierFast, ContextWindow: 200000, Display: "claude-haiku-4-5"},
+	{Name: "claude-sonnet-4-6", Aliases: []string{"sonnet"}, Provider: "anthropic", Tier: TierMedium, ContextWindow: 200000, Display: "claude-sonnet-4-6"},
+	{Name: "claude-opus-4-6", Aliases: []string{"opus"}, Provider: "anthropic", Tier: TierCapable, ContextWindow: 200000, Display: "claude-opus-4-6"},
 	{Name: "gpt-5.4-mini", Aliases: []string{"codex-mini", "gpt5-mini"}, Provider: "openai", Tier: TierFast, ContextWindow: 200000, Display: "gpt-5.4-mini"},
 	{Name: "gpt-5.2", Aliases: []string{"gpt5.2"}, Provider: "openai", Tier: TierMedium, ContextWindow: 200000, Display: "gpt-5.2"},
 	{Name: "gpt-5.4", Aliases: []string{"codex", "gpt5"}, Provider: "openai", Tier: TierCapable, ContextWindow: 200000, Display: "gpt-5.4"},
@@ -54,11 +54,11 @@ var ModelCatalog = []ModelSpec{
 	{Name: "gpt-5.2-codex", Aliases: []string{"codex-5.2"}, Provider: "openai", Tier: TierMedium, ContextWindow: 200000, Display: "gpt-5.2-codex"},
 	{Name: "gpt-5.1-codex-max", Aliases: []string{"codex-max", "codex-5.1-max"}, Provider: "openai", Tier: TierCapable, ContextWindow: 200000, Display: "gpt-5.1-codex-max"},
 	{Name: "gpt-5.1-codex-mini", Aliases: []string{"codex-5.1", "codex-5.1-mini"}, Provider: "openai", Tier: TierFast, ContextWindow: 200000, Display: "gpt-5.1-codex-mini"},
-	{Name: "anthropic/claude-sonnet-4-5", Aliases: []string{"or-sonnet"}, Provider: "openrouter", Tier: TierMedium, ContextWindow: 200000, Display: "or-sonnet"},
-	{Name: "openai/gpt-5.4", Aliases: []string{"or-gpt5"}, Provider: "openrouter", Tier: TierCapable, ContextWindow: 200000, Display: "or-gpt5"},
-	{Name: "google/gemini-2.5-pro", Aliases: []string{"or-gemini"}, Provider: "openrouter", Tier: TierMedium, ContextWindow: 1000000, Display: "or-gemini"},
-	{Name: "deepseek/deepseek-chat", Aliases: []string{"or-deepseek"}, Provider: "openrouter", Tier: TierFast, ContextWindow: 64000, Display: "or-deepseek"},
-	{Name: "meta-llama/llama-3.3-70b-instruct", Aliases: []string{"or-llama"}, Provider: "openrouter", Tier: TierFast, ContextWindow: 128000, Display: "or-llama"},
+	{Name: "anthropic/claude-sonnet-4-5", Aliases: []string{"or-sonnet"}, Provider: "openrouter", Tier: TierMedium, ContextWindow: 200000, Display: "anthropic/claude-sonnet-4-5"},
+	{Name: "openai/gpt-5.4", Aliases: []string{"or-gpt5"}, Provider: "openrouter", Tier: TierCapable, ContextWindow: 200000, Display: "openai/gpt-5.4"},
+	{Name: "google/gemini-2.5-pro", Aliases: []string{"or-gemini"}, Provider: "openrouter", Tier: TierMedium, ContextWindow: 1000000, Display: "google/gemini-2.5-pro"},
+	{Name: "deepseek/deepseek-chat", Aliases: []string{"or-deepseek"}, Provider: "openrouter", Tier: TierFast, ContextWindow: 64000, Display: "deepseek/deepseek-chat"},
+	{Name: "meta-llama/llama-3.3-70b-instruct", Aliases: []string{"or-llama"}, Provider: "openrouter", Tier: TierFast, ContextWindow: 128000, Display: "meta-llama/llama-3.3-70b-instruct"},
 }
 
 var (

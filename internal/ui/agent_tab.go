@@ -2019,12 +2019,16 @@ var availableModels = func() []struct {
 	}, 0, len(engine.ModelCatalog))
 
 	for _, spec := range engine.ModelCatalog {
+		display := spec.Display
+		if display == "" {
+			display = spec.Name
+		}
 		models = append(models, struct {
 			Name    string
 			Aliases []string
 			Desc    string
 		}{
-			Name:    spec.Name,
+			Name:    display,
 			Aliases: spec.Aliases,
 			Desc:    availableModelDescription(spec),
 		})
@@ -2172,6 +2176,9 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			components.ReapplyInputStyles(&at.input)
 			at.messagesDirty = true
 			at.addSystemMessage("Theme set to: " + args)
+			// Persist to config.
+			at.cfg.Theme = args
+			_ = at.cfg.Save()
 		case "auto":
 			hour := time.Now().Hour()
 			name := "flame"
@@ -2186,6 +2193,9 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			components.ReapplyInputStyles(&at.input)
 			at.messagesDirty = true
 			at.addSystemMessage("Theme set to auto (currently: " + name + ")")
+			// Persist to config (store "auto" so the resolution re-runs next launch).
+			at.cfg.Theme = "auto"
+			_ = at.cfg.Save()
 		default:
 			at.addSystemMessage("Unknown theme: " + args + " (valid: flame, night, auto)")
 		}
@@ -2386,6 +2396,9 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 func (at AgentTab) modelDisplay() string {
 	if at.model == "" {
 		return "default"
+	}
+	if spec := engine.SpecFor(at.model); spec != nil && spec.Display != "" {
+		return spec.Display
 	}
 	return at.model
 }

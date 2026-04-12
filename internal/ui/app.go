@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -23,6 +24,19 @@ type App struct {
 // NewApp creates and returns a new App model.
 // engineType sets the initial AI backend; pass "" for the default (claude).
 func NewApp(engineType string, cfg config.Config, st *store.Store) App {
+	// Restore persisted theme before constructing the agent tab so the
+	// renderer picks up the correct palette on first paint.
+	switch cfg.Theme {
+	case "flame", "night":
+		ApplyTheme(cfg.Theme)
+	case "auto":
+		hour := time.Now().Hour()
+		name := "flame"
+		if hour < 6 || hour >= 18 {
+			name = "night"
+		}
+		ApplyTheme(name)
+	}
 	return App{
 		keys:     DefaultKeyMap(),
 		agentTab: NewAgentTab(engine.EngineType(engineType), cfg, st),

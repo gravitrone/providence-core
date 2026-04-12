@@ -50,6 +50,22 @@ var slashPulseSpring = harmonica.NewSpring(harmonica.FPS(12), 5.0, 0.45)
 // Same shape as the completion spring so the dissolve feels consistent.
 var compactSpring = harmonica.NewSpring(harmonica.FPS(12), 6.0, 0.8)
 
+// DoublePressTimeoutMS is the window (in ms) within which a second ctrl+c or
+// ctrl+d press is interpreted as "exit". Outside this window the press resets.
+const DoublePressTimeoutMS = 800
+
+// doublePressResetMsg resets the pending double-press state after the timeout.
+type doublePressResetMsg struct {
+	Key string // "ctrl+c" or "ctrl+d"
+}
+
+// doublePressReset returns a tea.Cmd that fires after the timeout.
+func doublePressReset(key string) tea.Cmd {
+	return tea.Tick(time.Duration(DoublePressTimeoutMS)*time.Millisecond, func(t time.Time) tea.Msg {
+		return doublePressResetMsg{Key: key}
+	})
+}
+
 // --- Agent Tab Messages ---
 
 // AgentEventMsg wraps a parsed event from the Claude headless session.
@@ -207,6 +223,14 @@ type AgentTab struct {
 	// slashMatchCount is the number of rows rendered on the last frame,
 	// used to clamp slashCursor when the user edits the input.
 	slashMatchCount int
+
+	// Double-press state for ctrl+c / ctrl+d exit pattern.
+	// First press interrupts or starts the timer, second press within
+	// DoublePressTimeoutMS exits the app.
+	ctrlCLastPress time.Time
+	ctrlCPending   bool
+	ctrlDLastPress time.Time
+	ctrlDPending   bool
 
 	// Compact indicator state.
 	// compactPhase tracks the active compaction lifecycle: "" (inactive),
@@ -457,6 +481,16 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 		at.addSystemMessage(fmt.Sprintf("Image attached: %s (%s)", img.Name, formatSize(img.Size)))
 		at.refreshViewport()
 		return at, nil
+
+	case doublePressResetMsg:
+		switch msg.Key {
+		case "ctrl+c":
+			at.ctrlCPending = false
+		case "ctrl+d":
+			at.ctrlDPending = false
+		}
+		at.refreshViewport()
+		return at, nil
 	}
 
 	// Forward to input.
@@ -556,6 +590,40 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 	}
 
 	switch key {
+	case "ctrl+c":
+		now := time.Now()
+		if at.ctrlCPending && now.Sub(at.ctrlCLastPress) < time.Duration(DoublePressTimeoutMS)*time.Millisecond {
+			// Second press within window - exit.
+			return at, tea.Quit
+		}
+		// First press: interrupt if streaming, then start the window.
+		if at.streaming && at.engine != nil {
+			at.engine.Interrupt()
+		}
+		at.ctrlCPending = true
+		at.ctrlCLastPress = now
+		if !at.streaming {
+			at.addSystemMessage("Press ctrl+c again to exit")
+		}
+		at.refreshViewport()
+		return at, doublePressReset("ctrl+c")
+
+	case "ctrl+d":
+		now := time.Now()
+		if at.ctrlDPending && now.Sub(at.ctrlDLastPress) < time.Duration(DoublePressTimeoutMS)*time.Millisecond {
+			return at, tea.Quit
+		}
+		if at.streaming && at.engine != nil {
+			at.engine.Interrupt()
+		}
+		at.ctrlDPending = true
+		at.ctrlDLastPress = now
+		if !at.streaming {
+			at.addSystemMessage("Press ctrl+d again to exit")
+		}
+		at.refreshViewport()
+		return at, doublePressReset("ctrl+d")
+
 	case "up", "pgup":
 		// If input is empty and queue has messages, enter queue navigation.
 		if strings.TrimSpace(at.input.Value()) == "" && len(at.queue) > 0 {

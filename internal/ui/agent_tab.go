@@ -277,6 +277,9 @@ type AgentTab struct {
 
 	// Kairos autonomous mode state.
 	kairos *kairos.State
+
+	// Notification toast system.
+	notifications NotificationModel
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -308,10 +311,21 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 
 	model := cfg.Model
 
+	// First-run onboarding: show welcome message if .providence/ doesn't exist yet.
+	var initialMessages []ChatMessage
+	home, _ := os.UserHomeDir()
+	if IsFirstRun(home) {
+		initialMessages = append(initialMessages, ChatMessage{
+			Role:    "system",
+			Content: WelcomeMessage(),
+			Done:    true,
+		})
+	}
+
 	return AgentTab{
 		input:            ti,
 		viewport:         vp,
-		messages:         nil,
+		messages:         initialMessages,
 		follow:           true,
 		mdRenderer:       mr,
 		queueCursor:      -1,
@@ -439,6 +453,7 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 				at.compactVel = 0.0
 			}
 		}
+		at.notifications.Tick()
 		at.refreshViewport()
 		return at, flameTick()
 
@@ -1473,10 +1488,18 @@ func (at AgentTab) renderChatPane(paneWidth, height int) string {
 		}
 	}
 
+	// Notification toasts, padded.
+	notifSection := ""
+	if nv := at.notifications.View(contentW); nv != "" {
+		for _, line := range strings.Split(nv, "\n") {
+			notifSection += leftPad + line + "\n"
+		}
+	}
+
 	// Input, padded.
 	inputLine := leftPad + at.input.View()
 
-	return "\n" + vpPadded.String() + "\n" + divider + "\n" + previewSection + inputLine
+	return "\n" + vpPadded.String() + "\n" + divider + "\n" + previewSection + notifSection + inputLine
 }
 
 // matchingSlashCommands returns the slash commands whose names start with

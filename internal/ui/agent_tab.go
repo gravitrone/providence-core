@@ -199,8 +199,13 @@ type AgentTab struct {
 	queuedBright float64
 	queuedVel    float64
 
-	// Tool expansion: ctrl+o toggles all tool results visible.
+	// Tool expansion: toggled via freeze mode.
 	toolsExpanded bool
+
+	// Focus arbiter: controls which sub-model receives key events.
+	focus Focus
+	// Transcript virtual scroll model.
+	transcript TranscriptModel
 
 	// Pending image attachments for next message.
 	pendingImages []ImageAttachment
@@ -290,6 +295,8 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		model:       model,
 		cfg:         cfg,
 		store:       st,
+		focus:       FocusInput,
+		transcript:  NewTranscriptModel(),
 	}
 }
 
@@ -589,6 +596,12 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		}
 	}
 
+	// Focus-based routing: when transcript is focused (freeze mode),
+	// handle keys there instead of the normal input path.
+	if at.focus == FocusTranscript {
+		return at.handleTranscriptKey(key)
+	}
+
 	switch key {
 	case "ctrl+c":
 		now := time.Now()
@@ -817,7 +830,11 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		}
 
 	case "ctrl+o":
-		at.toolsExpanded = !at.toolsExpanded
+		// Enter transcript freeze mode.
+		at.transcript.SetMessages(at.messages)
+		at.transcript.SetViewport(chatContentWidth(at.width), at.height)
+		at.transcript.SetFrozen(true)
+		at.focus = FocusTranscript
 		at.messagesDirty = true
 		at.refreshViewport()
 		return at, nil
@@ -870,6 +887,119 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		at.input, cmd = at.input.Update(msg)
 		return at, cmd
 	}
+}
+
+// handleTranscriptKey handles keyboard input when the transcript is frozen
+// (FocusTranscript). j/k scroll, PgUp/PgDown page, / to search, n/N for
+// next/prev match, q/esc/ctrl+o to exit freeze mode.
+func (at AgentTab) handleTranscriptKey(key string) (AgentTab, tea.Cmd) {
+	// When the search input is active, most keys go to the search query.
+	if at.transcript.SearchActive() {
+		switch key {
+		case "esc":
+			at.transcript.SetSearchActive(false)
+			at.messagesDirty = true
+			at.refreshViewport()
+			return at, nil
+		case "enter":
+			// Confirm search, exit search input but stay frozen.
+			at.transcript.SetSearchActive(false)
+			at.messagesDirty = true
+			at.refreshViewport()
+			return at, nil
+		case "backspace":
+			q := at.transcript.SearchQuery()
+			if len(q) > 0 {
+				at.transcript.SetSearchQuery(q[:len(q)-1])
+			}
+			at.messagesDirty = true
+			at.refreshViewport()
+			return at, nil
+		default:
+			// Append printable characters to the search query.
+			if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+				at.transcript.SetSearchQuery(at.transcript.SearchQuery() + key)
+				at.messagesDirty = true
+				at.refreshViewport()
+			}
+			return at, nil
+		}
+	}
+
+	switch key {
+	case "j", "down":
+		at.transcript.ScrollBy(1)
+		at.follow = false
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, nil
+
+	case "k", "up":
+		at.transcript.ScrollBy(-1)
+		at.follow = false
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, nil
+
+	case "pgdown", "ctrl+f":
+		at.transcript.ScrollBy(at.transcript.viewportH)
+		at.follow = false
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, nil
+
+	case "pgup", "ctrl+b":
+		at.transcript.ScrollBy(-at.transcript.viewportH)
+		at.follow = false
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, nil
+
+	case "G":
+		at.transcript.ScrollToBottom()
+		at.follow = true
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, nil
+
+	case "g":
+		at.transcript.scrollTop = 0
+		at.transcript.sticky = false
+		at.follow = false
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, nil
+
+	case "/":
+		at.transcript.SetSearchActive(true)
+		at.transcript.SetSearchQuery("")
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, nil
+
+	case "n":
+		at.transcript.SearchNext()
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, nil
+
+	case "N":
+		at.transcript.SearchPrev()
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, nil
+
+	case "q", "esc", "ctrl+o":
+		// Exit freeze mode, return to input.
+		at.transcript.SetFrozen(false)
+		at.focus = FocusInput
+		at.follow = true
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, nil
+	}
+
+	return at, nil
 }
 
 func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
@@ -1439,6 +1569,18 @@ func padRight(s string, w int) string {
 // Hints returns context-dependent status bar hints.
 // Only shows during special states - idle mode has no hints (clean).
 func (at AgentTab) Hints() []components.HintItem {
+	// Freeze mode hints.
+	if at.focus == FocusTranscript && at.transcript.Frozen() {
+		hints := []components.HintItem{
+			{Key: "j/k", Desc: "scroll"},
+			{Key: "/", Desc: "search"},
+		}
+		if at.transcript.SearchHitCount() > 0 {
+			hints = append(hints, components.HintItem{Key: "n/N", Desc: "next/prev"})
+		}
+		hints = append(hints, components.HintItem{Key: "q", Desc: "exit freeze"})
+		return hints
+	}
 	if at.pendingPerm != nil {
 		return []components.HintItem{
 			{Key: "y", Desc: "approve"},
@@ -1457,16 +1599,10 @@ func (at AgentTab) Hints() []components.HintItem {
 			{Key: "up", Desc: "select queue"},
 		}
 	}
-	// Show ctrl+o hint when there are tool messages.
-	for _, msg := range at.messages {
-		if msg.Role == "tool" {
-			desc := "expand tools"
-			if at.toolsExpanded {
-				desc = "collapse tools"
-			}
-			return []components.HintItem{
-				{Key: "ctrl+o", Desc: desc},
-			}
+	// Show ctrl+o hint when there are messages to browse.
+	if len(at.messages) > 0 {
+		return []components.HintItem{
+			{Key: "ctrl+o", Desc: "freeze scroll"},
 		}
 	}
 	// No hints in idle/streaming - status line handles it.

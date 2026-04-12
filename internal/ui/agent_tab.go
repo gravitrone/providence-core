@@ -887,6 +887,25 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		_ = ev.Data
 		return at, at.safeWaitForEvent()
 
+	case "tombstone":
+		// Remove the last streaming assistant message from the transcript.
+		for i := len(at.messages) - 1; i >= 0; i-- {
+			if at.messages[i].Role == "assistant" && !at.messages[i].Done {
+				at.messages = append(at.messages[:i], at.messages[i+1:]...)
+				at.messagesDirty = true
+				break
+			}
+		}
+		at.refreshViewport()
+		return at, at.safeWaitForEvent()
+
+	case "system_message":
+		if sm, ok := ev.Data.(*engine.SystemMessageEvent); ok {
+			at.addSystemMessage(sm.Content)
+			at.refreshViewport()
+		}
+		return at, at.safeWaitForEvent()
+
 	case "usage_update":
 		if usage, ok := ev.Data.(*engine.UsageUpdateEvent); ok {
 			at.currentTokens = usage.TotalTokens

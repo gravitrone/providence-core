@@ -81,6 +81,48 @@ func (s *Store) GetMessages(sessionID string) ([]MessageRow, error) {
 	return msgs, rows.Err()
 }
 
+// SearchResult holds a single FTS5 match.
+type SearchResult struct {
+	SessionID string
+	Content   string
+	Role      string
+	CreatedAt string
+	Snippet   string
+}
+
+// SearchMessages searches across all sessions using FTS5.
+func (s *Store) SearchMessages(query string, limit int) ([]SearchResult, error) {
+	if s == nil {
+		return nil, nil
+	}
+	if limit < 1 {
+		limit = 10
+	}
+	rows, err := s.db.Query(`
+		SELECT m.session_id, m.content, m.role, m.created_at,
+		       highlight(messages_fts, 0, '<mark>', '</mark>') as snippet
+		FROM messages_fts
+		JOIN messages m ON m.id = messages_fts.rowid
+		WHERE messages_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?
+	`, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []SearchResult
+	for rows.Next() {
+		var r SearchResult
+		if err := rows.Scan(&r.SessionID, &r.Content, &r.Role, &r.CreatedAt, &r.Snippet); err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
 // DeleteMessages removes all messages for a session.
 func (s *Store) DeleteMessages(sessionID string) error {
 	if s == nil {

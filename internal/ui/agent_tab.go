@@ -27,6 +27,7 @@ import (
 	_ "github.com/gravitrone/providence-core/internal/engine/claude"    // register claude factory
 	_ "github.com/gravitrone/providence-core/internal/engine/codex_re" // register codex_re factory
 	"github.com/gravitrone/providence-core/internal/engine/direct"     // register direct factory + image types
+	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 	"github.com/gravitrone/providence-core/internal/ui/dashboard"

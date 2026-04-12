@@ -301,6 +301,43 @@ func reapplyStyles() {
 	components.ThemeText = lipgloss.Color(ActiveTheme.Text)
 }
 
+// --- Per-Engine Theme Identifiers ---
+
+// EngineTheme maps an engine type to its visual identity. These are data-only
+// definitions used by the TUI to determine colors and labels when switching
+// between engine backends. Actual theme application is wired separately.
+type EngineTheme struct {
+	Name         string   // display name
+	Primary      string   // primary color hex
+	Secondary    string   // secondary color hex
+	BannerText   string   // what the banner says
+	SpinnerVerbs []string // engine-specific activity verbs
+}
+
+// EngineThemes maps engine type strings to their visual identities.
+var EngineThemes = map[string]EngineTheme{
+	"native": {
+		Name: "The Profaned Core", Primary: "#FFA600", Secondary: "#D77757",
+		BannerText:   "PROVIDENCE",
+		SpinnerVerbs: []string{"consecrating", "invoking", "channeling"},
+	},
+	"claude": {
+		Name: "Claude Code Embedded", Primary: "#CF6E22", Secondary: "#A0704A",
+		BannerText:   "CLAUDE CODE",
+		SpinnerVerbs: []string{"thinking", "analyzing", "reasoning"},
+	},
+	"codex_re": {
+		Name: "Codex Engine", Primary: "#00FF88", Secondary: "#00CC66",
+		BannerText:   "CODEX",
+		SpinnerVerbs: []string{"computing", "generating", "processing"},
+	},
+	"opencode": {
+		Name: "OpenCode Engine", Primary: "#7B68EE", Secondary: "#6A5ACD",
+		BannerText:   "OPENCODE",
+		SpinnerVerbs: []string{"serving", "streaming", "responding"},
+	},
+}
+
 // Divider returns a horizontal line.
 func Divider(width int) string {
 	if width <= 0 {

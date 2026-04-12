@@ -135,7 +135,7 @@ func (t *TaskTool) resolveAgentType(name string) subagent.AgentType {
 	if name == "" {
 		return subagent.DefaultAgentType()
 	}
-	builtins := subagent.BuiltinAgentTypes()
+	builtins := subagent.BuiltinAgents
 	if at, ok := builtins[name]; ok {
 		return at
 	}

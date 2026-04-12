@@ -28,6 +28,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/direct"   // register direct factory + image types
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
+	"github.com/gravitrone/providence-core/internal/ui/dashboard"
 	"github.com/gravitrone/providence-core/internal/ui/tree"
 )
 
@@ -134,6 +135,7 @@ var slashCommands = []slashCommand{
 	{"/resume", "Resume a past session"},
 	{"/compact", "Manually trigger context compaction"},
 	{"/rewind", "Rewind to a previous user message"},
+	{"/dashboard", "Toggle dashboard panel (or: pin, hide)"},
 	{"/tree", "Toggle conversation tree view"},
 	{"/clear", "Clear chat history"},
 	{"/help", "Show available commands"},
@@ -261,6 +263,10 @@ type AgentTab struct {
 
 	// Tree view state.
 	treeViewOpen bool
+
+	// Dashboard split-pane state.
+	dashboardVisible bool // default true, toggle via /dashboard
+	dashboard        dashboard.DashboardModel
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -293,19 +299,21 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 	model := cfg.Model
 
 	return AgentTab{
-		input:       ti,
-		viewport:    vp,
-		messages:    nil,
-		follow:      true,
-		mdRenderer:  mr,
-		queueCursor: -1,
-		slashCursor: -1,
-		engineType:  engineType,
-		model:       model,
-		cfg:         cfg,
-		store:       st,
-		focus:       FocusInput,
-		transcript:  NewTranscriptModel(),
+		input:            ti,
+		viewport:         vp,
+		messages:         nil,
+		follow:           true,
+		mdRenderer:       mr,
+		queueCursor:      -1,
+		slashCursor:      -1,
+		engineType:       engineType,
+		model:            model,
+		cfg:              cfg,
+		store:            st,
+		focus:            FocusInput,
+		transcript:       NewTranscriptModel(),
+		dashboardVisible: true,
+		dashboard:        dashboard.New(),
 	}
 }
 
@@ -1386,7 +1394,24 @@ func (at AgentTab) View(width, height int) string {
 		at.Resize(width, height)
 	}
 
-	contentW := chatContentWidth(width)
+	// Split-pane: if dashboard visible and terminal wide enough, render side-by-side.
+	showDash := at.dashboardVisible && width >= 80
+	if showDash {
+		chatW := width * 65 / 100
+		dashW := width - chatW
+		chatView := at.renderChatPane(chatW, height)
+		at.dashboard.SetSize(dashW, height)
+		dashView := at.dashboard.View()
+		return lipgloss.JoinHorizontal(lipgloss.Top, chatView, dashView)
+	}
+
+	return at.renderChatPane(width, height)
+}
+
+// renderChatPane renders the full chat view (viewport + divider + preview + input)
+// constrained to the given pane width and height.
+func (at AgentTab) renderChatPane(paneWidth, height int) string {
+	contentW := chatContentWidth(paneWidth)
 
 	// Set input width to match content area.
 	at.input.SetWidth(contentW - 4) // subtract prompt width.
@@ -1409,8 +1434,8 @@ func (at AgentTab) View(width, height int) string {
 	at.viewport.SetHeight(vpH)
 	at.refreshViewport()
 
-	// Calculate left padding to center the content block.
-	pad := (width - contentW) / 2
+	// Calculate left padding to center the content block within the pane.
+	pad := (paneWidth - contentW) / 2
 	if pad < 0 {
 		pad = 0
 	}
@@ -3144,6 +3169,34 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		at.refreshViewport()
 		return true, nil
 
+	case "/dashboard":
+		if args == "" || args == "toggle" {
+			at.dashboardVisible = !at.dashboardVisible
+			if at.dashboardVisible {
+				at.addSystemMessage("Dashboard visible")
+			} else {
+				at.addSystemMessage("Dashboard hidden")
+			}
+		} else if strings.HasPrefix(args, "pin ") {
+			// /dashboard pin approvals,agents - expand named panels.
+			ids := strings.Split(strings.TrimPrefix(args, "pin "), ",")
+			for _, id := range ids {
+				at.dashboard.SetPanelVisible(strings.TrimSpace(id), true)
+			}
+			at.addSystemMessage("Pinned panels: " + strings.Join(ids, ", "))
+		} else if strings.HasPrefix(args, "hide ") {
+			// /dashboard hide errors - collapse named panels.
+			ids := strings.Split(strings.TrimPrefix(args, "hide "), ",")
+			for _, id := range ids {
+				at.dashboard.SetPanelVisible(strings.TrimSpace(id), false)
+			}
+			at.addSystemMessage("Hidden panels: " + strings.Join(ids, ", "))
+		} else {
+			at.addSystemMessage("Usage: /dashboard [toggle|pin <ids>|hide <ids>]")
+		}
+		at.refreshViewport()
+		return true, nil
+
 	case "/tree":
 		at.treeViewOpen = !at.treeViewOpen
 		at.messagesDirty = true
@@ -3174,6 +3227,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		help += "| `/resume N` | Resume a past session |\n"
 		help += "| `/compact` | Manually trigger context compaction |\n"
 		help += "| `/rewind` | Rewind to a previous user message |\n"
+		help += "| `/dashboard` | Toggle dashboard panel |\n"
 		help += "| `/tree` | Toggle conversation tree view |\n"
 		help += "| `/clear` | Clear chat history |\n"
 		help += "| `/help` | Show available commands |"

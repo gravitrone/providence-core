@@ -148,6 +148,10 @@ func (p *openrouterCompactProvider) ContextWindow() int {
 	return engine.ContextWindowFor(p.model)
 }
 
+func (p *openrouterCompactProvider) MaxOutputTokens() int {
+	return engine.MaxOutputTokensFor(p.model)
+}
+
 func findOpenRouterCompactionBoundary(items []openrouterHistoryEntry) int {
 	if len(items) == 0 {
 		return 0

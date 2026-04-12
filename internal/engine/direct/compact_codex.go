@@ -225,6 +225,10 @@ func (p *codexCompactProvider) ContextWindow() int {
 	return engine.ContextWindowFor(p.model)
 }
 
+func (p *codexCompactProvider) MaxOutputTokens() int {
+	return engine.MaxOutputTokensFor(p.model)
+}
+
 func findCodexCompactionBoundary(items []codexHistoryEntry) int {
 	if len(items) == 0 {
 		return 0

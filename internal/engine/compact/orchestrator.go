@@ -8,9 +8,39 @@ import (
 )
 
 const (
-	triggerThresholdPercent = 80
-	keepRecentPercent       = 30
+	// AutocompactBufferTokens is the buffer below the effective window before
+	// auto-compaction triggers.
+	AutocompactBufferTokens = 13_000
+	// ManualCompactBufferTokens is the tighter buffer used for the blocking
+	// (manual) compaction limit.
+	ManualCompactBufferTokens = 3_000
+	// MaxOutputTokensForSummary caps how many output tokens are reserved when
+	// computing the effective context window.
+	MaxOutputTokensForSummary = 20_000
+	// MaxConsecutiveFailures is the circuit breaker trip threshold.
+	MaxConsecutiveFailures = 3
+
+	keepRecentPercent = 30
 )
+
+// GetEffectiveContextWindow returns the usable context window after reserving
+// space for the model's output tokens.
+func GetEffectiveContextWindow(contextWindow, maxOutputTokens int) int {
+	reserved := min(maxOutputTokens, MaxOutputTokensForSummary)
+	return contextWindow - reserved
+}
+
+// GetAutoCompactThreshold returns the token count at which auto-compaction
+// should trigger.
+func GetAutoCompactThreshold(contextWindow, maxOutputTokens int) int {
+	return GetEffectiveContextWindow(contextWindow, maxOutputTokens) - AutocompactBufferTokens
+}
+
+// GetBlockingLimit returns the token count at which a blocking compaction
+// should fire (the hard ceiling before the API rejects).
+func GetBlockingLimit(contextWindow, maxOutputTokens int) int {
+	return GetEffectiveContextWindow(contextWindow, maxOutputTokens) - ManualCompactBufferTokens
+}
 
 // Phase describes the current compaction lifecycle state.
 type Phase string
@@ -38,11 +68,13 @@ type Orchestrator struct {
 	provider Provider
 	onPhase  phaseChangeFn
 
-	mu      sync.Mutex
-	phase   Phase
-	done    chan struct{}
-	pending pendingReplacement
-	lastErr error
+	mu                    sync.Mutex
+	phase                 Phase
+	done                  chan struct{}
+	pending               pendingReplacement
+	lastErr               error
+	consecutiveFailures   int
+	hasAttemptedReactive  bool
 }
 
 // New creates a compaction orchestrator for the given provider.
@@ -61,8 +93,16 @@ func (o *Orchestrator) TriggerIfNeeded(ctx context.Context) bool {
 		return false
 	}
 
-	currentTokens := o.provider.CurrentTokens()
-	if currentTokens*100 < contextWindow*triggerThresholdPercent {
+	o.mu.Lock()
+	if o.consecutiveFailures >= MaxConsecutiveFailures {
+		o.mu.Unlock()
+		return false
+	}
+	o.mu.Unlock()
+
+	maxOutput := o.provider.MaxOutputTokens()
+	threshold := GetAutoCompactThreshold(contextWindow, maxOutput)
+	if o.provider.CurrentTokens() < threshold {
 		return false
 	}
 
@@ -104,6 +144,7 @@ func (o *Orchestrator) WaitForPending(ctx context.Context) error {
 	}
 
 	o.mu.Lock()
+	o.hasAttemptedReactive = false
 	done := o.done
 	o.mu.Unlock()
 
@@ -128,7 +169,13 @@ func (o *Orchestrator) WaitForPending(ctx context.Context) error {
 			o.emitPhase(PhaseFailed, replaceErr)
 			return replaceErr
 		}
-		o.resetLockedState(PhaseIdle, nil)
+		o.mu.Lock()
+		o.phase = PhaseIdle
+		o.done = nil
+		o.pending = pendingReplacement{}
+		o.lastErr = nil
+		o.consecutiveFailures = 0
+		o.mu.Unlock()
 		o.emitPhase(PhaseIdle, nil)
 		return nil
 	case PhaseFailed:
@@ -137,6 +184,55 @@ func (o *Orchestrator) WaitForPending(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+// TriggerReactive runs compaction synchronously in response to a prompt-too-long
+// (413) API error. It is a one-shot guard: it will only attempt once per turn.
+// The guard resets when WaitForPending is called at the start of the next turn.
+func (o *Orchestrator) TriggerReactive(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	o.mu.Lock()
+	if o.hasAttemptedReactive {
+		o.mu.Unlock()
+		return fmt.Errorf("reactive compaction already attempted this turn")
+	}
+	o.hasAttemptedReactive = true
+	o.mu.Unlock()
+
+	keepRecentTokens := o.provider.ContextWindow() * keepRecentPercent / 100
+
+	compacted, err := o.provider.Compress(ctx, keepRecentTokens)
+	if err != nil {
+		return fmt.Errorf("reactive compress: %w", err)
+	}
+	if compacted > 0 {
+		return nil
+	}
+
+	payload, cutIndex, err := o.provider.Serialize(keepRecentTokens)
+	if err != nil {
+		return fmt.Errorf("reactive serialize: %w", err)
+	}
+	if strings.TrimSpace(payload) == "" || cutIndex <= 0 {
+		return fmt.Errorf("reactive compaction: nothing to compact")
+	}
+
+	summary, err := o.provider.OneShot(ctx, SystemPrompt, payload)
+	if err != nil {
+		return fmt.Errorf("reactive oneshot: %w", err)
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return fmt.Errorf("reactive compaction: empty summary")
+	}
+
+	if replaceErr := o.provider.Replace(summary, cutIndex); replaceErr != nil {
+		return fmt.Errorf("reactive replace: %w", replaceErr)
+	}
+	return nil
 }
 
 // IsRunning reports whether an async compaction request is active.
@@ -155,7 +251,7 @@ func (o *Orchestrator) run(ctx context.Context, done chan struct{}, keepRecentTo
 		return
 	}
 	if compacted > 0 {
-		o.finishIdle()
+		o.finishSuccess()
 		return
 	}
 
@@ -165,7 +261,7 @@ func (o *Orchestrator) run(ctx context.Context, done chan struct{}, keepRecentTo
 		return
 	}
 	if strings.TrimSpace(payload) == "" || cutIndex <= 0 {
-		o.finishIdle()
+		o.finishSuccess()
 		return
 	}
 
@@ -188,13 +284,21 @@ func (o *Orchestrator) run(ctx context.Context, done chan struct{}, keepRecentTo
 		cutIndex: cutIndex,
 	}
 	o.lastErr = nil
+	o.consecutiveFailures = 0
 	o.mu.Unlock()
 
 	o.emitPhase(PhaseReady, nil)
 }
 
-func (o *Orchestrator) finishIdle() {
-	o.resetLockedState(PhaseIdle, nil)
+func (o *Orchestrator) finishSuccess() {
+	o.mu.Lock()
+	o.phase = PhaseIdle
+	o.done = nil
+	o.pending = pendingReplacement{}
+	o.lastErr = nil
+	o.consecutiveFailures = 0
+	o.mu.Unlock()
+
 	o.emitPhase(PhaseIdle, nil)
 }
 
@@ -203,6 +307,7 @@ func (o *Orchestrator) finishFailed(err error) {
 	o.phase = PhaseFailed
 	o.pending = pendingReplacement{}
 	o.lastErr = err
+	o.consecutiveFailures++
 	o.mu.Unlock()
 
 	o.emitPhase(PhaseFailed, err)

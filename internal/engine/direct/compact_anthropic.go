@@ -103,6 +103,10 @@ func (p *anthropicCompactProvider) ContextWindow() int {
 	return engine.ContextWindowFor(p.model)
 }
 
+func (p *anthropicCompactProvider) MaxOutputTokens() int {
+	return engine.MaxOutputTokensFor(p.model)
+}
+
 func findSafeCompactionBoundary(msgs []anthropic.MessageParam) int {
 	if len(msgs) == 0 {
 		return 0

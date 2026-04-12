@@ -57,10 +57,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.agentTab.Resize(a.width, a.height)
 		return a, nil
 
-	case tea.KeyPressMsg:
-		if msg.String() == "ctrl+c" {
-			return a, tea.Quit
-		}
 	}
 
 	// Delegate all messages to agent tab.

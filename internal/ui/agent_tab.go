@@ -28,6 +28,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/direct"   // register direct factory + image types
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
+	"github.com/gravitrone/providence-core/internal/ui/tree"
 )
 
 // completionSpring is a critically-damped spring for the completion cool-down animation.
@@ -132,6 +133,8 @@ var slashCommands = []slashCommand{
 	{"/sessions", "List past sessions"},
 	{"/resume", "Resume a past session"},
 	{"/compact", "Manually trigger context compaction"},
+	{"/rewind", "Rewind to a previous user message"},
+	{"/tree", "Toggle conversation tree view"},
 	{"/clear", "Clear chat history"},
 	{"/help", "Show available commands"},
 }
@@ -252,6 +255,12 @@ type AgentTab struct {
 	// compactBright drives the dissolve animation (1.0 bright -> 0.0 frozen).
 	compactBright float64
 	compactVel    float64
+
+	// Rewind picker state.
+	rewindModel components.RewindModel
+
+	// Tree view state.
+	treeViewOpen bool
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -557,6 +566,43 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			return at, at.safeWaitForEvent()
 		}
 		return at, nil
+	}
+
+	// Rewind picker takes priority when active.
+	if at.rewindModel.Active() {
+		var rewindMsg *components.RewindMsg
+		var handled bool
+		at.rewindModel, rewindMsg, handled = at.rewindModel.HandleKey(key)
+		if rewindMsg != nil {
+			switch rewindMsg.Action {
+			case components.RewindRestore:
+				// Slice messages at the selected index.
+				if rewindMsg.Index >= 0 && rewindMsg.Index < len(at.messages) {
+					// Keep the user message text for re-populating input.
+					userText := at.messages[rewindMsg.Index].Content
+					at.messages = at.messages[:rewindMsg.Index]
+					at.input.SetValue(userText)
+					at.input.CursorEnd()
+					at.messagesDirty = true
+					// Kill engine so next send creates fresh session.
+					if at.engine != nil {
+						at.engine.Close()
+						at.engine = nil
+					}
+					at.addSystemMessage(fmt.Sprintf("Rewound to message %d", rewindMsg.Index+1))
+				}
+			case components.RewindSummarize:
+				at.addSystemMessage(fmt.Sprintf("Summarize from message %d (not yet implemented)", rewindMsg.Index+1))
+			case components.RewindCancel:
+				// Nothing to do.
+			}
+			at.refreshViewport()
+			return at, nil
+		}
+		if handled {
+			at.refreshViewport()
+			return at, nil
+		}
 	}
 
 	// Slash table navigation takes priority when the table is visible.
@@ -1819,6 +1865,40 @@ func (at *AgentTab) refreshViewport() {
 	}
 
 	content := banner + "\n" + at.cachedMessages
+
+	// Overlay: tree view replaces message content when active.
+	if at.treeViewOpen && len(at.messages) > 0 {
+		treeTheme := tree.ThemeColors{
+			Primary:    ActiveTheme.Primary,
+			Secondary:  ActiveTheme.Secondary,
+			Accent:     ActiveTheme.Accent,
+			Muted:      ActiveTheme.Muted,
+			Text:       ActiveTheme.Text,
+			Background: ActiveTheme.Background,
+			Error:      ActiveTheme.Error,
+		}
+		treeMsgs := make([]tree.ChatMessage, len(at.messages))
+		for i, m := range at.messages {
+			treeMsgs[i] = tree.ChatMessage{
+				Role:       m.Role,
+				Content:    m.Content,
+				ToolName:   m.ToolName,
+				ToolArgs:   m.ToolArgs,
+				ToolOutput: m.ToolOutput,
+				ToolStatus: m.ToolStatus,
+				Done:       m.Done,
+			}
+		}
+		nodes := tree.BuildTree(treeMsgs)
+		treeContent := tree.RenderTree(nodes, chatContentWidth(at.width), treeTheme)
+		content = banner + "\n" + treeContent
+	}
+
+	// Overlay: rewind picker appended at bottom when active.
+	if at.rewindModel.Active() {
+		content += "\n" + at.rewindModel.View()
+	}
+
 	at.viewport.SetContent(content)
 	if at.follow {
 		at.viewport.GotoBottom()
@@ -3039,6 +3119,37 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			}
 		}
 
+	case "/rewind":
+		// Build rewind items from user messages.
+		var items []components.RewindItem
+		for i, m := range at.messages {
+			if m.Role == "user" {
+				preview := m.Content
+				if len(preview) > 80 {
+					preview = preview[:77] + "..."
+				}
+				items = append(items, components.RewindItem{
+					Role:    m.Role,
+					Preview: preview,
+					Index:   i,
+				})
+			}
+		}
+		if len(items) == 0 {
+			at.addSystemMessage("No user messages to rewind to")
+			at.refreshViewport()
+			return true, nil
+		}
+		at.rewindModel = components.NewRewindModel(items, chatContentWidth(at.width))
+		at.refreshViewport()
+		return true, nil
+
+	case "/tree":
+		at.treeViewOpen = !at.treeViewOpen
+		at.messagesDirty = true
+		at.refreshViewport()
+		return true, nil
+
 	case "/clear":
 		if at.store != nil && at.sessionID != "" {
 			at.store.DeleteSession(at.sessionID)
@@ -3062,6 +3173,8 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		help += "| `/sessions` | List past sessions |\n"
 		help += "| `/resume N` | Resume a past session |\n"
 		help += "| `/compact` | Manually trigger context compaction |\n"
+		help += "| `/rewind` | Rewind to a previous user message |\n"
+		help += "| `/tree` | Toggle conversation tree view |\n"
 		help += "| `/clear` | Clear chat history |\n"
 		help += "| `/help` | Show available commands |"
 		at.messages = append(at.messages, ChatMessage{

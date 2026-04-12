@@ -87,6 +87,20 @@ var spinnerVerbs = []string{
 	"Calamitizing",
 }
 
+// compactVerbs are the Providence-themed phrases shown while the context
+// compaction pipeline is running. Each turns the dry "compacting context"
+// into something that matches the Profaned Core aesthetic.
+var compactVerbs = []string{
+	"Profaning context",
+	"Calamitizing memories",
+	"Compacting flames",
+	"Searing tokens",
+	"Rendering the ember",
+	"Distilling divine residue",
+	"Condensing the brimstone",
+	"Crystallizing holy ash",
+}
+
 var vizVerbs = []string{
 	"Conjuring the flames",
 	"Forging divine sight",
@@ -128,6 +142,18 @@ func randomVizVerb(current string) string {
 	}
 	for {
 		v := vizVerbs[rand.IntN(len(vizVerbs))]
+		if v != current {
+			return v
+		}
+	}
+}
+
+func randomCompactVerb(current string) string {
+	if len(compactVerbs) == 1 {
+		return compactVerbs[0]
+	}
+	for {
+		v := compactVerbs[rand.IntN(len(compactVerbs))]
 		if v != current {
 			return v
 		}

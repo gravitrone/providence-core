@@ -109,6 +109,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 
 	// Build tool registry with all built-in tools.
 	fs := tools.NewFileState()
+	planState := tools.NewPlanModeState(nil) // event wiring comes in Phase 5
 	registry := tools.NewRegistry(
 		tools.NewReadTool(fs),
 		tools.NewWriteTool(fs),
@@ -118,6 +119,10 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		&tools.GrepTool{},
 		&tools.WebFetchTool{},
 		&tools.WebSearchTool{},
+		tools.NewTodoWriteTool(),
+		tools.NewAskUserQuestionTool(nil), // event wiring comes in Phase 5
+		tools.NewEnterPlanModeTool(planState),
+		tools.NewExitPlanModeTool(planState),
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())

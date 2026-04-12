@@ -89,3 +89,16 @@ type ToolResultEvent struct {
 	Output     string `json:"output"`
 	IsError    bool   `json:"is_error"`
 }
+
+// TombstoneEvent signals the UI to remove a partial assistant message from the
+// transcript, e.g. after a model overload triggers a fallback retry.
+type TombstoneEvent struct {
+	Type         string `json:"type"`
+	MessageIndex int    `json:"message_index"`
+}
+
+// SystemMessageEvent carries an informational system message to the UI.
+type SystemMessageEvent struct {
+	Type    string `json:"type"`
+	Content string `json:"content"`
+}

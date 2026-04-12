@@ -16,6 +16,10 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
 )
 
+// MaxOutputTokensRecoveryLimit is the maximum number of times the engine will
+// automatically retry after hitting max_tokens before surfacing the error.
+const MaxOutputTokensRecoveryLimit = 3
+
 func init() {
 	engine.RegisterFactory(engine.EngineTypeDirect, func(cfg engine.EngineConfig) (engine.Engine, error) {
 		return NewDirectEngine(cfg)
@@ -46,6 +50,17 @@ type DirectEngine struct {
 
 	// Pending images to include with the next user message.
 	pendingImages []ImageData
+
+	// Provider identifier ("anthropic", "openai", "openrouter").
+	provider string
+
+	// maxOutputRecoveryCount tracks how many times we've auto-recovered from
+	// max_tokens in the current user turn. Reset at the start of each Send.
+	maxOutputRecoveryCount int
+
+	// fallbackActive is true when we've already fallen back to a fast model
+	// for this turn, preventing infinite fallback loops.
+	fallbackActive bool
 
 	// Codex mode: use OpenAI Codex API instead of Anthropic.
 	codexMode    bool
@@ -108,6 +123,13 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	history := NewConversationHistory()
 
+	providerName := engine.ProviderAnthropic
+	if isCodex {
+		providerName = engine.ProviderOpenAI
+	} else if isOpenRouter {
+		providerName = engine.ProviderOpenRouter
+	}
+
 	e := &DirectEngine{
 		client:           client,
 		model:            model,
@@ -121,6 +143,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		status:           engine.StatusIdle,
 		ctx:              ctx,
 		cancel:           cancel,
+		provider:         providerName,
 		codexMode:        isCodex,
 		openrouterMode:   isOpenRouter,
 		openrouterAPIKey: openrouterKey,
@@ -184,6 +207,8 @@ func (e *DirectEngine) Send(text string) error {
 		return fmt.Errorf("engine is already running")
 	}
 	e.status = engine.StatusRunning
+	e.maxOutputRecoveryCount = 0
+	e.fallbackActive = false
 	// Reset context for this turn.
 	e.ctx, e.cancel = context.WithCancel(context.Background())
 	e.mu.Unlock()
@@ -398,6 +423,29 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			}
 		}
 		if err := stream.Err(); err != nil {
+			if isOverloadError(err) && !e.fallbackActive {
+				fallback := engine.FastForProvider(e.provider)
+				if fallback != "" && fallback != e.model {
+					// Tombstone any partial streaming content so UI can clear it.
+					e.events <- engine.ParsedEvent{
+						Type: "tombstone",
+						Data: &engine.TombstoneEvent{Type: "tombstone", MessageIndex: -1},
+					}
+
+					previousModel := e.model
+					e.model = fallback
+					e.fallbackActive = true
+
+					e.events <- engine.ParsedEvent{
+						Type: "system_message",
+						Data: &engine.SystemMessageEvent{
+							Type:    "system_message",
+							Content: fmt.Sprintf("Model overloaded. Switched from %s to %s.", previousModel, fallback),
+						},
+					}
+					continue
+				}
+			}
 			e.emitError(err)
 			return
 		}
@@ -416,6 +464,25 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		// Emit full assistant event.
 		e.emitAssistant(accumulated)
+
+		// Max output tokens recovery: when the model hits max_tokens, inject a
+		// recovery prompt and retry up to MaxOutputTokensRecoveryLimit times.
+		if accumulated.StopReason == anthropic.StopReasonMaxTokens {
+			if e.maxOutputRecoveryCount < MaxOutputTokensRecoveryLimit {
+				e.maxOutputRecoveryCount++
+				e.history.AddUser("Output token limit hit. Resume directly - no apology, no recap. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.")
+				e.events <- engine.ParsedEvent{
+					Type: "system_message",
+					Data: &engine.SystemMessageEvent{
+						Type:    "system_message",
+						Content: fmt.Sprintf("Max output tokens hit (%d/%d), auto-resuming.", e.maxOutputRecoveryCount, MaxOutputTokensRecoveryLimit),
+					},
+				}
+				continue
+			}
+			e.emitError(fmt.Errorf("max output tokens hit %d times, giving up", MaxOutputTokensRecoveryLimit))
+			return
+		}
 
 		// If no tool use, we're done.
 		if accumulated.StopReason != anthropic.StopReasonToolUse {
@@ -663,4 +730,14 @@ func (e *DirectEngine) Steer(text string) {
 	e.steerMu.Lock()
 	defer e.steerMu.Unlock()
 	e.steered = append(e.steered, text)
+}
+
+// isOverloadError returns true if the error indicates a model overload (HTTP 529
+// or "overloaded_error" in the response body).
+func isOverloadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "529") || strings.Contains(msg, "overloaded")
 }

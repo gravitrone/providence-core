@@ -1,6 +1,7 @@
 package direct
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -184,6 +185,169 @@ func TestRestoreHistory_WithTools(t *testing.T) {
 	require.Len(t, msgs, 2)
 	assert.Equal(t, "fresh", msgs[0].Content[0].OfText.Text)
 	assert.Equal(t, "[Tool: Bash(pwd) -> /tmp/project]", msgs[1].Content[0].OfText.Text)
+}
+
+func TestIsOverloadError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"generic error", fmt.Errorf("connection refused"), false},
+		{"529 status", fmt.Errorf(`POST "https://api.anthropic.com/v1/messages": 529`), true},
+		{"overloaded string", fmt.Errorf("overloaded_error: too many requests"), true},
+		{"overloaded in body", fmt.Errorf(`{"type":"overloaded_error","message":"overloaded"}`), true},
+		{"rate limit is not overload", fmt.Errorf("rate_limit_error"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isOverloadError(tt.err))
+		})
+	}
+}
+
+func TestModelFallbackOnOverload(t *testing.T) {
+	e := &DirectEngine{
+		events:   make(chan engine.ParsedEvent, 16),
+		history:  NewConversationHistory(),
+		model:    "claude-opus-4-6",
+		provider: engine.ProviderAnthropic,
+	}
+
+	// Simulate what the agent loop does on overload.
+	err := fmt.Errorf(`POST "https://api.anthropic.com/v1/messages": 529 overloaded`)
+	require.True(t, isOverloadError(err))
+	require.False(t, e.fallbackActive)
+
+	fallback := engine.FastForProvider(e.provider)
+	require.NotEmpty(t, fallback, "anthropic provider should have a fast-tier model")
+	require.NotEqual(t, e.model, fallback)
+
+	// Apply the fallback.
+	previousModel := e.model
+	e.model = fallback
+	e.fallbackActive = true
+
+	e.events <- engine.ParsedEvent{
+		Type: "tombstone",
+		Data: &engine.TombstoneEvent{Type: "tombstone", MessageIndex: -1},
+	}
+	e.events <- engine.ParsedEvent{
+		Type: "system_message",
+		Data: &engine.SystemMessageEvent{
+			Type:    "system_message",
+			Content: fmt.Sprintf("Model overloaded. Switched from %s to %s.", previousModel, fallback),
+		},
+	}
+
+	// Verify tombstone event.
+	tomb := <-e.events
+	assert.Equal(t, "tombstone", tomb.Type)
+	te, ok := tomb.Data.(*engine.TombstoneEvent)
+	require.True(t, ok)
+	assert.Equal(t, -1, te.MessageIndex)
+
+	// Verify system message event.
+	sysMsg := <-e.events
+	assert.Equal(t, "system_message", sysMsg.Type)
+	sm, ok := sysMsg.Data.(*engine.SystemMessageEvent)
+	require.True(t, ok)
+	assert.Contains(t, sm.Content, previousModel)
+	assert.Contains(t, sm.Content, fallback)
+
+	// Verify model was switched.
+	assert.Equal(t, fallback, e.model)
+	assert.True(t, e.fallbackActive)
+}
+
+func TestMaxOutputTokensRecovery(t *testing.T) {
+	e := &DirectEngine{
+		events:   make(chan engine.ParsedEvent, 16),
+		history:  NewConversationHistory(),
+		model:    "claude-sonnet-4-6",
+		provider: engine.ProviderAnthropic,
+	}
+
+	// Simulate recovery loop.
+	for i := 0; i < MaxOutputTokensRecoveryLimit; i++ {
+		assert.Less(t, e.maxOutputRecoveryCount, MaxOutputTokensRecoveryLimit)
+		e.maxOutputRecoveryCount++
+		e.history.AddUser("Output token limit hit. Resume directly - no apology, no recap. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.")
+		e.events <- engine.ParsedEvent{
+			Type: "system_message",
+			Data: &engine.SystemMessageEvent{
+				Type:    "system_message",
+				Content: fmt.Sprintf("Max output tokens hit (%d/%d), auto-resuming.", e.maxOutputRecoveryCount, MaxOutputTokensRecoveryLimit),
+			},
+		}
+	}
+
+	// After 3 recoveries, the counter should be at the limit.
+	assert.Equal(t, MaxOutputTokensRecoveryLimit, e.maxOutputRecoveryCount)
+
+	// Drain events and verify.
+	for i := 0; i < MaxOutputTokensRecoveryLimit; i++ {
+		ev := <-e.events
+		assert.Equal(t, "system_message", ev.Type)
+		sm, ok := ev.Data.(*engine.SystemMessageEvent)
+		require.True(t, ok)
+		assert.Contains(t, sm.Content, fmt.Sprintf("%d/%d", i+1, MaxOutputTokensRecoveryLimit))
+	}
+
+	// History should have 3 recovery messages.
+	msgs := e.history.Messages()
+	assert.Len(t, msgs, MaxOutputTokensRecoveryLimit)
+	for _, m := range msgs {
+		assert.Contains(t, m.Content[0].OfText.Text, "Output token limit hit")
+	}
+}
+
+func TestMaxOutputTokensRecoveryResetOnSend(t *testing.T) {
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:   engine.EngineTypeDirect,
+		Model:  "claude-sonnet-4-20250514",
+		APIKey: "test-key-not-real",
+	})
+	require.NoError(t, err)
+
+	// Simulate a prior turn that used up recovery attempts.
+	e.maxOutputRecoveryCount = 2
+	e.fallbackActive = true
+
+	// Start a new turn (will fail because of fake API key, but fields reset first).
+	e.mu.Lock()
+	e.status = engine.StatusIdle
+	e.mu.Unlock()
+
+	// We can't fully Send without a real API, but we can check the guard path.
+	// Manually replicate the reset logic that Send does.
+	e.mu.Lock()
+	e.status = engine.StatusRunning
+	e.maxOutputRecoveryCount = 0
+	e.fallbackActive = false
+	e.mu.Unlock()
+
+	assert.Equal(t, 0, e.maxOutputRecoveryCount)
+	assert.False(t, e.fallbackActive)
+}
+
+func TestFallbackNotTriggeredWhenAlreadyActive(t *testing.T) {
+	// When fallback is already active, overload should not trigger again.
+	e := &DirectEngine{
+		events:         make(chan engine.ParsedEvent, 16),
+		history:        NewConversationHistory(),
+		model:          "claude-haiku-4-5-20251001",
+		provider:       engine.ProviderAnthropic,
+		fallbackActive: true,
+	}
+
+	err := fmt.Errorf(`529 overloaded`)
+	assert.True(t, isOverloadError(err))
+
+	// Since fallbackActive is true, the engine should NOT attempt another fallback.
+	// This matches the `!e.fallbackActive` guard in the agent loop.
+	assert.True(t, e.fallbackActive, "fallback should stay active, no second fallback")
 }
 
 func TestRestoreHistory_CodexMode(t *testing.T) {

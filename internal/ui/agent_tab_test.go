@@ -652,33 +652,42 @@ func TestBatchGrouping_ExpandedShowsAll(t *testing.T) {
 	assert.Contains(t, rendered, "file2.go")
 }
 
-func TestCtrlOTogglesExpansion(t *testing.T) {
+func TestCtrlOEntersFreezeMode(t *testing.T) {
 	at := NewAgentTab("", config.Config{}, nil)
-	assert.False(t, at.toolsExpanded)
+	at.messages = append(at.messages, ChatMessage{Role: "user", Content: "hello"})
+	assert.Equal(t, FocusInput, at.focus)
 
 	at, _ = at.handleKey(keyPress("ctrl+o"))
-	assert.True(t, at.toolsExpanded)
+	assert.Equal(t, FocusTranscript, at.focus)
+	assert.True(t, at.transcript.Frozen())
 
+	// ctrl+o again exits freeze.
 	at, _ = at.handleKey(keyPress("ctrl+o"))
-	assert.False(t, at.toolsExpanded)
+	assert.Equal(t, FocusInput, at.focus)
+	assert.False(t, at.transcript.Frozen())
 }
 
-func TestHintsShowCtrlOWithToolMessages(t *testing.T) {
+func TestHintsShowCtrlOFreezeScroll(t *testing.T) {
 	at := NewAgentTab("", config.Config{}, nil)
 	at.messages = append(at.messages, ChatMessage{Role: "tool", ToolName: "Read", Done: true})
 	hints := at.Hints()
 	require.NotEmpty(t, hints)
 	assert.Equal(t, "ctrl+o", hints[0].Key)
-	assert.Equal(t, "expand tools", hints[0].Desc)
+	assert.Equal(t, "freeze scroll", hints[0].Desc)
 }
 
-func TestHintsShowCollapseWhenExpanded(t *testing.T) {
+func TestHintsShowFreezeControls(t *testing.T) {
 	at := NewAgentTab("", config.Config{}, nil)
-	at.toolsExpanded = true
-	at.messages = append(at.messages, ChatMessage{Role: "tool", ToolName: "Read", Done: true})
+	at.messages = append(at.messages, ChatMessage{Role: "user", Content: "hello"})
+	at.focus = FocusTranscript
+	at.transcript.SetFrozen(true)
 	hints := at.Hints()
 	require.NotEmpty(t, hints)
-	assert.Equal(t, "collapse tools", hints[0].Desc)
+	assert.Equal(t, "j/k", hints[0].Key)
+	assert.Equal(t, "scroll", hints[0].Desc)
+	// Last hint should be quit.
+	assert.Equal(t, "q", hints[len(hints)-1].Key)
+	assert.Equal(t, "exit freeze", hints[len(hints)-1].Desc)
 }
 
 func TestToolOutputShownWhenExpanded(t *testing.T) {

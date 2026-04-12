@@ -24,8 +24,9 @@ import (
 	"github.com/gravitrone/providence-core/internal/auth"
 	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/engine"
-	_ "github.com/gravitrone/providence-core/internal/engine/claude" // register claude factory
-	"github.com/gravitrone/providence-core/internal/engine/direct"   // register direct factory + image types
+	_ "github.com/gravitrone/providence-core/internal/engine/claude"   // register claude factory
+	"github.com/gravitrone/providence-core/internal/engine/direct"    // register direct factory + image types
+	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 	"github.com/gravitrone/providence-core/internal/ui/dashboard"

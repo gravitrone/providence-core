@@ -288,7 +288,29 @@ func (s *Session) RestoreHistory(messages []engine.RestoredMessage) error {
 	return nil
 }
 
-// TriggerCompact is a no-op for the claude headless backend.
+// TriggerCompact sends a /compact command to the claude subprocess via NDJSON
+// stdin, requesting manual context compaction.
 func (s *Session) TriggerCompact(_ context.Context) error {
-	return nil
+	return s.sendJSON(map[string]any{
+		"type": "user",
+		"message": map[string]string{
+			"role":    "user",
+			"content": "/compact",
+		},
+	})
+}
+
+// sendJSON marshals v as JSON and writes a newline-terminated line to stdin.
+func (s *Session) sendJSON(v any) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("marshal json: %w", err)
+	}
+	data = append(data, '\n')
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err = s.stdin.Write(data)
+	return err
 }

@@ -21,4 +21,6 @@ type Provider interface {
 	CurrentTokens() int
 	// ContextWindow returns the model context window in tokens.
 	ContextWindow() int
+	// MaxOutputTokens returns the maximum output tokens for the current model.
+	MaxOutputTokens() int
 }

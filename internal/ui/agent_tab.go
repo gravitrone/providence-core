@@ -24,8 +24,9 @@ import (
 	"github.com/gravitrone/providence-core/internal/auth"
 	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/engine"
-	_ "github.com/gravitrone/providence-core/internal/engine/claude" // register claude factory
-	"github.com/gravitrone/providence-core/internal/engine/direct"   // register direct factory + image types
+	_ "github.com/gravitrone/providence-core/internal/engine/claude"    // register claude factory
+	_ "github.com/gravitrone/providence-core/internal/engine/codex_re" // register codex_re factory
+	"github.com/gravitrone/providence-core/internal/engine/direct"     // register direct factory + image types
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 	"github.com/gravitrone/providence-core/internal/ui/dashboard"
@@ -127,7 +128,7 @@ type slashCommand struct {
 // slashCommands defines the available slash commands for the preview typeahead.
 var slashCommands = []slashCommand{
 	{"/model", "Switch model (Haiku, Sonnet, Opus, Codex)"},
-	{"/engine", "Switch engine (claude, direct)"},
+	{"/engine", "Switch engine (claude, direct, codex_re)"},
 	{"/image", "Attach image file (png, jpg, gif, webp)"},
 	{"/theme", "Switch theme (flame, night, auto)"},
 	{"/auth", "Login to OpenAI (Codex OAuth)"},
@@ -267,6 +268,9 @@ type AgentTab struct {
 	// Dashboard split-pane state.
 	dashboardVisible bool // default true, toggle via /dashboard
 	dashboard        dashboard.DashboardModel
+
+	// Context portability: pending state to restore after engine switch.
+	pendingPortableState *engine.ConversationState
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -1833,6 +1837,37 @@ func (at *AgentTab) addSystemMessage(content string) {
 	at.addMessage("system", content, true)
 }
 
+// messagesToRestored converts the current chat messages to RestoredMessage
+// format for context portability during engine switches.
+func (at AgentTab) messagesToRestored() []engine.RestoredMessage {
+	var restored []engine.RestoredMessage
+	for _, m := range at.messages {
+		switch m.Role {
+		case "user", "assistant":
+			if m.Content != "" {
+				restored = append(restored, engine.RestoredMessage{
+					Role:    m.Role,
+					Content: m.Content,
+				})
+			}
+		case "tool":
+			if m.ToolOutput != "" || m.ToolBody != "" {
+				output := m.ToolOutput
+				if output == "" {
+					output = m.ToolBody
+				}
+				restored = append(restored, engine.RestoredMessage{
+					Role:       "tool",
+					Content:    output,
+					ToolName:   m.ToolName,
+					ToolInput:  m.ToolArgs,
+				})
+			}
+		}
+	}
+	return restored
+}
+
 // hasBatchTools returns true if there are consecutive same-name tool messages (2+).
 func (at AgentTab) hasBatchTools() bool {
 	for i := 0; i < len(at.messages)-1; i++ {
@@ -2907,22 +2942,34 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		return true, nil
 	case "/engine":
 		if args == "" {
-			at.addSystemMessage("Current engine: " + string(at.engineType) + "\nAvailable: claude, direct")
+			at.addSystemMessage("Current engine: " + string(at.engineType) + "\nAvailable: claude, direct, codex_re")
 		} else {
 			newType := engine.EngineType(strings.TrimSpace(args))
 			switch newType {
-			case engine.EngineTypeClaude, engine.EngineTypeDirect:
+			case engine.EngineTypeClaude, engine.EngineTypeDirect, "codex_re":
+				// Serialize current state for context portability.
+				var portableState *engine.ConversationState
 				if at.engine != nil {
+					restored := at.messagesToRestored()
+					state, err := engine.SerializeState(at.engine, restored, "", at.model, string(at.engineType))
+					if err == nil {
+						portableState = state
+					}
 					at.engine.Close()
 					at.engine = nil
 				}
 				at.engineType = newType
 				at.addSystemMessage("Engine set to: " + string(newType))
+				// Restore conversation state into the new engine on next Send.
+				if portableState != nil && len(portableState.Messages) > 0 {
+					at.pendingPortableState = portableState
+					at.addSystemMessage("Conversation context queued for handoff (" + strconv.Itoa(len(portableState.Messages)) + " messages)")
+				}
 				// Persist to config.
 				at.cfg.Engine = string(newType)
 				_ = at.cfg.Save()
 			default:
-				at.addSystemMessage("Unknown engine: " + args + " (valid: claude, direct)")
+				at.addSystemMessage("Unknown engine: " + args + " (valid: claude, direct, codex_re)")
 			}
 		}
 		at.refreshViewport()
@@ -3220,7 +3267,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		help += "| Command | Description |\n"
 		help += "|---------|-------------|\n"
 		help += "| `/model <name>` | Switch model (Haiku, Sonnet, Opus, Codex) |\n"
-		help += "| `/engine <type>` | Switch engine (claude, direct) |\n"
+		help += "| `/engine <type>` | Switch engine (claude, direct, codex_re) |\n"
 		help += "| `/theme <name>` | Switch theme (flame, night, auto) |\n"
 		help += "| `/auth` | Login to OpenAI (Codex OAuth) |\n"
 		help += "| `/sessions` | List past sessions |\n"
@@ -3403,6 +3450,13 @@ func (at *AgentTab) handleEngineCreated(msg engineCreatedMsg) tea.Cmd {
 	at.compacting = false
 	// Transfer any pending images to the newly created engine.
 	at.transferImagesToEngine()
+	// Restore portable state from a prior engine switch if available.
+	if at.pendingPortableState != nil {
+		if err := engine.RestoreState(at.engine, at.pendingPortableState); err != nil {
+			at.addSystemMessage("Context restore warning: " + err.Error())
+		}
+		at.pendingPortableState = nil
+	}
 	if err := at.engine.Send(msg.prompt); err != nil {
 		at.addSystemMessage(fmt.Sprintf("send error: %s", err))
 		at.streaming = false

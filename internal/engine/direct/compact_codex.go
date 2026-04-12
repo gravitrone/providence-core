@@ -1,6 +1,7 @@
 package direct
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -85,10 +86,13 @@ func (p *codexCompactProvider) OneShot(ctx context.Context, systemPrompt, input 
 		return "", fmt.Errorf("marshal codex compact input: %w", err)
 	}
 
+	// Codex (chatgpt.com/backend-api) requires Stream=true; non-streaming
+	// requests fail with 400 "Stream must be set to true". We collect SSE
+	// output_text deltas into a single summary string below.
 	reqBody := codexRequest{
 		Model:        fastModel,
 		Store:        false,
-		Stream:       false,
+		Stream:       true,
 		Instructions: systemPrompt,
 		Input:        []json.RawMessage{inputMsg},
 	}
@@ -120,52 +124,92 @@ func (p *codexCompactProvider) OneShot(ctx context.Context, systemPrompt, input 
 		return "", fmt.Errorf("codex compact API error (%d): %s", resp.StatusCode, string(body))
 	}
 
-	var parsed struct {
-		OutputText string `json:"output_text"`
-		Choices    []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Output []struct {
-			Type    string `json:"type"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text,omitempty"`
-			} `json:"content"`
-		} `json:"output"`
+	summary, err := collectCodexOneShotText(ctx, resp.Body)
+	if err != nil {
+		return "", err
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return "", fmt.Errorf("decode codex compact response: %w", err)
-	}
+	return strings.TrimSpace(summary), nil
+}
 
-	if text := strings.TrimSpace(parsed.OutputText); text != "" {
-		return text, nil
-	}
-	if len(parsed.Choices) > 0 {
-		if text := strings.TrimSpace(parsed.Choices[0].Message.Content); text != "" {
-			return text, nil
+// collectCodexOneShotText reads a Codex SSE stream and accumulates all
+// response.output_text.delta events into a single string. It also handles
+// terminal output_item.done events that carry the full text in case no
+// per-token deltas were emitted. The reader stops on response.done /
+// response.completed or end of stream.
+func collectCodexOneShotText(ctx context.Context, body io.Reader) (string, error) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+	var out strings.Builder
+	var sawDelta bool
+
+	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return out.String(), ctx.Err()
+		default:
+		}
+
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var base struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(data), &base); err != nil {
+			continue
+		}
+
+		switch base.Type {
+		case "response.output_text.delta":
+			var delta struct {
+				Delta string `json:"delta"`
+			}
+			if err := json.Unmarshal([]byte(data), &delta); err == nil && delta.Delta != "" {
+				out.WriteString(delta.Delta)
+				sawDelta = true
+			}
+		case "response.output_item.done":
+			// Fallback: some servers may emit only the final item without per-token deltas.
+			if sawDelta {
+				continue
+			}
+			var item struct {
+				Item struct {
+					Type    string `json:"type"`
+					Content []struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"item"`
+			}
+			if err := json.Unmarshal([]byte(data), &item); err != nil {
+				continue
+			}
+			if item.Item.Type != "message" {
+				continue
+			}
+			for _, block := range item.Item.Content {
+				if block.Type != "output_text" && block.Type != "text" {
+					continue
+				}
+				out.WriteString(block.Text)
+			}
+		case "response.done", "response.completed":
+			// Terminal event; let the loop drain naturally.
 		}
 	}
 
-	var summary strings.Builder
-	for _, item := range parsed.Output {
-		for _, block := range item.Content {
-			if block.Type != "output_text" && block.Type != "text" {
-				continue
-			}
-			text := strings.TrimSpace(block.Text)
-			if text == "" {
-				continue
-			}
-			if summary.Len() > 0 {
-				summary.WriteString("\n")
-			}
-			summary.WriteString(text)
-		}
+	if err := scanner.Err(); err != nil {
+		return out.String(), fmt.Errorf("read codex compact stream: %w", err)
 	}
-
-	return strings.TrimSpace(summary.String()), nil
+	return out.String(), nil
 }
 
 func (p *codexCompactProvider) CurrentTokens() int {

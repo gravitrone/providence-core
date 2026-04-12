@@ -394,6 +394,120 @@ func TestBackspaceRemovesSelectedMessage(t *testing.T) {
 	assert.Equal(t, 0, at.queueCursor)
 }
 
+// --- Slash Command Fast Path Tests ---
+
+// TestSlashCommandFiresOnFirstEnter guards against the /resume race where
+// the slash command table intercepted the first enter press and required
+// a second keystroke to actually fire the command. For commands that add
+// messages we assert at least one message lands; for /clear we simply
+// assert the input was consumed (messages would stay empty).
+func TestSlashCommandFiresOnFirstEnter(t *testing.T) {
+	cases := []struct {
+		cmd      string
+		wantMsgs bool
+	}{
+		{"/help", true},
+		{"/resume", true},
+		{"/sessions", true},
+		{"/clear", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			at := NewAgentTab("", config.Config{}, nil)
+			at.Resize(120, 40)
+			at.input.SetValue(tc.cmd)
+
+			msgCountBefore := len(at.messages)
+			at, _ = at.handleKey(keyPress("enter"))
+
+			assert.Empty(t, at.input.Value(), "input should clear on first enter")
+			if tc.wantMsgs {
+				assert.Greater(t, len(at.messages), msgCountBefore,
+					"slash command should execute on first enter, not wait for a second keystroke")
+			}
+		})
+	}
+}
+
+// TestSlashTableNavigation verifies up/down navigates the slash table
+// when the input starts with "/".
+func TestSlashTableNavigation(t *testing.T) {
+	at := NewAgentTab("", config.Config{}, nil)
+	at.Resize(120, 40)
+	at.input.SetValue("/")
+
+	matches := at.matchingSlashCommands()
+	require.GreaterOrEqual(t, len(matches), 3, "need several matches for this test")
+
+	// Initial cursor is -1 (implicit first match).
+	assert.Equal(t, -1, at.slashCursor)
+
+	// Down should land on index 0 (the second command since cursor was < 0).
+	at, _ = at.handleKey(keyPress("down"))
+	assert.Equal(t, 0, at.slashCursor)
+
+	at, _ = at.handleKey(keyPress("down"))
+	assert.Equal(t, 1, at.slashCursor)
+
+	at, _ = at.handleKey(keyPress("up"))
+	assert.Equal(t, 0, at.slashCursor)
+}
+
+// TestCompactIndicatorStateMachine feeds synthetic compaction events
+// through handleAgentEvent and verifies the indicator state machine
+// transitions cleanly through running -> complete and running -> failed.
+func TestCompactIndicatorStateMachine(t *testing.T) {
+	at := NewAgentTab("", config.Config{}, nil)
+	at.Resize(120, 40)
+
+	// Running phase: indicator should arm with before token count and verb.
+	at, _ = at.handleAgentEvent(AgentEventMsg{Event: engine.ParsedEvent{
+		Type: "compaction",
+		Data: &engine.CompactionEvent{Phase: "running", TokensBefore: 150000},
+	}})
+	assert.Equal(t, "running", at.compactPhase)
+	assert.Equal(t, 150000, at.compactTokensBefore)
+	assert.NotEmpty(t, at.compactVerb, "running phase should seed a compact verb")
+
+	// Indicator render should mention the verb and "->" trail.
+	out := at.renderCompactIndicator()
+	assert.Contains(t, out, at.compactVerb)
+	assert.Contains(t, out, "\u2192", "token trail arrow should render")
+
+	// Complete phase: flips to dissolve state with after tokens populated.
+	at, _ = at.handleAgentEvent(AgentEventMsg{Event: engine.ParsedEvent{
+		Type: "compaction",
+		Data: &engine.CompactionEvent{Phase: "idle", TokensAfter: 45000},
+	}})
+	assert.Equal(t, "complete", at.compactPhase)
+	assert.Equal(t, 45000, at.compactTokensAfter)
+
+	// Failed path from a fresh running state.
+	at2 := NewAgentTab("", config.Config{}, nil)
+	at2.Resize(120, 40)
+	at2, _ = at2.handleAgentEvent(AgentEventMsg{Event: engine.ParsedEvent{
+		Type: "compaction",
+		Data: &engine.CompactionEvent{Phase: "running", TokensBefore: 100000},
+	}})
+	at2, _ = at2.handleAgentEvent(AgentEventMsg{Event: engine.ParsedEvent{
+		Type: "compaction",
+		Data: &engine.CompactionEvent{Phase: "failed"},
+	}})
+	assert.Equal(t, "failed", at2.compactPhase)
+}
+
+// TestIsKnownSlashCommand verifies the slash command lookup matches
+// registered commands exactly and ignores everything else.
+func TestIsKnownSlashCommand(t *testing.T) {
+	assert.True(t, isKnownSlashCommand("/clear"))
+	assert.True(t, isKnownSlashCommand("/resume"))
+	assert.True(t, isKnownSlashCommand("/compact"))
+	assert.True(t, isKnownSlashCommand("/Clear"), "case-insensitive")
+	assert.False(t, isKnownSlashCommand("/nope"))
+	assert.False(t, isKnownSlashCommand("hello"))
+	assert.False(t, isKnownSlashCommand("/"))
+}
+
 func TestSafeWaitForEventNilSession(t *testing.T) {
 	at := NewAgentTab("", config.Config{}, nil)
 	// session is nil by default

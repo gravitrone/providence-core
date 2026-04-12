@@ -38,6 +38,18 @@ var completionSpring = harmonica.NewSpring(harmonica.FPS(12), 6.0, 0.8)
 // Gentle bounce that overshoots a bit, creating a "held in suspension" feel.
 var queuedSpring = harmonica.NewSpring(harmonica.FPS(12), 5.0, 0.4)
 
+// slashOpenSpring drives the slash command table entry/exit animation.
+// Critically damped so it settles fast without bouncing.
+var slashOpenSpring = harmonica.NewSpring(harmonica.FPS(12), 6.5, 0.9)
+
+// slashPulseSpring drives the selected row breathing pulse. Slightly
+// underdamped for a hover/heartbeat feel.
+var slashPulseSpring = harmonica.NewSpring(harmonica.FPS(12), 5.0, 0.45)
+
+// compactSpring drives the compaction indicator entry and cool-down.
+// Same shape as the completion spring so the dissolve feels consistent.
+var compactSpring = harmonica.NewSpring(harmonica.FPS(12), 6.0, 0.8)
+
 // --- Agent Tab Messages ---
 
 // AgentEventMsg wraps a parsed event from the Claude headless session.
@@ -88,11 +100,14 @@ type ChatMessage struct {
 
 // --- Agent Tab ---
 
-// slashCommands defines the available slash commands for the preview typeahead.
-var slashCommands = []struct {
+// slashCommand is a single entry in the slash command table.
+type slashCommand struct {
 	Name string
 	Desc string
-}{
+}
+
+// slashCommands defines the available slash commands for the preview typeahead.
+var slashCommands = []slashCommand{
 	{"/model", "Switch model (Haiku, Sonnet, Opus, Codex)"},
 	{"/engine", "Switch engine (claude, direct)"},
 	{"/image", "Attach image file (png, jpg, gif, webp)"},
@@ -103,6 +118,18 @@ var slashCommands = []struct {
 	{"/compact", "Manually trigger context compaction"},
 	{"/clear", "Clear chat history"},
 	{"/help", "Show available commands"},
+}
+
+// isKnownSlashCommand returns true if the given token (e.g. "/resume")
+// exactly matches a registered slash command name.
+func isKnownSlashCommand(token string) bool {
+	lower := strings.ToLower(token)
+	for _, c := range slashCommands {
+		if c.Name == lower {
+			return true
+		}
+	}
+	return false
 }
 
 // QueuedMessage represents a single message in the queue with its steering state.
@@ -168,6 +195,34 @@ type AgentTab struct {
 	// Session persistence.
 	store     *store.Store
 	sessionID string
+
+	// Slash command table state (harmonica-driven).
+	// slashCursor is the highlighted row in the filtered match list.
+	// -1 means no explicit selection (user is still typing).
+	slashCursor    int
+	slashOpen      float64 // 0.0 = closed, 1.0 = fully open
+	slashOpenVel   float64
+	slashPulse     float64 // 0.0..1.0 breathing on the selected row
+	slashPulseVel  float64
+	// slashMatchCount is the number of rows rendered on the last frame,
+	// used to clamp slashCursor when the user edits the input.
+	slashMatchCount int
+
+	// Compact indicator state.
+	// compactPhase tracks the active compaction lifecycle: "" (inactive),
+	// "running", "complete", "failed". "complete" and "failed" stay briefly
+	// while the dissolve spring runs so the user sees the terminal frame.
+	compactPhase        string
+	compactStart        time.Time
+	compactTokensBefore int
+	compactTokensAfter  int
+	compactErrMsg       string
+	compactVerb         string
+	compactVerbAt       time.Time
+	compactSettledAt    time.Time
+	// compactBright drives the dissolve animation (1.0 bright -> 0.0 frozen).
+	compactBright float64
+	compactVel    float64
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -206,6 +261,7 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		follow:      true,
 		mdRenderer:  mr,
 		queueCursor: -1,
+		slashCursor: -1,
 		engineType:  engineType,
 		model:       model,
 		cfg:         cfg,
@@ -278,6 +334,51 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 			at.queuedBright, at.queuedVel = queuedSpring.Update(
 				at.queuedBright, at.queuedVel, target,
 			)
+		}
+		// Slash command table: spring the panel open when the input starts
+		// with "/", spring it closed otherwise. Selected-row pulse is a
+		// slow sine the spring chases, giving a gentle heartbeat.
+		if strings.HasPrefix(at.input.Value(), "/") {
+			at.slashOpen, at.slashOpenVel = slashOpenSpring.Update(
+				at.slashOpen, at.slashOpenVel, 1.0,
+			)
+			target := (math.Sin(float64(at.flameFrame)*0.18) + 1.0) / 2.0
+			at.slashPulse, at.slashPulseVel = slashPulseSpring.Update(
+				at.slashPulse, at.slashPulseVel, target,
+			)
+		} else if at.slashOpen > 0.0 {
+			at.slashOpen, at.slashOpenVel = slashOpenSpring.Update(
+				at.slashOpen, at.slashOpenVel, 0.0,
+			)
+			if math.Abs(at.slashOpen) < 0.01 {
+				at.slashOpen = 0.0
+				at.slashOpenVel = 0.0
+				at.slashCursor = -1
+			}
+		}
+		// Compaction indicator springs. Running: bright -> settle near 1.0
+		// with a breathing target. Complete/failed: dissolve to 0.0 then
+		// clear the phase after a short hold.
+		switch at.compactPhase {
+		case "running":
+			target := 0.85 + 0.15*(math.Sin(float64(at.flameFrame)*0.18)+1.0)/2.0
+			at.compactBright, at.compactVel = compactSpring.Update(
+				at.compactBright, at.compactVel, target,
+			)
+			// Rotate the verb every ~8s to keep the flavor fresh.
+			if time.Since(at.compactVerbAt) >= 8*time.Second {
+				at.compactVerb = randomCompactVerb(at.compactVerb)
+				at.compactVerbAt = time.Now()
+			}
+		case "complete", "failed":
+			at.compactBright, at.compactVel = compactSpring.Update(
+				at.compactBright, at.compactVel, 0.0,
+			)
+			if math.Abs(at.compactBright) < 0.02 && time.Since(at.compactSettledAt) >= 2*time.Second {
+				at.compactPhase = ""
+				at.compactBright = 0.0
+				at.compactVel = 0.0
+			}
 		}
 		at.refreshViewport()
 		return at, flameTick()
@@ -417,6 +518,43 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		return at, nil
 	}
 
+	// Slash table navigation takes priority when the table is visible.
+	// The user is clearly browsing commands at that point, so up/down
+	// should move within the table instead of scrolling the viewport
+	// or navigating the message queue.
+	if strings.HasPrefix(at.input.Value(), "/") {
+		matches := at.matchingSlashCommands()
+		if len(matches) > 0 {
+			switch key {
+			case "up":
+				if at.slashCursor <= 0 {
+					at.slashCursor = len(matches) - 1
+				} else {
+					at.slashCursor--
+				}
+				at.refreshViewport()
+				return at, nil
+			case "down":
+				if at.slashCursor < 0 || at.slashCursor >= len(matches)-1 {
+					at.slashCursor = 0
+				} else {
+					at.slashCursor++
+				}
+				at.refreshViewport()
+				return at, nil
+			case "esc":
+				// Dismiss the table: clear the input so the panel springs
+				// back closed. Preserves the existing esc-from-queue path
+				// below because we early-return only when the input starts
+				// with "/".
+				at.input.SetValue("")
+				at.slashCursor = -1
+				at.refreshViewport()
+				return at, nil
+			}
+		}
+	}
+
 	switch key {
 	case "up", "pgup":
 		// If input is empty and queue has messages, enter queue navigation.
@@ -487,6 +625,41 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		}
 
 		text := strings.TrimSpace(at.input.Value())
+		// Slash command fast path: when the text starts with "/" and the
+		// first token exactly matches a known command, fire it immediately
+		// without routing through the streaming/queue path. This fixes the
+		// race where the slash table was visible and the first enter was
+		// ignored - the command now runs on the first keystroke regardless
+		// of queue/streaming state.
+		if text != "" && strings.HasPrefix(text, "/") {
+			head := strings.SplitN(text, " ", 2)[0]
+			if isKnownSlashCommand(head) {
+				at.input.SetValue("")
+				at.slashCursor = -1
+				handled, cmd := at.handleSlashCommand(text)
+				if handled {
+					return at, cmd
+				}
+			}
+		}
+		// If the slash table is visible and the user navigated with arrows
+		// (slashCursor >= 0), enter commits the highlighted command.
+		if at.slashCursor >= 0 && strings.HasPrefix(at.input.Value(), "/") {
+			matches := at.matchingSlashCommands()
+			if len(matches) > 0 {
+				idx := at.slashCursor
+				if idx >= len(matches) {
+					idx = len(matches) - 1
+				}
+				selected := matches[idx].Name
+				at.input.SetValue("")
+				at.slashCursor = -1
+				handled, cmd := at.handleSlashCommand(selected)
+				if handled {
+					return at, cmd
+				}
+			}
+		}
 		if text == "" {
 			return at, nil
 		}
@@ -658,25 +831,49 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 			switch compaction.Phase {
 			case "running":
 				at.compacting = true
+				at.compactPhase = "running"
+				at.compactStart = time.Now()
+				at.compactTokensBefore = compaction.TokensBefore
+				at.compactTokensAfter = 0
+				at.compactErrMsg = ""
+				at.compactVerb = randomCompactVerb("")
+				at.compactVerbAt = time.Now()
+				at.compactBright = 1.0
+				at.compactVel = 0.0
 				if compaction.TokensBefore > 0 {
 					at.currentTokens = compaction.TokensBefore
 				}
-				at.addSystemMessage("Context compaction started")
+				at.messagesDirty = true
 				at.refreshViewport()
 			case "idle":
 				at.compacting = false
 				if compaction.TokensAfter > 0 {
 					at.currentTokens = compaction.TokensAfter
+					at.compactTokensAfter = compaction.TokensAfter
 				}
-				at.addSystemMessage("Context compaction complete")
+				// Only flip to the completion state if we were actually
+				// tracking a compaction - otherwise an idle ping from the
+				// orchestrator at startup would spam a dissolve frame.
+				if at.compactPhase == "running" {
+					at.compactPhase = "complete"
+					at.compactSettledAt = time.Now()
+					at.compactBright = 1.0
+					at.compactVel = 0.0
+				}
+				at.messagesDirty = true
 				at.refreshViewport()
 			case "failed":
 				at.compacting = false
 				if compaction.Err != nil {
-					at.addSystemMessage("Context compaction failed: " + compaction.Err.Error())
+					at.compactErrMsg = compaction.Err.Error()
 				} else {
-					at.addSystemMessage("Context compaction failed")
+					at.compactErrMsg = "compaction failed"
 				}
+				at.compactPhase = "failed"
+				at.compactSettledAt = time.Now()
+				at.compactBright = 1.0
+				at.compactVel = 0.0
+				at.messagesDirty = true
 				at.refreshViewport()
 			}
 		}
@@ -972,43 +1169,173 @@ func (at AgentTab) View(width, height int) string {
 	return "\n" + vpPadded.String() + "\n" + divider + "\n" + previewSection + inputLine
 }
 
-// renderCommandPreview returns the slash command suggestions if input starts with "/".
-func (at AgentTab) renderCommandPreview(contentW int) string {
+// matchingSlashCommands returns the slash commands whose names start with
+// the current input value (case-insensitive). Pure helper so callers can
+// reason about what renderCommandPreview is about to draw.
+func (at AgentTab) matchingSlashCommands() []slashCommand {
 	val := at.input.Value()
 	if !strings.HasPrefix(val, "/") {
-		return ""
+		return nil
 	}
-
-	prefix := strings.ToLower(val)
-	var matches []struct {
-		Name string
-		Desc string
-	}
+	// Match on the first token only - the command name - so "/model haiku"
+	// still shows the /model row as the active match.
+	head := strings.ToLower(strings.SplitN(val, " ", 2)[0])
+	var matches []slashCommand
 	for _, cmd := range slashCommands {
-		if strings.HasPrefix(cmd.Name, prefix) {
+		if strings.HasPrefix(cmd.Name, head) {
 			matches = append(matches, cmd)
 		}
 	}
+	return matches
+}
+
+// renderCommandPreview renders the flame-styled slash command table that
+// floats above the input whenever the user is typing a slash command.
+// The panel is spring-animated on entry/exit (slashOpen) and the active
+// row breathes via a harmonica pulse (slashPulse).
+func (at AgentTab) renderCommandPreview(contentW int) string {
+	matches := at.matchingSlashCommands()
 	if len(matches) == 0 {
 		return ""
 	}
+	// Dismissed / mid-exit: suppress render entirely once the spring has
+	// basically collapsed. refreshViewport will re-render every frame.
+	if at.slashOpen < 0.05 && !strings.HasPrefix(at.input.Value(), "/") {
+		return ""
+	}
 
-	cmdStyle := lipgloss.NewStyle().Foreground(ColorPrimary)
-	descStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	// The input holds the input for this frame so the table knows which
+	// row is "in focus". If the user has not navigated explicitly, the
+	// first match is shown as active (the one that will run on enter).
+	activeIdx := at.slashCursor
+	if activeIdx < 0 || activeIdx >= len(matches) {
+		activeIdx = 0
+	}
 
-	var b strings.Builder
-	for i, m := range matches {
-		if i > 0 {
-			b.WriteString("\n")
-		}
-		// Fixed 12-char width for command name.
+	// Panel width: clamp to a reasonable pill within contentW.
+	panelW := contentW - 4
+	if panelW > 72 {
+		panelW = 72
+	}
+	if panelW < 32 {
+		panelW = 32
+	}
+	innerW := panelW - 4 // account for border + padding
+
+	// Column widths: command name (left), description (right).
+	nameW := 12
+	descW := innerW - nameW - 2
+	if descW < 10 {
+		descW = 10
+	}
+
+	mutedStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	descStyle := mutedStyle
+
+	// Breathing color for the active row uses the spring pulse interpolated
+	// between the secondary ember and the primary peak.
+	pulse := at.slashPulse
+	if pulse < 0 {
+		pulse = 0
+	}
+	if pulse > 1 {
+		pulse = 1
+	}
+	activeHex := blendHex(
+		darkenHex(ActiveTheme.Primary, 0.55),
+		ActiveTheme.Accent,
+		pulse,
+	)
+	activeColor := lipgloss.Color(activeHex)
+
+	// How many rows to render this frame: scale with slashOpen so the
+	// panel grows from 0 rows -> len(matches) rows during the entry spring.
+	open := at.slashOpen
+	if open < 0 {
+		open = 0
+	}
+	if open > 1 {
+		open = 1
+	}
+	visibleRows := int(math.Ceil(open * float64(len(matches))))
+	if visibleRows < 1 && open > 0.02 {
+		visibleRows = 1
+	}
+	if visibleRows > len(matches) {
+		visibleRows = len(matches)
+	}
+	if visibleRows == 0 {
+		return ""
+	}
+
+	var rows []string
+	for i := 0; i < visibleRows; i++ {
+		m := matches[i]
 		name := m.Name
-		for len(name) < 12 {
+		if len(name) > nameW {
+			name = name[:nameW]
+		}
+		for len(name) < nameW {
 			name += " "
 		}
-		b.WriteString("  " + cmdStyle.Render(name) + descStyle.Render(m.Desc))
+		desc := m.Desc
+		if len(desc) > descW {
+			desc = desc[:descW-1] + "\u2026"
+		}
+
+		if i == activeIdx {
+			// Active row: solid bright background tint, bold command,
+			// chevron marker on the left.
+			marker := lipgloss.NewStyle().Foreground(activeColor).Bold(true).Render("\u27A4 ")
+			nameStyled := lipgloss.NewStyle().
+				Foreground(activeColor).
+				Bold(true).
+				Render(name)
+			descStyled := lipgloss.NewStyle().
+				Foreground(ColorText).
+				Render(desc)
+			row := marker + nameStyled + "  " + descStyled
+			// Pad to innerW so the row fills the panel.
+			rows = append(rows, padRight(row, innerW+2))
+		} else {
+			marker := mutedStyle.Render("  ")
+			nameStyled := lipgloss.NewStyle().Foreground(ColorPrimary).Render(name)
+			descStyled := descStyle.Render(desc)
+			row := marker + nameStyled + "  " + descStyled
+			rows = append(rows, padRight(row, innerW+2))
+		}
 	}
-	return b.String()
+
+	// Footer hint row.
+	hintStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
+	hint := hintStyle.Render("\u2191\u2193 select  \u21B5 run  esc close")
+	hintLine := padRight(hint, innerW+2)
+
+	// Animated gradient border: rotate the flame stops like the user message
+	// box does while streaming. Matches the flame aesthetic.
+	offset := at.flameFrame % len(flameGradientStops)
+	a := flameGradientStops[offset]
+	b := flameGradientStops[(offset+2)%len(flameGradientStops)]
+	cEdge := flameGradientStops[(offset+4)%len(flameGradientStops)]
+
+	body := strings.Join(rows, "\n") + "\n" + hintLine
+	panel := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForegroundBlend(a, b, cEdge).
+		Padding(0, 1).
+		Width(panelW).
+		Render(body)
+	return panel
+}
+
+// padRight pads s with spaces so its visible width is at least w.
+// Safe on ANSI-styled strings because it uses lipgloss.Width.
+func padRight(s string, w int) string {
+	current := lipgloss.Width(s)
+	if current >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-current)
 }
 
 // Hints returns context-dependent status bar hints.
@@ -1251,7 +1578,8 @@ func (at *AgentTab) refreshViewport() {
 	// When idle with no changes, use the cached render to avoid flicker.
 	hasViz := at.hasVizMessages()
 	hasBatch := at.streaming && !at.toolsExpanded && at.hasBatchTools()
-	if at.messagesDirty || at.streaming || at.completionActive || hasViz || hasBatch || at.cachedMessages == "" {
+	compactLive := at.compactPhase != ""
+	if at.messagesDirty || at.streaming || at.completionActive || compactLive || hasViz || hasBatch || at.cachedMessages == "" {
 		at.cachedMessages = at.renderMessages()
 		at.messagesDirty = false
 	}
@@ -1396,8 +1724,16 @@ func (at AgentTab) renderMessages() string {
 		b.WriteString("\n" + at.renderQueuedMessages(contentW))
 	}
 
-	// Append spinner below the last message when streaming.
-	if at.streaming {
+	// Compaction indicator: when a compaction is in flight we replace the
+	// regular spinner with a dedicated compact indicator so both animations
+	// never run at once. The dissolve frame also lingers briefly after the
+	// compaction completes so the user sees the terminal state.
+	if at.compactPhase != "" {
+		if ind := at.renderCompactIndicator(); ind != "" {
+			b.WriteString("\n" + ind + "\n")
+		}
+	} else if at.streaming {
+		// Append spinner below the last message when streaming.
 		spinner := at.renderSpinner()
 		if spinner != "" {
 			b.WriteString("\n" + spinner + "\n")
@@ -1405,6 +1741,118 @@ func (at AgentTab) renderMessages() string {
 	}
 
 	return b.String()
+}
+
+// renderCompactIndicator renders the live compaction indicator with a
+// breathing flame spinner, Providence-themed verb, and a token counter
+// that reports "before -> after" once the numbers land. Mirrors the
+// regular streaming spinner but uses its own spring so the two animations
+// can coexist in the model even though only one renders at a time.
+func (at AgentTab) renderCompactIndicator() string {
+	if at.compactPhase == "" {
+		return ""
+	}
+
+	bright := at.compactBright
+	if bright < 0 {
+		bright = 0
+	}
+	if bright > 1 {
+		bright = 1
+	}
+
+	// Live frame: flame block spinner + verb + token counter.
+	frame := string(spinnerFrames[at.flameFrame%len(spinnerFrames)])
+	mutedStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+
+	switch at.compactPhase {
+	case "running":
+		// Bright breathing pulse: interpolate between frozen ember and
+		// primary peak using the spring brightness + sine.
+		accentHex := blendHex(
+			ActiveTheme.Secondary,
+			ActiveTheme.Accent,
+			bright,
+		)
+		accent := lipgloss.Color(accentHex)
+		spinnerStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(flameColor(at.flameFrame))).
+			Bold(true)
+		verbStyle := lipgloss.NewStyle().Foreground(accent).Italic(true).Bold(true)
+		verb := at.compactVerb
+		if verb == "" {
+			verb = "Compacting flames"
+		}
+
+		before := at.compactTokensBefore
+		tokenLine := mutedStyle.Render("  " + formatTokenTrail(before, 0))
+		elapsed := int(time.Since(at.compactStart).Seconds())
+		line := "  " + spinnerStyle.Render(frame) + " " +
+			verbStyle.Render(verb+"...") + " " +
+			mutedStyle.Render(fmt.Sprintf("(%ds)", elapsed))
+		return line + "\n" + tokenLine
+
+	case "complete":
+		// Dissolve frame: color chases from primary -> frozen via the
+		// completionCoolRamp, same as the main completion animation.
+		c := completionColor(bright)
+		style := lipgloss.NewStyle().Foreground(c).Italic(true).Bold(true)
+		verb := at.compactVerb
+		if verb == "" {
+			verb = "Compaction"
+		}
+		past := verbToPast(strings.SplitN(verb, " ", 2)[0])
+		rest := ""
+		if parts := strings.SplitN(verb, " ", 2); len(parts) > 1 {
+			rest = " " + parts[1]
+		}
+		before := at.compactTokensBefore
+		after := at.compactTokensAfter
+		elapsed := int(time.Since(at.compactStart).Seconds())
+		head := style.Render("  \u2756 " + past + rest + fmt.Sprintf(" in %ds", elapsed))
+		trail := mutedStyle.Render("  " + formatTokenTrail(before, after))
+		return head + "\n" + trail
+
+	case "failed":
+		errStyle := lipgloss.NewStyle().Foreground(ColorError).Italic(true).Bold(true)
+		msg := at.compactErrMsg
+		if msg == "" {
+			msg = "Compaction failed"
+		}
+		return errStyle.Render("  \u2716 " + msg)
+	}
+
+	return ""
+}
+
+// formatTokenTrail builds a "NK -> ?" or "NK -> MK" style counter line
+// used by the compaction indicator. Before is always shown, after is "?"
+// while the compaction is still running.
+func formatTokenTrail(before, after int) string {
+	if before <= 0 && after <= 0 {
+		return ""
+	}
+	b := formatTokenCount(before)
+	if after <= 0 {
+		return b + " \u2192 ?"
+	}
+	return b + " \u2192 " + formatTokenCount(after)
+}
+
+// formatTokenCount formats a token count compactly: <1000 raw, >=1000
+// uses "K" suffix with one decimal when meaningful.
+func formatTokenCount(n int) string {
+	if n <= 0 {
+		return "0"
+	}
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	f := float64(n) / 1000.0
+	if f >= 100 {
+		return fmt.Sprintf("%.0fK", f)
+	}
+	return fmt.Sprintf("%.1fK", f)
 }
 
 // RenderUserMessage renders a user message in a rounded border box.
@@ -2019,12 +2467,16 @@ var availableModels = func() []struct {
 	}, 0, len(engine.ModelCatalog))
 
 	for _, spec := range engine.ModelCatalog {
+		display := spec.Display
+		if display == "" {
+			display = spec.Name
+		}
 		models = append(models, struct {
 			Name    string
 			Aliases []string
 			Desc    string
 		}{
-			Name:    spec.Name,
+			Name:    display,
 			Aliases: spec.Aliases,
 			Desc:    availableModelDescription(spec),
 		})
@@ -2172,6 +2624,9 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			components.ReapplyInputStyles(&at.input)
 			at.messagesDirty = true
 			at.addSystemMessage("Theme set to: " + args)
+			// Persist to config.
+			at.cfg.Theme = args
+			_ = at.cfg.Save()
 		case "auto":
 			hour := time.Now().Hour()
 			name := "flame"
@@ -2186,6 +2641,9 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			components.ReapplyInputStyles(&at.input)
 			at.messagesDirty = true
 			at.addSystemMessage("Theme set to auto (currently: " + name + ")")
+			// Persist to config (store "auto" so the resolution re-runs next launch).
+			at.cfg.Theme = "auto"
+			_ = at.cfg.Save()
 		default:
 			at.addSystemMessage("Unknown theme: " + args + " (valid: flame, night, auto)")
 		}
@@ -2386,6 +2844,9 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 func (at AgentTab) modelDisplay() string {
 	if at.model == "" {
 		return "default"
+	}
+	if spec := engine.SpecFor(at.model); spec != nil && spec.Display != "" {
+		return spec.Display
 	}
 	return at.model
 }

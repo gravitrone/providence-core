@@ -26,7 +26,8 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine"
 	_ "github.com/gravitrone/providence-core/internal/engine/claude"    // register claude factory
 	_ "github.com/gravitrone/providence-core/internal/engine/codex_re" // register codex_re factory
-	"github.com/gravitrone/providence-core/internal/engine/direct"     // register direct factory + image types
+	"github.com/gravitrone/providence-core/internal/engine/direct" // register direct factory + image types
+	"github.com/gravitrone/providence-core/internal/engine/kairos"
 	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
@@ -140,6 +141,7 @@ var slashCommands = []slashCommand{
 	{"/dashboard", "Toggle dashboard panel (or: pin, hide)"},
 	{"/tree", "Toggle conversation tree view"},
 	{"/clear", "Clear chat history"},
+	{"/kairos", "Toggle kairos autonomous mode"},
 	{"/help", "Show available commands"},
 }
 
@@ -272,6 +274,9 @@ type AgentTab struct {
 
 	// Context portability: pending state to restore after engine switch.
 	pendingPortableState *engine.ConversationState
+
+	// Kairos autonomous mode state.
+	kairos *kairos.State
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -319,6 +324,7 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		transcript:       NewTranscriptModel(),
 		dashboardVisible: true,
 		dashboard:        dashboard.New(),
+		kairos:           kairos.New(),
 	}
 }
 
@@ -3262,6 +3268,33 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		at.messagesDirty = true
 		at.refreshViewport()
 		return true, nil
+	case "/kairos":
+		if args == "" {
+			// Toggle kairos mode.
+			if at.kairos.ShouldTick() || at.kairos.Active {
+				at.kairos.Deactivate()
+				at.addSystemMessage("Kairos autonomous mode deactivated")
+			} else {
+				at.kairos.Activate()
+				at.addSystemMessage("Kairos autonomous mode activated - ticks will fire after each turn")
+			}
+		} else {
+			switch strings.TrimSpace(args) {
+			case "status":
+				at.addSystemMessage(at.kairos.Status())
+			case "pause":
+				at.kairos.Pause()
+				at.addSystemMessage("Kairos paused - ticks suspended")
+			case "resume":
+				at.kairos.Resume()
+				at.addSystemMessage("Kairos resumed - ticks active")
+			default:
+				at.addSystemMessage("Usage: /kairos [status|pause|resume]")
+			}
+		}
+		at.refreshViewport()
+		return true, nil
+
 	case "/help":
 		// Store as markdown - will be rendered by glamour in renderAssistantMessage.
 		help := "## Available Commands\n\n"
@@ -3276,6 +3309,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		help += "| `/compact` | Manually trigger context compaction |\n"
 		help += "| `/rewind` | Rewind to a previous user message |\n"
 		help += "| `/dashboard` | Toggle dashboard panel |\n"
+		help += "| `/kairos` | Toggle kairos autonomous mode |\n"
 		help += "| `/tree` | Toggle conversation tree view |\n"
 		help += "| `/clear` | Clear chat history |\n"
 		help += "| `/help` | Show available commands |"

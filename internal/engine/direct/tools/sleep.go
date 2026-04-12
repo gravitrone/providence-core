@@ -1,0 +1,61 @@
+package tools
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+// SleepTool pauses the kairos loop for a specified duration.
+// Prefer this over Bash(sleep) - doesn't hold a shell process.
+// Cache-aware: sleeping >5min forces cache miss on next wake.
+type SleepTool struct{}
+
+// Name returns the tool name.
+func (s SleepTool) Name() string { return "Sleep" }
+
+// Description returns a human-readable description.
+func (s SleepTool) Description() string {
+	return "Sleep for a specified duration in milliseconds. Use this instead of Bash(sleep) - it doesn't hold a shell process and can be interrupted by user input."
+}
+
+// InputSchema returns the JSON Schema for the tool input.
+func (s SleepTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"duration_ms": map[string]any{
+				"type":        "integer",
+				"description": "Duration to sleep in milliseconds",
+				"minimum":     100,
+				"maximum":     3600000, // 1 hour max
+			},
+		},
+		"required": []string{"duration_ms"},
+	}
+}
+
+// ReadOnly returns true - sleep doesn't modify anything.
+func (s SleepTool) ReadOnly() bool { return true }
+
+// Execute blocks for the specified duration. Cancellable via context
+// (e.g. when the user sends a message during sleep).
+func (s SleepTool) Execute(ctx context.Context, input map[string]any) ToolResult {
+	ms := paramInt(input, "duration_ms", 1000)
+	if ms < 100 {
+		ms = 100
+	}
+	if ms > 3600000 {
+		ms = 3600000
+	}
+
+	dur := time.Duration(ms) * time.Millisecond
+
+	select {
+	case <-time.After(dur):
+		secs := float64(ms) / 1000.0
+		return ToolResult{Content: fmt.Sprintf("Slept for %.1fs", secs)}
+	case <-ctx.Done():
+		return ToolResult{Content: "Sleep interrupted by user input"}
+	}
+}

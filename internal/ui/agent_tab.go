@@ -1108,16 +1108,27 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 			at.completionVel = 0.0
 		}
 
-		// Set session title from first user message if not yet set.
+		// Auto-title: set session title from first user message if not yet set.
 		if at.store != nil && at.sessionID != "" {
 			if sess, err := at.store.GetSession(at.sessionID); err == nil && sess != nil && sess.Title == "" {
 				for _, m := range at.messages {
 					if m.Role == "user" && m.Content != "" {
-						title := m.Content
-						if len(title) > 60 {
-							title = title[:60]
+						title := strings.TrimSpace(m.Content)
+						// Remove newlines - title should be single line.
+						if idx := strings.IndexAny(title, "\n\r"); idx > 0 {
+							title = title[:idx]
 						}
-						at.store.UpdateSessionTitle(at.sessionID, title)
+						if len(title) > 80 {
+							title = title[:80]
+							// Trim at word boundary if reasonable.
+							if idx := strings.LastIndex(title, " "); idx > 40 {
+								title = title[:idx]
+							}
+						}
+						title = strings.TrimSpace(title)
+						if title != "" {
+							at.store.UpdateSessionTitle(at.sessionID, title)
+						}
 						break
 					}
 				}

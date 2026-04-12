@@ -80,5 +80,31 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 	`
 	_, err := db.Exec(schema)
+	if err != nil {
+		return err
+	}
+
+	// FTS5 virtual table for full-text search across messages.
+	// Separate exec because some SQLite builds don't support mixing
+	// DDL types in one Exec call.
+	fts := `
+	CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+		content,
+		content='messages',
+		content_rowid='id'
+	);
+
+	CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+		INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+	END;
+	CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+		INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+	END;
+	CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+		INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+		INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+	END;
+	`
+	_, err = db.Exec(fts)
 	return err
 }

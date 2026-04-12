@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/uuid"
+	"github.com/gravitrone/providence-core/internal/bridge/macos"
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/compact"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
@@ -110,7 +112,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	// Build tool registry with all built-in tools.
 	fs := tools.NewFileState()
 	planState := tools.NewPlanModeState(nil) // event wiring comes in Phase 5
-	registry := tools.NewRegistry(
+	coreTools := []tools.Tool{
 		tools.NewReadTool(fs),
 		tools.NewWriteTool(fs),
 		tools.NewEditTool(fs),
@@ -123,7 +125,21 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		tools.NewAskUserQuestionTool(nil), // event wiring comes in Phase 5
 		tools.NewEnterPlanModeTool(planState),
 		tools.NewExitPlanModeTool(planState),
-	)
+	}
+
+	// Register computer use tools on macOS only.
+	if runtime.GOOS == "darwin" {
+		bridge := macos.New()
+		coreTools = append(coreTools,
+			tools.NewScreenshotTool(bridge),
+			tools.NewDesktopClickTool(bridge),
+			tools.NewDesktopTypeTool(bridge),
+			tools.NewDesktopAppsTool(bridge),
+			tools.NewClipboardTool(bridge),
+		)
+	}
+
+	registry := tools.NewRegistry(coreTools...)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	history := NewConversationHistory()

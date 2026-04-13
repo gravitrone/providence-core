@@ -3128,30 +3128,18 @@ func (at AgentTab) renderPermissionMessage(msg ChatMessage, contentW int) string
 
 	switch msg.ToolStatus {
 	case "success":
-		// Collapsed: ✓ ToolName args in green pulsating border.
+		// Clean inline: ✓ ToolName args (no box, just a line)
 		icon := ToolIconSuccessStyle.Render("✓")
 		line := icon + " " + lipgloss.NewStyle().Foreground(c("#5fa8d0")).Bold(true).Render(msg.ToolName) +
 			" " + ToolArgsStyle.Render(msg.ToolArgs)
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(pulseColor(at.flameFrame, "#50C878")).
-			Padding(0, 1).
-			Width(dialogW).
-			Render(line)
-		return box + "\n"
+		return MutedStyle.Render("  Always allowing "+msg.ToolName+" for this session") + "\n" + line + "\n"
 
 	case "cancelled":
-		// Collapsed: ● ToolName args in muted border.
-		icon := ToolIconPendingStyle.Render("●")
-		line := icon + " " + lipgloss.NewStyle().Foreground(ColorMuted).Bold(true).Render(msg.ToolName) +
-			" " + ToolArgsStyle.Render(msg.ToolArgs)
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorMuted).
-			Padding(0, 1).
-			Width(dialogW).
-			Render(line)
-		return box + "\n"
+		// Clean inline: ● ToolName args (muted, no box)
+		icon := lipgloss.NewStyle().Foreground(ColorMuted).Render("●")
+		line := icon + " " + lipgloss.NewStyle().Foreground(ColorMuted).Render(msg.ToolName) +
+			" " + ToolArgsStyle.Render(msg.ToolArgs) + MutedStyle.Render(" (denied)")
+		return line + "\n"
 
 	default:
 		// Pending: full crush-style dialog.

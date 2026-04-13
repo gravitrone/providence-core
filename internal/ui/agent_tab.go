@@ -2458,6 +2458,16 @@ func (at AgentTab) hasVizMessages() bool {
 	return false
 }
 
+// hasPulsingMessages returns true if any message has a pulsating border (pending permission or completed tool).
+func (at AgentTab) hasPulsingMessages() bool {
+	for _, m := range at.messages {
+		if m.Role == "permission" {
+			return true
+		}
+	}
+	return false
+}
+
 // hasSteeredMessage returns true if any queued message is marked as steered.
 func (at AgentTab) hasSteeredMessage() bool {
 	for _, m := range at.queue {
@@ -2483,7 +2493,8 @@ func (at *AgentTab) refreshViewport() {
 	hasViz := at.hasVizMessages()
 	hasBatch := at.streaming && len(at.toolsExpanded) == 0 && at.hasBatchTools()
 	compactLive := at.compactPhase != ""
-	if at.messagesDirty || at.streaming || at.completionActive || compactLive || hasViz || hasBatch || at.cachedMessages == "" {
+	hasPulse := at.hasPulsingMessages()
+	if at.messagesDirty || at.streaming || at.completionActive || compactLive || hasViz || hasBatch || hasPulse || at.cachedMessages == "" {
 		at.cachedMessages = at.renderMessages()
 		at.messagesDirty = false
 	}

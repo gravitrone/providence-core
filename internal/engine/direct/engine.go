@@ -724,6 +724,29 @@ func (e *DirectEngine) MCPInstructions() string {
 	return e.mcpManager.GetInstructions()
 }
 
+// MCPServerInfo holds status information for a single MCP server.
+type MCPServerInfo struct {
+	Name      string
+	ToolCount int
+}
+
+// MCPStatus returns status information for all configured MCP servers.
+// Returns nil when no MCP manager is configured.
+func (e *DirectEngine) MCPStatus() []MCPServerInfo {
+	if e.mcpManager == nil {
+		return nil
+	}
+	allTools := e.mcpManager.GetAllTools()
+	out := make([]MCPServerInfo, 0, len(allTools))
+	for name, tools := range allTools {
+		out = append(out, MCPServerInfo{
+			Name:      name,
+			ToolCount: len(tools),
+		})
+	}
+	return out
+}
+
 // Status returns the current engine status (thread-safe).
 func (e *DirectEngine) Status() engine.SessionStatus {
 	e.mu.Lock()

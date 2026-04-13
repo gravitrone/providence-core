@@ -41,6 +41,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 	"github.com/gravitrone/providence-core/internal/ui/dashboard"
+	"github.com/gravitrone/providence-core/internal/ui/panels"
 	"github.com/gravitrone/providence-core/internal/ui/picker"
 	"github.com/gravitrone/providence-core/internal/ui/tree"
 )
@@ -204,6 +205,11 @@ var slashCommands = []slashCommand{
 	{"/fork", "Fork N background agents from current context"},
 	{"/index", "Index worktree files and write .providence/worktree-index.json"},
 	{"/init", "Create CLAUDE.md in project root with detected project info"},
+	{"/exit", "Clean exit (alias /quit)"},
+	{"/quit", "Clean exit (alias /exit)"},
+	{"/copy", "Copy last assistant response to clipboard"},
+	{"/context", "Show context usage bar"},
+	{"/mcp", "List connected MCP servers with status"},
 	{"/help", "Show available commands"},
 }
 
@@ -5397,6 +5403,66 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			return true, nil
 		}
 		at.addSystemMessage("Tagged: " + args)
+		at.refreshViewport()
+		return true, nil
+
+	case "/exit", "/quit":
+		// Clean shutdown: close engine, exit process.
+		if at.engine != nil {
+			at.engine.Close()
+		}
+		return true, tea.Quit
+
+	case "/copy":
+		// Copy the last assistant response to clipboard via pbcopy.
+		var lastAssistant string
+		for i := len(at.messages) - 1; i >= 0; i-- {
+			if at.messages[i].Role == "assistant" && at.messages[i].Content != "" {
+				lastAssistant = at.messages[i].Content
+				break
+			}
+		}
+		if lastAssistant == "" {
+			at.addSystemMessage("No assistant response to copy")
+		} else {
+			cmd := exec.Command("pbcopy")
+			cmd.Stdin = strings.NewReader(lastAssistant)
+			if err := cmd.Run(); err != nil {
+				at.addSystemMessage("Copy failed: " + err.Error())
+			} else {
+				at.addSystemMessage(fmt.Sprintf("Copied %d bytes to clipboard", len(lastAssistant)))
+			}
+		}
+		at.refreshViewport()
+		return true, nil
+
+	case "/context":
+		// Show context usage as a simple bar (reuses tokens panel logic).
+		ctxWindow := engine.ContextWindowFor(at.model)
+		bar := panels.RenderTokens(at.currentTokens, ctxWindow, 50)
+		at.addSystemMessage(bar)
+		at.refreshViewport()
+		return true, nil
+
+	case "/mcp":
+		// List connected MCP servers with status.
+		de, ok := at.engine.(*direct.DirectEngine)
+		if !ok || de == nil {
+			at.addSystemMessage("MCP servers only available with direct engine")
+			at.refreshViewport()
+			return true, nil
+		}
+		servers := de.MCPStatus()
+		if len(servers) == 0 {
+			at.addSystemMessage("No MCP servers connected")
+		} else {
+			var b strings.Builder
+			b.WriteString("MCP Servers:\n\n")
+			for _, s := range servers {
+				b.WriteString(fmt.Sprintf("  %s - %d tools\n", s.Name, s.ToolCount))
+			}
+			at.addSystemMessage(b.String())
+		}
 		at.refreshViewport()
 		return true, nil
 

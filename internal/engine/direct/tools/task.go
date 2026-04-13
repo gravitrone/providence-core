@@ -19,7 +19,7 @@ func NewTaskTool(runner *subagent.Runner, executor subagent.Executor) *TaskTool 
 	return &TaskTool{runner: runner, executor: executor}
 }
 
-func (t *TaskTool) Name() string { return "Task" }
+func (t *TaskTool) Name() string { return "Agent" }
 func (t *TaskTool) Description() string {
 	return "Launch a subagent to perform a task. The agent runs in its own goroutine with its own system prompt and tool set. Use run_in_background=true for async execution."
 }

@@ -3,7 +3,7 @@ package subagent
 // AgentDisallowedTools are always blocked for subagents to prevent
 // recursion and interaction with the parent session's control flow.
 var AgentDisallowedTools = []string{
-	"Task",
+	"Agent",
 	"AskUserQuestion",
 	"EnterPlanMode",
 	"ExitPlanMode",

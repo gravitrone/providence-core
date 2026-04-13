@@ -2,12 +2,15 @@ package tools
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -17,6 +20,7 @@ const (
 )
 
 // GrepTool searches file contents using regex patterns.
+// Shells out to rg (ripgrep) if available on PATH, falls back to Go regex.
 type GrepTool struct{}
 
 func NewGrepTool() *GrepTool    { return &GrepTool{} }
@@ -45,15 +49,53 @@ func (g *GrepTool) InputSchema() map[string]any {
 			},
 			"head_limit": map[string]any{
 				"type":        "integer",
-				"description": "Max entries to return (default 250).",
+				"description": "Max entries to return (default 250). Pass 0 for unlimited.",
 			},
 			"glob": map[string]any{
 				"type":        "string",
 				"description": "Glob pattern to filter files (e.g. \"*.go\").",
 			},
+			"-A": map[string]any{
+				"type":        "integer",
+				"description": "Lines to show after each match (content mode only).",
+			},
+			"-B": map[string]any{
+				"type":        "integer",
+				"description": "Lines to show before each match (content mode only).",
+			},
+			"-C": map[string]any{
+				"type":        "integer",
+				"description": "Context lines before and after each match (alias for -A + -B).",
+			},
+			"-i": map[string]any{
+				"type":        "boolean",
+				"description": "Case insensitive search.",
+			},
+			"-n": map[string]any{
+				"type":        "boolean",
+				"description": "Show line numbers (default true for content mode).",
+			},
+			"multiline": map[string]any{
+				"type":        "boolean",
+				"description": "Enable multiline mode (pattern matches across lines).",
+			},
+			"offset": map[string]any{
+				"type":        "integer",
+				"description": "Skip first N entries before applying head_limit.",
+			},
+			"type": map[string]any{
+				"type":        "string",
+				"description": "File type filter (e.g. \"go\", \"py\", \"js\"). Maps to rg --type.",
+			},
 		},
 		"required": []string{"pattern"},
 	}
+}
+
+// rgAvailable checks if ripgrep (rg) is on PATH.
+func rgAvailable() bool {
+	_, err := exec.LookPath("rg")
+	return err == nil
 }
 
 func (g *GrepTool) Execute(ctx context.Context, input map[string]any) ToolResult {
@@ -62,18 +104,139 @@ func (g *GrepTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		return ToolResult{Content: "pattern is required", IsError: true}
 	}
 
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return ToolResult{Content: fmt.Sprintf("invalid regex: %v", err), IsError: true}
-	}
-
 	root := paramString(input, "path", ".")
 	root = filepath.Clean(root)
 	mode := paramString(input, "output_mode", "files_with_matches")
 	headLimit := paramInt(input, "head_limit", defaultHeadLimit)
 	fileGlob := paramString(input, "glob", "")
+	afterCtx := paramInt(input, "-A", 0)
+	beforeCtx := paramInt(input, "-B", 0)
+	contextLines := paramInt(input, "-C", 0)
+	caseInsensitive := paramBool(input, "-i", false)
+	showLineNums := paramBool(input, "-n", true)
+	multiline := paramBool(input, "multiline", false)
+	offset := paramInt(input, "offset", 0)
+	fileType := paramString(input, "type", "")
 
-	// check if root is a file
+	// -C is shorthand for both -A and -B
+	if contextLines > 0 {
+		if afterCtx == 0 {
+			afterCtx = contextLines
+		}
+		if beforeCtx == 0 {
+			beforeCtx = contextLines
+		}
+	}
+
+	// Try ripgrep first
+	if rgAvailable() {
+		return g.executeRg(ctx, pattern, root, mode, headLimit, fileGlob,
+			afterCtx, beforeCtx, caseInsensitive, showLineNums, multiline, offset, fileType)
+	}
+
+	// Fallback: Go regex implementation (no context lines, limited features)
+	return g.executeFallback(ctx, pattern, root, mode, headLimit, fileGlob,
+		caseInsensitive, offset)
+}
+
+// executeRg runs the search via ripgrep.
+func (g *GrepTool) executeRg(ctx context.Context, pattern, root, mode string,
+	headLimit int, fileGlob string, afterCtx, beforeCtx int,
+	caseInsensitive, showLineNums, multiline bool, offset int, fileType string,
+) ToolResult {
+	args := []string{"--no-heading", "--color=never"}
+
+	switch mode {
+	case "files_with_matches":
+		args = append(args, "--files-with-matches")
+	case "count":
+		args = append(args, "--count")
+	case "content":
+		if showLineNums {
+			args = append(args, "--line-number")
+		}
+		if afterCtx > 0 {
+			args = append(args, "-A", strconv.Itoa(afterCtx))
+		}
+		if beforeCtx > 0 {
+			args = append(args, "-B", strconv.Itoa(beforeCtx))
+		}
+	}
+
+	if caseInsensitive {
+		args = append(args, "-i")
+	}
+	if multiline {
+		args = append(args, "--multiline", "--multiline-dotall")
+	}
+	if fileType != "" {
+		args = append(args, "--type", fileType)
+	}
+	if fileGlob != "" {
+		args = append(args, "--glob", fileGlob)
+	}
+
+	args = append(args, pattern, root)
+
+	cmd := exec.CommandContext(ctx, "rg", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	// rg exits 1 when no matches found - that's not an error
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			if exitErr.ExitCode() == 1 {
+				return ToolResult{Content: ""}
+			}
+			if exitErr.ExitCode() == 2 {
+				return ToolResult{Content: fmt.Sprintf("rg error: %s", stderr.String()), IsError: true}
+			}
+		} else {
+			return ToolResult{Content: fmt.Sprintf("rg error: %v", err), IsError: true}
+		}
+	}
+
+	output := stdout.String()
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return ToolResult{Content: ""}
+	}
+
+	// Apply offset
+	if offset > 0 && offset < len(lines) {
+		lines = lines[offset:]
+	} else if offset >= len(lines) {
+		return ToolResult{Content: ""}
+	}
+
+	// Apply head_limit
+	if headLimit > 0 && len(lines) > headLimit {
+		lines = lines[:headLimit]
+	}
+
+	result := strings.Join(lines, "\n")
+	if len(result) > maxGrepChars {
+		result = result[:maxGrepChars] + "\n... truncated"
+	}
+
+	return ToolResult{Content: result}
+}
+
+// executeFallback uses Go's regexp for searching when rg is unavailable.
+func (g *GrepTool) executeFallback(ctx context.Context, pattern, root, mode string,
+	headLimit int, fileGlob string, caseInsensitive bool, offset int,
+) ToolResult {
+	if caseInsensitive {
+		pattern = "(?i)" + pattern
+	}
+
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("invalid regex: %v", err), IsError: true}
+	}
+
 	info, err := os.Stat(root)
 	if err != nil {
 		return ToolResult{Content: fmt.Sprintf("path error: %v", err), IsError: true}
@@ -88,13 +251,13 @@ func (g *GrepTool) Execute(ctx context.Context, input map[string]any) ToolResult
 
 	switch mode {
 	case "files_with_matches":
-		return grepFilesWithMatches(re, files, headLimit)
+		return grepFilesWithMatches(re, files, headLimit, offset)
 	case "content":
-		return grepContent(re, files, headLimit)
+		return grepContent(re, files, headLimit, offset)
 	case "count":
-		return grepCount(re, files, headLimit)
+		return grepCount(re, files, headLimit, offset)
 	default:
-		return grepFilesWithMatches(re, files, headLimit)
+		return grepFilesWithMatches(re, files, headLimit, offset)
 	}
 }
 
@@ -132,15 +295,20 @@ func collectFiles(root, fileGlob string) []string {
 	return files
 }
 
-func grepFilesWithMatches(re *regexp.Regexp, files []string, limit int) ToolResult {
+func grepFilesWithMatches(re *regexp.Regexp, files []string, limit, offset int) ToolResult {
 	var matches []string
 	totalChars := 0
+	skipped := 0
 
 	for _, path := range files {
 		if len(matches) >= limit {
 			break
 		}
 		if matchesInFile(re, path) {
+			if skipped < offset {
+				skipped++
+				continue
+			}
 			matches = append(matches, path)
 			totalChars += len(path) + 1
 			if totalChars > maxGrepChars {
@@ -152,9 +320,10 @@ func grepFilesWithMatches(re *regexp.Regexp, files []string, limit int) ToolResu
 	return ToolResult{Content: strings.Join(matches, "\n")}
 }
 
-func grepContent(re *regexp.Regexp, files []string, limit int) ToolResult {
+func grepContent(re *regexp.Regexp, files []string, limit, offset int) ToolResult {
 	var b strings.Builder
 	entries := 0
+	skipped := 0
 
 	for _, path := range files {
 		if entries >= limit || b.Len() >= maxGrepChars {
@@ -174,6 +343,10 @@ func grepContent(re *regexp.Regexp, files []string, limit int) ToolResult {
 			lineNum++
 			line := scanner.Text()
 			if re.MatchString(line) {
+				if skipped < offset {
+					skipped++
+					continue
+				}
 				entry := fmt.Sprintf("%s:%d:%s\n", path, lineNum, line)
 				if b.Len()+len(entry) > maxGrepChars {
 					f.Close()
@@ -194,7 +367,7 @@ func grepContent(re *regexp.Regexp, files []string, limit int) ToolResult {
 	return ToolResult{Content: b.String()}
 }
 
-func grepCount(re *regexp.Regexp, files []string, limit int) ToolResult {
+func grepCount(re *regexp.Regexp, files []string, limit, offset int) ToolResult {
 	type countEntry struct {
 		path  string
 		count int
@@ -213,6 +386,13 @@ func grepCount(re *regexp.Regexp, files []string, limit int) ToolResult {
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].count > results[j].count
 	})
+
+	// Apply offset
+	if offset > 0 && offset < len(results) {
+		results = results[offset:]
+	} else if offset > 0 {
+		results = nil
+	}
 
 	if len(results) > limit {
 		results = results[:limit]

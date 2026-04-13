@@ -63,6 +63,14 @@ func (b *BashTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		return ToolResult{Content: "command is required", IsError: true}
 	}
 
+	// Security check before execution.
+	if check := CheckBashSecurity(command); !check.Allowed {
+		return ToolResult{
+			Content: fmt.Sprintf("command blocked by security check: %s", check.Reason),
+			IsError: true,
+		}
+	}
+
 	timeoutMs := paramInt(input, "timeout", defaultTimeoutMs)
 	if timeoutMs <= 0 {
 		timeoutMs = defaultTimeoutMs

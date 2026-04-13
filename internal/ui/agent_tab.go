@@ -303,6 +303,10 @@ type AgentTab struct {
 	compactBright float64
 	compactVel    float64
 
+	// Thinking block state: tracks streaming thinking content.
+	thinkingActive bool
+	thinkingBuffer string
+
 	// Rewind picker state.
 	rewindModel components.RewindModel
 
@@ -1516,6 +1520,55 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 				}
 				at.refreshViewport()
 			}
+		}
+		return at, at.safeWaitForEvent()
+
+	case "thinking_start":
+		at.thinkingActive = true
+		at.thinkingBuffer = ""
+		at.messages = append(at.messages, ChatMessage{
+			Role:    "thinking",
+			Content: "thinking...",
+			Done:    false,
+		})
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, at.safeWaitForEvent()
+
+	case "thinking_delta":
+		if td, ok := ev.Data.(*engine.ThinkingDelta); ok && at.thinkingActive {
+			at.thinkingBuffer += td.Text
+			// Update the last thinking message with accumulated content.
+			for i := len(at.messages) - 1; i >= 0; i-- {
+				if at.messages[i].Role == "thinking" && !at.messages[i].Done {
+					// Show a truncated preview of the thinking content.
+					preview := at.thinkingBuffer
+					if len(preview) > 200 {
+						preview = preview[len(preview)-200:]
+					}
+					at.messages[i].Content = preview
+					at.messagesDirty = true
+					at.refreshViewport()
+					break
+				}
+			}
+		}
+		return at, at.safeWaitForEvent()
+
+	case "thinking_stop", "content_block_stop":
+		if at.thinkingActive {
+			at.thinkingActive = false
+			// Mark the thinking message as done and collapse it.
+			for i := len(at.messages) - 1; i >= 0; i-- {
+				if at.messages[i].Role == "thinking" && !at.messages[i].Done {
+					at.messages[i].Content = at.thinkingBuffer
+					at.messages[i].Done = true
+					at.messagesDirty = true
+					break
+				}
+			}
+			at.thinkingBuffer = ""
+			at.refreshViewport()
 		}
 		return at, at.safeWaitForEvent()
 

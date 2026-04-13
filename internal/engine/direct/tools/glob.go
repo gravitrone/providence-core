@@ -119,19 +119,23 @@ func (g *GlobTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		// match against pattern
 		matched, matchErr := filepath.Match(filepath.Base(fullPattern), info.Name())
 		if matchErr != nil {
-			return nil
+			return fmt.Errorf("invalid glob pattern %q: %w", fullPattern, matchErr)
 		}
 
 		// For patterns with directory components, also try matching the full path
 		if !matched {
-			matched, _ = filepath.Match(fullPattern, path)
+			if m, err := filepath.Match(fullPattern, path); err == nil {
+				matched = m
+			}
 		}
 
 		// For ** patterns, match just the base name against the last component
 		if !matched && strings.Contains(pattern, "**") {
 			parts := strings.Split(pattern, "/")
 			lastPart := parts[len(parts)-1]
-			matched, _ = filepath.Match(lastPart, info.Name())
+			if m, err := filepath.Match(lastPart, info.Name()); err == nil {
+				matched = m
+			}
 		}
 
 		if matched {

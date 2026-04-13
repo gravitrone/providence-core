@@ -39,6 +39,18 @@ type EngineConfig struct {
 
 	// OpenRouter fields - used when Provider is "openrouter".
 	OpenRouterAPIKey string
+
+	// HooksMap maps event names to hook configs for lifecycle hooks.
+	// Populated from config.HooksConfig.ToMap() at startup.
+	HooksMap map[string][]HookConfigEntry
+}
+
+// HookConfigEntry is a hook definition passed through EngineConfig.
+// Mirrors config.HookEntry but lives in the engine package to avoid import cycles.
+type HookConfigEntry struct {
+	Command string
+	URL     string
+	Timeout int // milliseconds
 }
 
 // RestoredMessage is the persisted message shape used to rehydrate engine

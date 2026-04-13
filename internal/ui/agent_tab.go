@@ -1090,7 +1090,7 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		// Create session on first use.
 		if at.engine == nil {
 			// Images will be transferred after engine creation via handleEngineCreated.
-			return at, tea.Batch(createEngineAndSend(text, at.model, at.engineType, at.cfg.OutputStyle), spinnerTick())
+			return at, tea.Batch(createEngineAndSend(text, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks), spinnerTick())
 		}
 
 		// Transfer images to engine before sending.
@@ -2443,7 +2443,7 @@ func (at *AgentTab) transferImagesToEngine() int {
 // SendCmd returns the tea.Cmd to send a message (create session or send to existing).
 func (at AgentTab) sendCmd(text string) tea.Cmd {
 	if at.engine == nil {
-		return createEngineAndSend(text, at.model, at.engineType, at.cfg.OutputStyle)
+		return createEngineAndSend(text, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks)
 	}
 	if err := at.engine.Send(text); err != nil {
 		return nil
@@ -4252,7 +4252,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		at.refreshViewport()
 		// Spin up a fresh engine and rehydrate its history so the model
 		// actually remembers this conversation on the next turn.
-		return true, createEngineAndRestore(restored, at.model, at.engineType, at.cfg.OutputStyle)
+		return true, createEngineAndRestore(restored, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks)
 
 	case "/compact":
 		if at.engine == nil {
@@ -5027,7 +5027,26 @@ func buildSystemPromptWithStyle(outputStyleName string) string {
 }
 
 // createEngineAndSend spawns a new engine session and sends the first prompt.
-func createEngineAndSend(prompt, model string, engineType engine.EngineType, outputStyle string) tea.Cmd {
+// configHooksToEngine converts config.HooksConfig into the engine's HooksMap format.
+func configHooksToEngine(h config.HooksConfig) map[string][]engine.HookConfigEntry {
+	raw := h.ToMap()
+	if len(raw) == 0 {
+		return nil
+	}
+	m := make(map[string][]engine.HookConfigEntry, len(raw))
+	for event, entries := range raw {
+		for _, e := range entries {
+			m[event] = append(m[event], engine.HookConfigEntry{
+				Command: e.Command,
+				URL:     e.URL,
+				Timeout: e.Timeout,
+			})
+		}
+	}
+	return m
+}
+
+func createEngineAndSend(prompt, model string, engineType engine.EngineType, outputStyle string, hooksCfg config.HooksConfig) tea.Cmd {
 	return func() tea.Msg {
 		// Allowed tools differ by engine type.
 		var allowedTools []string
@@ -5047,6 +5066,7 @@ func createEngineAndSend(prompt, model string, engineType engine.EngineType, out
 			Model:        model,
 			APIKey:       os.Getenv("ANTHROPIC_API_KEY"),
 			WorkDir:      wd,
+			HooksMap:     configHooksToEngine(hooksCfg),
 		}
 
 		// Detect codex models and configure OpenAI provider.
@@ -5080,7 +5100,7 @@ func createEngineAndSend(prompt, model string, engineType engine.EngineType, out
 // populates its history with the supplied restored messages. The engine is
 // left idle and ready for the next Send. Used by /resume so the model
 // actually remembers the prior conversation.
-func createEngineAndRestore(restored []engine.RestoredMessage, model string, engineType engine.EngineType, outputStyle string) tea.Cmd {
+func createEngineAndRestore(restored []engine.RestoredMessage, model string, engineType engine.EngineType, outputStyle string, hooksCfg config.HooksConfig) tea.Cmd {
 	return func() tea.Msg {
 		var allowedTools []string
 		if engineType == engine.EngineTypeClaude {
@@ -5098,6 +5118,7 @@ func createEngineAndRestore(restored []engine.RestoredMessage, model string, eng
 			Model:        model,
 			APIKey:       os.Getenv("ANTHROPIC_API_KEY"),
 			WorkDir:      wd,
+			HooksMap:     configHooksToEngine(hooksCfg),
 		}
 
 		if isCodexModel(model) {

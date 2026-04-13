@@ -6,6 +6,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/gravitrone/providence-core/internal/ui/components"
+	"github.com/gravitrone/providence-core/internal/ui/dashboard"
 )
 
 // --- Theme System (Providence - The Profaned Goddess) ---
@@ -164,6 +165,14 @@ func ApplyTheme(name string) {
 	recomputeVizGradients()
 	recomputeBannerGradient()
 	recomputeSpinnerColors()
+
+	// Update dashboard table colors to match active theme.
+	dashboard.UpdateThemeColors(
+		ActiveTheme.Primary,
+		ActiveTheme.Secondary,
+		ActiveTheme.Muted,
+		ActiveTheme.Text,
+	)
 }
 
 // reapplyStyles recreates all style vars from current color vars.

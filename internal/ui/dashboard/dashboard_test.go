@@ -45,9 +45,9 @@ func TestDashboardView(t *testing.T) {
 func TestDashboardCollapse(t *testing.T) {
 	d := newTestDashboard(40, 30)
 
-	// APPROVALS is not collapsed by default - its body should appear.
+	// APPROVALS is not collapsed by default - its header should appear.
 	view := d.View()
-	assert.Contains(t, view, "No pending approvals", "expanded panel body should appear")
+	assert.Contains(t, view, "APPROVALS", "expanded panel header should appear")
 
 	// Collapse it.
 	d.Panels[0].Collapsed = true

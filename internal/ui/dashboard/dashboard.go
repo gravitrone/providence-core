@@ -5,9 +5,35 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
+
+// --- Theme-reactive colors (updated by UpdateThemeColors) ---
+
+var (
+	themeHeaderColor = "#FFA600"
+	themeTextColor   = "#E8DACE"
+	themeAccentColor = "#D77757"
+	themeMutedColor  = "#6b5040"
+)
+
+// UpdateThemeColors updates the dashboard-internal color palette.
+// Called from the TUI layer after ApplyTheme so tables use the active theme.
+func UpdateThemeColors(primary, secondary, muted, text string) {
+	themeHeaderColor = primary
+	themeAccentColor = secondary
+	themeMutedColor = muted
+	themeTextColor = text
+}
+
+// AgentInfo describes an active/completed subagent.
+type AgentInfo struct {
+	Name    string
+	Status  string // "running", "completed", "failed"
+	Elapsed string // e.g. "12s"
+}
 
 // FileInfo describes a file touched during the session.
 type FileInfo struct {
@@ -62,6 +88,7 @@ type DashboardModel struct {
 	// Live data backing each panel.
 	CurrentTokens int
 	MaxTokens     int
+	Agents        []AgentInfo
 	Files         []FileInfo
 	Errors        []ErrorInfo
 	Tasks         []TaskInfo
@@ -290,7 +317,7 @@ func (d *DashboardModel) SetFiles(files []FileInfo) {
 		return
 	}
 	if len(files) == 0 {
-		p.Render = func(w int) string { return "  No files touched" }
+		p.Render = func(w int) string { return "" }
 		p.Badge = ""
 		return
 	}
@@ -298,14 +325,22 @@ func (d *DashboardModel) SetFiles(files []FileInfo) {
 	snapshot := make([]FileInfo, len(files))
 	copy(snapshot, files)
 	p.Render = func(w int) string {
-		var b strings.Builder
-		// Show most recent files first, limit to 8 visible.
+		// Show most recent files, limit to 8 visible.
 		start := 0
 		if len(snapshot) > 8 {
 			start = len(snapshot) - 8
 		}
-		for i := start; i < len(snapshot); i++ {
-			f := snapshot[i]
+		visible := snapshot[start:]
+		pathW := w - 10
+		if pathW < 8 {
+			pathW = 8
+		}
+		cols := []table.Column{
+			{Title: "Op", Width: 2},
+			{Title: "Path", Width: pathW},
+		}
+		rows := make([]table.Row, len(visible))
+		for i, f := range visible {
 			icon := "R"
 			switch f.Action {
 			case "write":
@@ -313,16 +348,78 @@ func (d *DashboardModel) SetFiles(files []FileInfo) {
 			case "edit":
 				icon = "E"
 			}
-			line := fmt.Sprintf("  %s %s", icon, truncatePath(f.Path, w-6))
-			b.WriteString(line)
-			if i < len(snapshot)-1 {
-				b.WriteByte('\n')
-			}
+			rows[i] = table.Row{icon, truncatePath(f.Path, pathW)}
 		}
+		t := table.New(
+			table.WithColumns(cols),
+			table.WithRows(rows),
+			table.WithHeight(len(rows)+1),
+		)
+		s := table.Styles{
+			Header:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeHeaderColor)),
+			Cell:     lipgloss.NewStyle().Foreground(lipgloss.Color(themeTextColor)),
+			Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeAccentColor)),
+		}
+		t.SetStyles(s)
+		result := t.View()
 		if start > 0 {
-			b.WriteString(fmt.Sprintf("\n  ...+%d more", start))
+			result += fmt.Sprintf("\n  ...+%d more", start)
 		}
-		return b.String()
+		return result
+	}
+}
+
+// SetAgents updates the AGENTS panel with current subagent data.
+func (d *DashboardModel) SetAgents(agents []AgentInfo) {
+	d.Agents = agents
+	p := d.PanelByID("agents")
+	if p == nil {
+		return
+	}
+	if len(agents) == 0 {
+		p.Render = func(w int) string { return "" }
+		p.Badge = ""
+		return
+	}
+	running := 0
+	for _, a := range agents {
+		if a.Status == "running" {
+			running++
+		}
+	}
+	if running > 0 {
+		p.Badge = fmt.Sprintf("[%d active]", running)
+	} else {
+		p.Badge = fmt.Sprintf("[%d]", len(agents))
+	}
+	snapshot := make([]AgentInfo, len(agents))
+	copy(snapshot, agents)
+	p.Render = func(w int) string {
+		nameW := w - 18
+		if nameW < 6 {
+			nameW = 6
+		}
+		cols := []table.Column{
+			{Title: "Agent", Width: nameW},
+			{Title: "Status", Width: 7},
+			{Title: "Time", Width: 5},
+		}
+		rows := make([]table.Row, len(snapshot))
+		for i, a := range snapshot {
+			rows[i] = table.Row{truncatePath(a.Name, nameW), a.Status, a.Elapsed}
+		}
+		t := table.New(
+			table.WithColumns(cols),
+			table.WithRows(rows),
+			table.WithHeight(len(rows)+1),
+		)
+		s := table.Styles{
+			Header:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeHeaderColor)),
+			Cell:     lipgloss.NewStyle().Foreground(lipgloss.Color(themeTextColor)),
+			Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeAccentColor)),
+		}
+		t.SetStyles(s)
+		return t.View()
 	}
 }
 
@@ -346,7 +443,7 @@ func (d *DashboardModel) SetErrors(errors []ErrorInfo) {
 		return
 	}
 	if len(errors) == 0 {
-		p.Render = func(w int) string { return "  No errors" }
+		p.Render = func(w int) string { return "" }
 		p.Badge = ""
 		p.BadgeHot = false
 		return
@@ -357,20 +454,35 @@ func (d *DashboardModel) SetErrors(errors []ErrorInfo) {
 	snapshot := make([]ErrorInfo, len(errors))
 	copy(snapshot, errors)
 	p.Render = func(w int) string {
-		var b strings.Builder
 		start := 0
 		if len(snapshot) > 5 {
 			start = len(snapshot) - 5
 		}
-		for i := start; i < len(snapshot); i++ {
-			e := snapshot[i]
-			line := fmt.Sprintf("  [%s] %s", e.Tool, truncatePath(e.Message, w-8))
-			b.WriteString(line)
-			if i < len(snapshot)-1 {
-				b.WriteByte('\n')
-			}
+		visible := snapshot[start:]
+		msgW := w - 12
+		if msgW < 8 {
+			msgW = 8
 		}
-		return b.String()
+		cols := []table.Column{
+			{Title: "Tool", Width: 8},
+			{Title: "Error", Width: msgW},
+		}
+		rows := make([]table.Row, len(visible))
+		for i, e := range visible {
+			rows[i] = table.Row{e.Tool, truncatePath(e.Message, msgW)}
+		}
+		t := table.New(
+			table.WithColumns(cols),
+			table.WithRows(rows),
+			table.WithHeight(len(rows)+1),
+		)
+		s := table.Styles{
+			Header:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeHeaderColor)),
+			Cell:     lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
+			Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ff5555")),
+		}
+		t.SetStyles(s)
+		return t.View()
 	}
 }
 
@@ -489,20 +601,20 @@ func truncatePath(s string, maxLen int) string {
 func defaultPanels() []Panel {
 	return []Panel{
 		{ID: "approvals", Title: "APPROVALS", Glyph: "⚠", Priority: 0,
-			Render: func(w int) string { return "  No pending approvals" }},
+			Render: func(w int) string { return "" }},
 		{ID: "agents", Title: "AGENTS", Glyph: "⟁", Priority: 1,
-			Render: func(w int) string { return "  No active agents" }},
+			Render: func(w int) string { return "" }},
 		{ID: "tokens", Title: "TOKENS", Glyph: "◬", Priority: 2,
 			Render: func(w int) string { return "  0% context used" }},
 		{ID: "tasks", Title: "TASKS", Glyph: "⚑", Priority: 3,
-			Render: func(w int) string { return "  No tasks" }},
+			Render: func(w int) string { return "" }},
 		{ID: "files", Title: "FILES", Glyph: "⊞", Priority: 4,
-			Render: func(w int) string { return "  No files touched" }},
+			Render: func(w int) string { return "" }},
 		{ID: "errors", Title: "ERRORS", Glyph: "⊛", Priority: 5, Collapsed: true,
-			Render: func(w int) string { return "  No errors" }},
+			Render: func(w int) string { return "" }},
 		{ID: "compact", Title: "COMPACT", Glyph: "⊙", Priority: 6, Collapsed: true,
 			Render: func(w int) string { return "  Idle" }},
 		{ID: "hooks", Title: "HOOKS", Glyph: "⊕", Priority: 7, Collapsed: true,
-			Render: func(w int) string { return "  No hooks firing" }},
+			Render: func(w int) string { return "" }},
 	}
 }

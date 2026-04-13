@@ -119,8 +119,11 @@ type authCompleteMsg struct {
 
 // compactTriggerMsg reports whether a manual compaction request started.
 type compactTriggerMsg struct {
-	AwaitEvents bool
-	Err         error
+	AwaitEvents  bool
+	Err          error
+	TokensBefore int
+	TokensAfter  int
+	CollapseOnly bool // true when collapse was sufficient, no full compaction needed
 }
 
 // clipboardImageMsg carries image data read from the system clipboard.
@@ -171,7 +174,7 @@ var slashCommands = []slashCommand{
 	{"/auth", "Login to OpenAI (Codex OAuth)"},
 	{"/sessions", "List past sessions, or search with /sessions <query>"},
 	{"/resume", "Resume a past session"},
-	{"/compact", "Manually trigger context compaction"},
+	{"/compact", "Trigger context compaction (--force skips collapse)"},
 	{"/rewind", "Rewind to a previous user message"},
 	{"/dashboard", "Toggle dashboard panel (or: pin, hide)"},
 	{"/tree", "Toggle conversation tree view"},
@@ -712,6 +715,24 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 			at.addSystemMessage("Compaction error: " + msg.Err.Error())
 			at.refreshViewport()
 			return at, nil
+		}
+		if msg.CollapseOnly {
+			// Collapse was enough, show stats immediately.
+			after := at.currentTokens
+			if msg.TokensBefore > 0 && after > 0 && after < msg.TokensBefore {
+				pct := (msg.TokensBefore - after) * 100 / msg.TokensBefore
+				at.addSystemMessage(fmt.Sprintf(
+					"Compacted (collapse): %s -> %s tokens (%d%% saved)",
+					formatTokenCount(msg.TokensBefore), formatTokenCount(after), pct,
+				))
+			} else {
+				at.addSystemMessage("Context collapse applied")
+			}
+			at.refreshViewport()
+			return at, nil
+		}
+		if msg.TokensBefore > 0 {
+			at.compactTokensBefore = msg.TokensBefore
 		}
 		if msg.AwaitEvents {
 			return at, at.safeWaitForEvent()
@@ -4640,12 +4661,36 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			return true, nil
 		}
 
+		forceFlag := strings.TrimSpace(args) == "--force"
 		eng := at.engine
 		awaitEvents := at.engineType == engine.EngineTypeDirect
+		tokensBefore := at.currentTokens
 		return true, func() tea.Msg {
+			// Try lightweight context collapse first (unless --force).
+			if !forceFlag {
+				if cp, ok := eng.(engine.CollapseProvider); ok {
+					collapsed, _ := cp.TriggerCollapse()
+					if collapsed > 0 {
+						// Collapse succeeded. Check if we're under the auto-compact
+						// threshold, and if so, skip full compaction.
+						ctxWindow := engine.ContextWindowFor(at.model)
+						threshold := ctxWindow * 80 / 100 // 80% as comfortable zone
+						if tokensBefore > 0 && tokensBefore < threshold {
+							return compactTriggerMsg{
+								TokensBefore: tokensBefore,
+								CollapseOnly: true,
+							}
+						}
+					}
+				}
+			}
+
+			// Full compaction.
+			err := eng.TriggerCompact(context.Background())
 			return compactTriggerMsg{
-				AwaitEvents: awaitEvents,
-				Err:         eng.TriggerCompact(context.Background()),
+				AwaitEvents:  awaitEvents,
+				Err:          err,
+				TokensBefore: tokensBefore,
 			}
 		}
 

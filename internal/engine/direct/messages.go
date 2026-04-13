@@ -242,6 +242,17 @@ func (h *ConversationHistory) ReplaceTail(replacement anthropic.MessageParam, cu
 	return nil
 }
 
+// ReplaceAll atomically replaces the entire message history and resets
+// reported token counters. Used after context collapse rewrites the slice.
+func (h *ConversationHistory) ReplaceAll(msgs []anthropic.MessageParam) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.messages = msgs
+	h.lastReportedTokens = 0
+	h.lastInputTokens = 0
+	h.lastOutputTokens = 0
+}
+
 // MessagesBefore returns a copy of the messages before idx.
 func (h *ConversationHistory) MessagesBefore(idx int) []anthropic.MessageParam {
 	h.mu.Lock()

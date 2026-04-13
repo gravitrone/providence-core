@@ -665,6 +665,19 @@ func (e *DirectEngine) TriggerCompact(ctx context.Context) error {
 	return nil
 }
 
+// TriggerCollapse runs lightweight context collapse on the conversation
+// history, summarizing groups of old tool-result turns into 1-line stubs.
+// This is cheaper than full compaction (no API call). Returns the number
+// of tool-result blocks collapsed.
+func (e *DirectEngine) TriggerCollapse() (int, error) {
+	msgs := e.history.Messages()
+	collapsed, n := compact.ContextCollapse(msgs)
+	if n > 0 {
+		e.history.ReplaceAll(collapsed)
+	}
+	return n, nil
+}
+
 // RestoreHistory replaces the engine's conversation history with the given
 // restored messages. User and assistant turns are restored directly, while
 // persisted tool rows are synthesized into assistant text so resumed sessions

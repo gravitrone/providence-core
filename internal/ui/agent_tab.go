@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"image/color"
 	"math"
@@ -29,6 +30,7 @@ import (
 	_ "github.com/gravitrone/providence-core/internal/engine/codex_re" // register codex_re factory
 	"github.com/gravitrone/providence-core/internal/engine/customtools"
 	"github.com/gravitrone/providence-core/internal/engine/direct" // register direct factory + image types
+	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
 	"github.com/gravitrone/providence-core/internal/engine/kairos"
 	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
 	"github.com/gravitrone/providence-core/internal/engine/skills"
@@ -1324,10 +1326,11 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 				case "text":
 					fullText += part.Text
 				case "tool_use":
+					toolArgs := formatToolArgs(part.Name, part.Input)
 					at.messages = append(at.messages, ChatMessage{
 						Role:       "tool",
 						ToolName:   part.Name,
-						ToolArgs:   formatToolInput(part.Input),
+						ToolArgs:   toolArgs,
 						ToolStatus: "success",
 						ToolBody:   randomToolFlavor(),
 						Done:       true,
@@ -1361,7 +1364,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		if pr, ok := ev.Data.(*engine.PermissionRequestEvent); ok {
 			at.pendingPerm = pr
 			toolName := pr.Tool.Name
-			toolArgs := formatToolInput(pr.Tool.Input)
+			toolArgs := formatToolArgs(toolName, pr.Tool.Input)
 			at.messages = append(at.messages, ChatMessage{
 				Role:       "permission",
 				Content:    fmt.Sprintf("%s: %s", toolName, toolArgs),
@@ -1389,6 +1392,10 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 			// Wire errors to dashboard ERRORS panel.
 			if tr.IsError {
 				at.dashboard.AddError(tr.ToolName, tr.Output)
+			}
+			// Wire TodoWrite results to dashboard TASKS panel.
+			if tr.ToolName == "TodoWrite" && !tr.IsError {
+				at.dashboard.SetTasks(convertTodosToTaskInfo(tools.GetCurrentTodos()))
 			}
 		}
 		return at, at.safeWaitForEvent()
@@ -2669,7 +2676,11 @@ func (at AgentTab) renderPermissionMessage(msg ChatMessage, contentW int) string
 	switch msg.ToolStatus {
 	case "pending":
 		content = titleStyle.Render("Permission Required") + "\n"
-		content += ToolNameStyle.Render(msg.ToolName) + " " + ToolArgsStyle.Render(msg.ToolArgs) + "\n"
+		if strings.Contains(msg.ToolArgs, "\n") {
+			content += ToolNameStyle.Render(msg.ToolName) + "\n" + ToolArgsStyle.Render(msg.ToolArgs) + "\n"
+		} else {
+			content += ToolNameStyle.Render(msg.ToolName) + " " + ToolArgsStyle.Render(msg.ToolArgs) + "\n"
+		}
 		content += "\n"
 		approveKey := lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true).Render("[y]")
 		denyKey := lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render("[n]")
@@ -2719,7 +2730,12 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, isLatest bool) string {
 
 	header := icon + " " + toolNameRendered
 	if msg.ToolArgs != "" {
-		header += ToolArgsStyle.Render("(" + msg.ToolArgs + ")")
+		if strings.Contains(msg.ToolArgs, "\n") {
+			// Multiline args (e.g. TodoWrite task list) - render below header.
+			header += "\n" + ToolArgsStyle.Render(msg.ToolArgs)
+		} else {
+			header += ToolArgsStyle.Render("(" + msg.ToolArgs + ")")
+		}
 	}
 
 	// Result line with connector.
@@ -2897,7 +2913,7 @@ func formatToolInput(input any) string {
 	case string:
 		return truncate(v, 60)
 	case map[string]any:
-		// Just the value, no key names.
+		// Just the value, no key names for common tools.
 		for _, key := range []string{"command", "query", "file_path", "pattern", "url", "path", "prompt"} {
 			if val, ok := v[key]; ok {
 				return truncate(fmt.Sprintf("%v", val), 60)
@@ -2910,6 +2926,100 @@ func formatToolInput(input any) string {
 	default:
 		return truncate(fmt.Sprintf("%v", v), 60)
 	}
+}
+
+// formatTodoWriteInput renders TodoWrite input as a styled task checklist.
+func formatTodoWriteInput(input any) string {
+	m, ok := input.(map[string]any)
+	if !ok {
+		return formatToolInput(input)
+	}
+	raw, err := json.Marshal(m["todos"])
+	if err != nil {
+		return formatToolInput(input)
+	}
+	var items []struct {
+		Content    string `json:"content"`
+		ActiveForm string `json:"activeForm"`
+		Status     string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil || len(items) == 0 {
+		return formatToolInput(input)
+	}
+	var lines []string
+	for _, t := range items {
+		icon := "○"
+		switch t.Status {
+		case "in_progress":
+			icon = "◉"
+		case "completed":
+			icon = "✓"
+		case "failed":
+			icon = "✗"
+		case "blocked":
+			icon = "⊘"
+		}
+		label := t.Content
+		if t.ActiveForm != "" && t.Status == "in_progress" {
+			label = t.ActiveForm
+		}
+		lines = append(lines, fmt.Sprintf("  %s %s", icon, label))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// formatAskUserInput renders AskUserQuestion input as a formatted question.
+func formatAskUserInput(input any) string {
+	m, ok := input.(map[string]any)
+	if !ok {
+		return formatToolInput(input)
+	}
+	raw, err := json.Marshal(m["questions"])
+	if err != nil {
+		return formatToolInput(input)
+	}
+	var questions []struct {
+		Question string `json:"question"`
+	}
+	if err := json.Unmarshal(raw, &questions); err != nil || len(questions) == 0 {
+		// Fallback: try top-level question field.
+		if q, ok := m["question"].(string); ok {
+			return truncate(q, 80)
+		}
+		return formatToolInput(input)
+	}
+	if len(questions) == 1 {
+		return truncate(questions[0].Question, 80)
+	}
+	var lines []string
+	for i, q := range questions {
+		lines = append(lines, fmt.Sprintf("  %d. %s", i+1, truncate(q.Question, 76)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// formatToolArgs picks the best formatter for a tool's input display.
+func formatToolArgs(toolName string, input any) string {
+	switch toolName {
+	case "TodoWrite":
+		return formatTodoWriteInput(input)
+	case "AskUserQuestion":
+		return formatAskUserInput(input)
+	default:
+		return formatToolInput(input)
+	}
+}
+
+// convertTodosToTaskInfo maps tools.TodoItem slice to dashboard.TaskInfo slice.
+func convertTodosToTaskInfo(items []tools.TodoItem) []dashboard.TaskInfo {
+	out := make([]dashboard.TaskInfo, len(items))
+	for i, item := range items {
+		out[i] = dashboard.TaskInfo{
+			Text:   item.Content,
+			Status: item.Status,
+		}
+	}
+	return out
 }
 
 // CalamityToolFlavor is the Calamity boss flavor text for tool completions.

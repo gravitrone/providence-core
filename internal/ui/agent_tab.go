@@ -1860,10 +1860,12 @@ func (at AgentTab) renderTabBar() string {
 	}
 
 	tabRow := lipgloss.JoinHorizontal(lipgloss.Top, segments...)
+	tabW := lipgloss.Width(tabRow)
 	centered := lipgloss.NewStyle().Width(at.width).Align(lipgloss.Center).Render(tabRow)
-	// Animated gradient divider below tabs (wifey-bench style).
-	underline := animatedDivider(at.width, at.flameFrame)
-	return centered + "\n" + underline
+	// Animated gradient divider below tabs, same width as tab row, centered.
+	divider := animatedDivider(tabW, at.flameFrame)
+	centeredDiv := lipgloss.NewStyle().Width(at.width).Align(lipgloss.Center).Render(divider)
+	return centered + "\n" + centeredDiv
 }
 
 // switchTab changes the active tab and kicks off the indicator spring.

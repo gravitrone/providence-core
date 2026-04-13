@@ -192,7 +192,7 @@ var slashCommands = []slashCommand{
 	{"/skills", "List discovered skills"},
 	{"/agents", "List built-in agent types"},
 	{"/permissions", "Manage permission rules (allow/deny/ask/reset)"},
-	{"/hooks", "Show hook configuration info"},
+	{"/hooks", "Show hook configuration"},
 	{"/diff", "Show git diff --stat"},
 	{"/plan", "Toggle plan mode (read-only tools)"},
 	{"/branch", "Fork conversation into a new session"},
@@ -5073,7 +5073,36 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		return true, nil
 
 	case "/hooks":
-		at.addSystemMessage("Hooks: configured via ~/.claude/settings.json\nSee /help for hook events")
+		hookMap := at.cfg.Hooks.ToMap()
+		if len(hookMap) == 0 {
+			at.addSystemMessage("No hooks configured. Add to .providence/config.toml under [hooks].\n\nAvailable events:\n  PreToolUse, PostToolUse, PostToolUseFailure, Stop,\n  SessionStart, SessionEnd, PreCompact, PostCompact,\n  PermissionDenied, SubagentStart, SubagentStop, UserPromptSubmit")
+			at.refreshViewport()
+			return true, nil
+		}
+		var hooksOut strings.Builder
+		hooksOut.WriteString("Configured hooks:\n\n")
+		hooksOut.WriteString(fmt.Sprintf("  %-22s  %-8s  %-40s  %s\n", "EVENT", "TYPE", "TARGET", "TIMEOUT"))
+		hooksOut.WriteString(fmt.Sprintf("  %-22s  %-8s  %-40s  %s\n", strings.Repeat("-", 22), strings.Repeat("-", 8), strings.Repeat("-", 40), strings.Repeat("-", 7)))
+		for event, hooks := range hookMap {
+			for _, h := range hooks {
+				hookType := "cmd"
+				target := h.Command
+				if h.URL != "" {
+					hookType = "http"
+					target = h.URL
+				}
+				// Truncate long targets for display.
+				if len(target) > 40 {
+					target = target[:37] + "..."
+				}
+				timeout := "-"
+				if h.Timeout > 0 {
+					timeout = fmt.Sprintf("%dms", h.Timeout)
+				}
+				hooksOut.WriteString(fmt.Sprintf("  %-22s  %-8s  %-40s  %s\n", event, hookType, target, timeout))
+			}
+		}
+		at.addSystemMessage(hooksOut.String())
 		at.refreshViewport()
 		return true, nil
 

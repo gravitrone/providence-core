@@ -144,6 +144,13 @@ type editorResultMsg struct {
 	Err  error
 }
 
+// btwResultMsg carries the response from a /btw side question.
+type btwResultMsg struct {
+	Question string
+	Answer   string
+	Err      error
+}
+
 // --- Chat Message ---
 
 // ChatMessage represents a single message in the agent chat history.
@@ -210,6 +217,7 @@ var slashCommands = []slashCommand{
 	{"/copy", "Copy last assistant response to clipboard"},
 	{"/context", "Show context usage bar"},
 	{"/mcp", "List connected MCP servers with status"},
+	{"/btw", "Quick side question (no tools, doesn't interrupt main flow)"},
 	{"/help", "Show available commands"},
 }
 
@@ -808,6 +816,15 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 		} else if msg.Text != "" {
 			at.input.SetValue(msg.Text)
 			at.input.CursorEnd()
+		}
+		at.refreshViewport()
+		return at, nil
+
+	case btwResultMsg:
+		if msg.Err != nil {
+			at.addSystemMessage(fmt.Sprintf("/btw error: %s", msg.Err))
+		} else {
+			at.addSystemMessage(fmt.Sprintf("/btw: %s\n\n%s", msg.Question, msg.Answer))
 		}
 		at.refreshViewport()
 		return at, nil
@@ -5734,6 +5751,30 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		}
 		at.refreshViewport()
 		return true, nil
+
+	case "/btw":
+		if args == "" {
+			at.addSystemMessage("/btw <question> - ask a quick side question")
+			at.refreshViewport()
+			return true, nil
+		}
+		de, ok := at.engine.(*direct.DirectEngine)
+		if !ok || at.engine == nil {
+			at.addSystemMessage("/btw requires an active native engine")
+			at.refreshViewport()
+			return true, nil
+		}
+		question := args
+		at.addSystemMessage("Thinking about: " + question)
+		at.refreshViewport()
+		return true, func() tea.Msg {
+			answer, err := de.QuickQuery(
+				context.Background(),
+				"You are answering a quick side question. Be brief. The main conversation continues independently.",
+				question,
+			)
+			return btwResultMsg{Question: question, Answer: answer, Err: err}
+		}
 
 	case "/help":
 		// Store as markdown - will be rendered by glamour in renderAssistantMessage.

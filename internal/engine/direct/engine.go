@@ -715,6 +715,34 @@ func (e *DirectEngine) GetCurrentTodos() []engine.TodoItem {
 	return out
 }
 
+// QuickQuery performs a single-turn, tool-free API call using the engine's
+// client and model. Intended for lightweight side queries like /btw.
+func (e *DirectEngine) QuickQuery(ctx context.Context, systemPrompt, userMessage string) (string, error) {
+	if e.codexMode || e.openrouterMode {
+		return "", fmt.Errorf("quick query not supported on codex/openrouter engines")
+	}
+	resp, err := e.client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.Model(e.model),
+		MaxTokens: 1024,
+		System: []anthropic.TextBlockParam{
+			{Text: systemPrompt},
+		},
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(userMessage)),
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("quick query failed: %w", err)
+	}
+	var sb strings.Builder
+	for _, block := range resp.Content {
+		if block.Type == "text" {
+			sb.WriteString(block.Text)
+		}
+	}
+	return sb.String(), nil
+}
+
 // MCPInstructions returns concatenated MCP server instructions, or empty string
 // if no MCP servers are connected. Used by prompt assembly.
 func (e *DirectEngine) MCPInstructions() string {

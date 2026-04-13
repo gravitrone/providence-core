@@ -151,9 +151,12 @@ type DirectEngine struct {
 	budgetMu       sync.Mutex
 
 	// Stuck loop detection: track recent tool calls to detect repeated patterns.
-	loopHistory  [5]string // ring buffer of "toolName:argsHash" keys
-	loopIdx      int       // next write index into loopHistory
-	loopFillCount int      // how many entries have been written (max 5)
+	loopHistory   [5]string // ring buffer of "toolName:argsHash" keys
+	loopIdx       int       // next write index into loopHistory
+	loopFillCount int       // how many entries have been written (max 5)
+
+	// Caffeinate: prevent macOS sleep while the engine is active.
+	caffeinator *engine.Caffeinator
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -288,6 +291,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		startTime:           time.Now(),
 		hooksRunner:         hooksRunner,
 		contentReplacements: make(map[string]string),
+		caffeinator:         engine.NewCaffeinator(5 * time.Minute),
 	}
 
 	taskTool := tools.NewTaskTool(e.subagentRunner, e.subagentExecutor)
@@ -651,6 +655,9 @@ func (e *DirectEngine) Close() {
 		}
 		if e.subagentRunner != nil {
 			e.subagentRunner.Close()
+		}
+		if e.caffeinator != nil {
+			e.caffeinator.Stop()
 		}
 	})
 
@@ -1234,6 +1241,9 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			Messages:  msgs,
 			Tools:     toolParams,
 		}
+
+		// Keep macOS awake during active streaming.
+		e.caffeinator.Start()
 
 		accumulated, streamErr := e.streamWithRetry(ctx, apiParams)
 

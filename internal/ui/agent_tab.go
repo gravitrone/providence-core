@@ -356,6 +356,9 @@ type AgentTab struct {
 	inputHistory         []string
 	inputHistoryIdx      int
 	inputHistoryBrowsing bool
+
+	// Permission dialog button selection: 0=Allow, 1=Allow for Session, 2=Deny.
+	permButtonSelected int
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -3035,58 +3038,121 @@ func (at AgentTab) renderQueuedMessages(contentW int) string {
 	return result.String()
 }
 
-// RenderPermissionMessage renders a permission request box.
-func (at AgentTab) renderPermissionMessage(msg ChatMessage, contentW int) string {
-	borderColor := ColorWarning
-	switch msg.ToolStatus {
-	case "success":
-		borderColor = ColorSuccess
-	case "cancelled":
-		borderColor = ColorMuted
+// renderPermButton renders a single permission dialog button (crush-style).
+// shortcut is the character to underline (0-indexed within text).
+func renderPermButton(text string, underlineIdx int, selected bool) string {
+	style := ButtonBlurStyle
+	if selected {
+		style = ButtonFocusStyle
 	}
-
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(borderColor).
-		Padding(0, 1).
-		Width(contentW - 4)
-
-	// Title.
-	titleStyle := lipgloss.NewStyle().Foreground(borderColor).Bold(true)
-
-	var content string
-	switch msg.ToolStatus {
-	case "pending":
-		content = titleStyle.Render("Permission Required") + "\n"
-		if strings.Contains(msg.ToolArgs, "\n") {
-			content += ToolNameStyle.Render(msg.ToolName) + "\n" + ToolArgsStyle.Render(msg.ToolArgs) + "\n"
-		} else {
-			content += ToolNameStyle.Render(msg.ToolName) + " " + ToolArgsStyle.Render(msg.ToolArgs) + "\n"
-		}
-		content += "\n"
-		approveKey := lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true).Render("[y]")
-		denyKey := lipgloss.NewStyle().Foreground(ColorError).Bold(true).Render("[n]")
-		content += approveKey + MutedStyle.Render(" approve") + "    " + denyKey + MutedStyle.Render(" deny")
-	case "success":
-		icon := lipgloss.NewStyle().Foreground(ColorSuccess).Render("\u2713")
-		content = icon + " " + ToolNameStyle.Render(msg.ToolName) + " " + ToolArgsStyle.Render(msg.ToolArgs)
-	case "cancelled":
-		icon := lipgloss.NewStyle().Foreground(ColorMuted).Render("\u25cf")
-		content = icon + " " + ToolNameStyle.Render(msg.ToolName) + " " + ToolArgsStyle.Render(msg.ToolArgs)
-	default:
-		content = msg.Content
+	rendered := style.Render(text)
+	if underlineIdx >= 0 && underlineIdx < len(text) {
+		padding := 2 // matches Padding(0, 2)
+		rendered = lipgloss.StyleRanges(rendered,
+			lipgloss.NewRange(padding+underlineIdx, padding+underlineIdx+1, style.Underline(true)))
 	}
-
-	return boxStyle.Render(content) + "\n"
+	return rendered
 }
 
-// RenderToolMessage renders a tool call in Claude Code style:
+// renderPermKeyValue renders a "Key  Value" line for the permission dialog.
+func renderPermKeyValue(key, value string) string {
+	keyStr := MutedStyle.Render(key)
+	valueStr := NormalStyle.Render(" " + value)
+	return lipgloss.JoinHorizontal(lipgloss.Left, keyStr, valueStr)
+}
+
+// RenderPermissionMessage renders a permission request box (crush-style, flame-themed).
+func (at AgentTab) renderPermissionMessage(msg ChatMessage, contentW int) string {
+	dialogW := contentW - 4
+	if dialogW < 20 {
+		dialogW = 20
+	}
+
+	switch msg.ToolStatus {
+	case "success":
+		// Collapsed: ✓ ToolName args in green border.
+		icon := ToolIconSuccessStyle.Render("✓")
+		line := icon + " " + lipgloss.NewStyle().Foreground(c("#5fa8d0")).Bold(true).Render(msg.ToolName) +
+			" " + ToolArgsStyle.Render(msg.ToolArgs)
+		box := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(c("#50C878")).
+			Padding(0, 1).
+			Width(dialogW).
+			Render(line)
+		return box + "\n"
+
+	case "cancelled":
+		// Collapsed: ● ToolName args in muted border.
+		icon := ToolIconPendingStyle.Render("●")
+		line := icon + " " + lipgloss.NewStyle().Foreground(ColorMuted).Bold(true).Render(msg.ToolName) +
+			" " + ToolArgsStyle.Render(msg.ToolArgs)
+		box := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorMuted).
+			Padding(0, 1).
+			Width(dialogW).
+			Render(line)
+		return box + "\n"
+
+	default:
+		// Pending: full crush-style dialog.
+		titleStyle := lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true)
+		title := titleStyle.Render("Permission Required")
+
+		// Key-value rows for tool info.
+		toolLine := renderPermKeyValue("Tool", msg.ToolName)
+		var infoLines []string
+		infoLines = append(infoLines, toolLine)
+
+		// Show args as Desc or Path based on tool type.
+		if msg.ToolArgs != "" {
+			argLabel := "Desc"
+			switch msg.ToolName {
+			case "Read", "Write", "Edit", "MultiEdit", "View":
+				argLabel = "File"
+			case "Bash":
+				argLabel = "Desc"
+			case "Glob", "LS":
+				argLabel = "Path"
+			}
+			// Show only first line of args in the dialog header.
+			argVal := msg.ToolArgs
+			if idx := strings.Index(argVal, "\n"); idx != -1 {
+				argVal = argVal[:idx] + "…"
+			}
+			infoLines = append(infoLines, renderPermKeyValue(argLabel, argVal))
+		}
+
+		// Button group: Allow / Allow for Session / Deny
+		// selectedOption tracks which button is focused (default 0 = Allow).
+		sel := at.permButtonSelected
+		allow := renderPermButton("Allow", 0, sel == 0)
+		allowSess := renderPermButton("Allow for Session", 10, sel == 1)
+		deny := renderPermButton("Deny", 0, sel == 2)
+		buttons := lipgloss.JoinHorizontal(lipgloss.Left, allow+"  ", allowSess+"  ", deny)
+
+		helpText := MutedStyle.Render("a/y: allow  s: session  d/n: deny  ←→: navigate")
+
+		parts := []string{title, ""}
+		parts = append(parts, infoLines...)
+		parts = append(parts, "", buttons, "", helpText)
+		inner := lipgloss.JoinVertical(lipgloss.Left, parts...)
+
+		box := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorSecondary).
+			Padding(0, 1).
+			Width(dialogW).
+			Render(inner)
+		return box + "\n"
+	}
+}
+
+// renderToolMessage renders a tool call with crush-style header + content body.
 //
-//	● ToolName(primary_arg)
-//	  ⎿ Result summary
-//	      1 first line
-//	      2 second line
-//	    ... +N lines (ctrl+o to expand)
+// Active/streaming state keeps the shimmer/scramble animation.
+// Frozen/completed state uses crush-style: ● ToolName params + indented content body.
 func (at AgentTab) renderToolMessage(msg ChatMessage, msgIdx int, isLatest bool) string {
 	frozen := !at.streaming || !isLatest
 
@@ -3094,11 +3160,21 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, msgIdx int, isLatest bool)
 	var toolNameRendered string
 
 	if frozen {
-		// Frozen state: static ColorFrozen for icon and tool name.
-		icon = lipgloss.NewStyle().Foreground(ColorFrozen).Render("✧")
-		toolNameRendered = lipgloss.NewStyle().Foreground(ColorFrozen).Bold(true).Render(msg.ToolName)
+		// Frozen/completed: crush-style status icon + blue-ish tool name.
+		toolNameStyle := lipgloss.NewStyle().Foreground(c("#5fa8d0")).Bold(true)
+		switch msg.ToolStatus {
+		case "success":
+			icon = ToolIconSuccessStyle.Render("✓")
+			toolNameRendered = toolNameStyle.Render(msg.ToolName)
+		case "error":
+			icon = ToolIconErrorStyle.Render("×")
+			toolNameRendered = toolNameStyle.Render(msg.ToolName)
+		default:
+			icon = ToolIconPendingStyle.Render("●")
+			toolNameRendered = toolNameStyle.Foreground(ColorMuted).Render(msg.ToolName)
+		}
 	} else {
-		// Animated state: scramble char icon + shimmer tool name.
+		// Animated state: scramble char icon + shimmer tool name (unchanged).
 		switch msg.ToolStatus {
 		case "error":
 			flameCh, flameHx := flameBlock(at.flameFrame)
@@ -3106,66 +3182,77 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, msgIdx int, isLatest bool)
 		default:
 			icon = renderScrambleChar(at.flameFrame)
 		}
-		// Shimmer gradient across tool name text.
 		toolNameRendered = renderToolShimmer(msg.ToolName, at.flameFrame)
 	}
 
+	// Header: icon + name + params (single line, params muted).
 	header := icon + " " + toolNameRendered
 	if msg.ToolArgs != "" {
 		if strings.Contains(msg.ToolArgs, "\n") {
-			// Multiline args (e.g. TodoWrite task list) - render below header.
 			header += "\n" + ToolArgsStyle.Render(msg.ToolArgs)
 		} else {
-			header += ToolArgsStyle.Render("(" + msg.ToolArgs + ")")
+			header += " " + ToolArgsStyle.Render(msg.ToolArgs)
 		}
 	}
 
-	// Result line with connector.
-	result := ""
-	if msg.ToolStatus == "success" && msg.ToolBody != "" {
-		var flavorColor color.Color
-		if frozen {
-			flavorColor = ColorFrozen
-		} else {
-			flavorColor = lipgloss.Color(flameColor(at.flameFrame))
+	// Content body (frozen only - crush-style indented output).
+	var body string
+	if frozen {
+		bodyLines := []string{}
+
+		if msg.ToolStatus == "error" && msg.ToolBody != "" {
+			// Error: ERROR tag pill + message.
+			errTag := ToolErrorTagStyle.Render("ERROR")
+			errMsg := ToolErrorMsgStyle.Render(msg.ToolBody)
+			bodyLines = append(bodyLines, "  "+errTag+" "+errMsg)
+		} else if msg.ToolBody != "" {
+			// Summary line (connector style, muted).
+			flavorStyle := lipgloss.NewStyle().Foreground(ColorFrozen).Italic(true)
+			connectorStyle := lipgloss.NewStyle().Foreground(ColorFrozen)
+			bodyLines = append(bodyLines, connectorStyle.Render("  \u2514 ")+flavorStyle.Render(msg.ToolBody+"..."))
 		}
-		flavorStyle := lipgloss.NewStyle().Foreground(flavorColor).Italic(true)
-		resultPrefix := lipgloss.NewStyle().Foreground(flavorColor).Render("  \u2514 ")
-		result = "\n" + resultPrefix + flavorStyle.Render(msg.ToolBody+"...")
-	} else if msg.ToolStatus == "error" && msg.ToolBody != "" {
-		resultPrefix := lipgloss.NewStyle().Foreground(ColorError).Render("  \u2514 ")
-		result = "\n" + resultPrefix + lipgloss.NewStyle().Foreground(ColorError).Italic(true).Render(msg.ToolBody+"...")
-	}
 
-	// Expandable tool output when at.toolsExpanded[msgIdx] is true.
-	if at.toolsExpanded[msgIdx] && msg.ToolOutput != "" {
-		outputLines := strings.Split(msg.ToolOutput, "\n")
-		maxLines := 20
-		outputStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+		// Expanded tool output (crush-style content lines with subtle bg).
+		if at.toolsExpanded[msgIdx] && msg.ToolOutput != "" {
+			outputLines := strings.Split(msg.ToolOutput, "\n")
+			const maxLines = 10
+			isDiffLike := (msg.ToolName == "Edit" || msg.ToolName == "Write") && looksLikeDiff(msg.ToolOutput)
+			addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700")).Background(ToolContentBgColor)
+			delStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#e05050")).Background(ToolContentBgColor)
 
-		// Detect diff-like output for Edit/Write tools and color-code.
-		isDiffLike := (msg.ToolName == "Edit" || msg.ToolName == "Write") && looksLikeDiff(msg.ToolOutput)
-		addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700"))
-		delStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#e05050"))
-
-		var preview strings.Builder
-		for j, line := range outputLines {
-			if j >= maxLines {
-				preview.WriteString(outputStyle.Render(fmt.Sprintf("  ... +%d more lines", len(outputLines)-maxLines)))
-				break
-			}
-			if isDiffLike && strings.HasPrefix(line, "+") {
-				preview.WriteString(addStyle.Render("  "+line) + "\n")
-			} else if isDiffLike && strings.HasPrefix(line, "-") {
-				preview.WriteString(delStyle.Render("  "+line) + "\n")
-			} else {
-				preview.WriteString(outputStyle.Render("  "+line) + "\n")
+			for j, line := range outputLines {
+				if j >= maxLines {
+					bodyLines = append(bodyLines, ToolTruncationStyle.Render(
+						fmt.Sprintf("  ... +%d lines", len(outputLines)-maxLines)))
+					break
+				}
+				if isDiffLike && strings.HasPrefix(line, "+") {
+					bodyLines = append(bodyLines, addStyle.Render("  "+line))
+				} else if isDiffLike && strings.HasPrefix(line, "-") {
+					bodyLines = append(bodyLines, delStyle.Render("  "+line))
+				} else {
+					bodyLines = append(bodyLines, ToolContentLineStyle.Render("  "+line))
+				}
 			}
 		}
-		result += "\n" + preview.String()
+
+		if len(bodyLines) > 0 {
+			body = "\n" + strings.Join(bodyLines, "\n")
+		}
+	} else {
+		// Streaming: keep old connector result line.
+		if msg.ToolStatus == "success" && msg.ToolBody != "" {
+			flavorColor := lipgloss.Color(flameColor(at.flameFrame))
+			flavorStyle := lipgloss.NewStyle().Foreground(flavorColor).Italic(true)
+			resultPrefix := lipgloss.NewStyle().Foreground(flavorColor).Render("  \u2514 ")
+			body = "\n" + resultPrefix + flavorStyle.Render(msg.ToolBody+"...")
+		} else if msg.ToolStatus == "error" && msg.ToolBody != "" {
+			resultPrefix := lipgloss.NewStyle().Foreground(ColorError).Render("  \u2514 ")
+			body = "\n" + resultPrefix + lipgloss.NewStyle().Foreground(ColorError).Italic(true).Render(msg.ToolBody+"...")
+		}
 	}
 
-	return header + result + "\n"
+	return header + body + "\n"
 }
 
 // batchVerb returns an active/past-tense verb for a tool name batch.

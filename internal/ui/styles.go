@@ -122,6 +122,20 @@ var (
 	ToolArgsStyle     lipgloss.Style
 	ThinkingStyle     lipgloss.Style
 	InputPrefixStyle  lipgloss.Style
+
+	// Tool result display styles (crush-adapted, flame-themed)
+	ToolIconPendingStyle lipgloss.Style
+	ToolIconSuccessStyle lipgloss.Style
+	ToolIconErrorStyle   lipgloss.Style
+	ToolContentLineStyle lipgloss.Style
+	ToolContentBgColor   color.Color
+	ToolErrorTagStyle    lipgloss.Style
+	ToolErrorMsgStyle    lipgloss.Style
+	ToolTruncationStyle  lipgloss.Style
+
+	// Button styles for permission dialog
+	ButtonFocusStyle lipgloss.Style
+	ButtonBlurStyle  lipgloss.Style
 )
 
 func init() {
@@ -303,6 +317,31 @@ func reapplyStyles() {
 	InputPrefixStyle = lipgloss.NewStyle().
 		Foreground(ColorPrimary).
 		Bold(true)
+
+	// Tool result display styles (crush-adapted, flame-themed)
+	ToolIconPendingStyle = lipgloss.NewStyle().Foreground(ColorMuted)
+	ToolIconSuccessStyle = lipgloss.NewStyle().Foreground(c("#50C878"))
+	ToolIconErrorStyle   = lipgloss.NewStyle().Foreground(c("#e05050"))
+	ToolContentBgColor   = c("#141210") // slightly lighter than void black
+	ToolContentLineStyle = lipgloss.NewStyle().
+		Foreground(ColorMuted).
+		Background(ToolContentBgColor)
+	ToolErrorTagStyle = lipgloss.NewStyle().
+		Background(c("#e05050")).
+		Foreground(c("#ffffff")).
+		Padding(0, 1)
+	ToolErrorMsgStyle   = lipgloss.NewStyle().Foreground(ColorMuted)
+	ToolTruncationStyle = lipgloss.NewStyle().Foreground(ColorMuted).Background(ToolContentBgColor)
+
+	// Button styles for permission dialog
+	ButtonFocusStyle = lipgloss.NewStyle().
+		Foreground(c("#ffffff")).
+		Background(ColorSecondary).
+		Padding(0, 2)
+	ButtonBlurStyle = lipgloss.NewStyle().
+		Foreground(ColorMuted).
+		Background(c("#1a1210")).
+		Padding(0, 2)
 
 	// Update component styles (separate package, can't access theme directly).
 	components.HintDescStyle = lipgloss.NewStyle().Foreground(ColorMuted)

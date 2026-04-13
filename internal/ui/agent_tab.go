@@ -125,6 +125,12 @@ type clipboardImageMsg struct {
 	Err  error
 }
 
+// editorResultMsg carries the text result from an external editor invocation.
+type editorResultMsg struct {
+	Text string
+	Err  error
+}
+
 // --- Chat Message ---
 
 // ChatMessage represents a single message in the agent chat history.
@@ -367,6 +373,15 @@ type AgentTab struct {
 
 	// Permission dialog button selection: 0=Allow, 1=Allow for Session, 2=Deny.
 	permButtonSelected int
+
+	// Input stash: ctrl+s saves and restores input text.
+	stashedInput string
+	stashActive  bool
+
+	// Reverse history search state.
+	historySearchActive bool
+	historySearchQuery  string
+	historySearchResult string
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -401,16 +416,25 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 	var initialMessages []ChatMessage
 	home, _ := os.UserHomeDir()
 	if IsFirstRun(home) {
+		welcomeContent := "Welcome to Providence! The Profaned Core awaits.\n\n" +
+			"Quick start:\n" +
+			"  /model  - switch models\n" +
+			"  /engine - switch engines\n" +
+			"  /help   - see all commands\n" +
+			"  /theme  - change theme\n"
+
+		// Generate contextual suggestions from git history.
+		cwd, _ := os.Getwd()
+		if suggestions := GenerateGitSuggestions(cwd); len(suggestions) > 0 {
+			welcomeContent += FormatGitSuggestions(suggestions)
+		} else {
+			welcomeContent += "\nType a message to begin."
+		}
+
 		initialMessages = append(initialMessages, ChatMessage{
-			Role: "system",
-			Content: "Welcome to Providence! The Profaned Core awaits.\n\n" +
-				"Quick start:\n" +
-				"  /model  - switch models\n" +
-				"  /engine - switch engines\n" +
-				"  /help   - see all commands\n" +
-				"  /theme  - change theme\n\n" +
-				"Type a message to begin.",
-			Done: true,
+			Role:    "system",
+			Content: welcomeContent,
+			Done:    true,
 		})
 		os.MkdirAll(filepath.Join(home, ".providence"), 0755)
 	}
@@ -661,6 +685,16 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 			at.ctrlCPending = false
 		case "ctrl+d":
 			at.ctrlDPending = false
+		}
+		at.refreshViewport()
+		return at, nil
+
+	case editorResultMsg:
+		if msg.Err != nil {
+			at.addSystemMessage("Editor error: " + msg.Err.Error())
+		} else if msg.Text != "" {
+			at.input.SetValue(msg.Text)
+			at.input.CursorEnd()
 		}
 		at.refreshViewport()
 		return at, nil
@@ -1195,6 +1229,83 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		at.input.SetValue("")
 		return at, nil
 
+	case "ctrl+r":
+		// Reverse history search: open search, filter input history by query.
+		if !at.historySearchActive && len(at.inputHistory) > 0 {
+			at.historySearchActive = true
+			at.historySearchQuery = ""
+			at.historySearchResult = ""
+			at.addSystemMessage("(reverse-i-search) type to filter history, enter to select, esc to cancel")
+			at.refreshViewport()
+		} else if at.historySearchActive {
+			// Enter confirms the search result.
+			if at.historySearchResult != "" {
+				at.input.SetValue(at.historySearchResult)
+				at.input.CursorEnd()
+			}
+			at.historySearchActive = false
+			at.refreshViewport()
+		}
+		return at, nil
+
+	case "ctrl+g":
+		// External editor: open $EDITOR with current input, replace on close.
+		editor := os.Getenv("EDITOR")
+		if editor == "" {
+			editor = "vim"
+		}
+		return at, func() tea.Msg {
+			tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("providence-edit-%d.txt", time.Now().UnixMilli()))
+			currentInput := at.input.Value()
+			if currentInput != "" {
+				os.WriteFile(tmpFile, []byte(currentInput), 0644)
+			} else {
+				os.WriteFile(tmpFile, []byte(""), 0644)
+			}
+			cmd := exec.Command(editor, tmpFile)
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return editorResultMsg{Text: currentInput, Err: err}
+			}
+			data, err := os.ReadFile(tmpFile)
+			os.Remove(tmpFile)
+			return editorResultMsg{Text: strings.TrimSpace(string(data)), Err: err}
+		}
+
+	case "ctrl+s":
+		// Stash/unstash input: toggle save and restore.
+		if at.stashActive {
+			// Restore stashed input.
+			at.input.SetValue(at.stashedInput)
+			at.input.CursorEnd()
+			at.stashedInput = ""
+			at.stashActive = false
+		} else {
+			// Stash current input.
+			at.stashedInput = at.input.Value()
+			at.stashActive = true
+			at.input.SetValue("")
+		}
+		at.refreshViewport()
+		return at, nil
+
+	case "ctrl+b":
+		// In transcript mode ctrl+b is pageup, but in input mode:
+		// send current streaming task to background.
+		if at.focus != FocusTranscript && at.streaming && at.engine != nil {
+			de, ok := at.engine.(*direct.DirectEngine)
+			if ok {
+				runner := de.SubagentRunner()
+				if runner != nil {
+					at.addSystemMessage("Sent current task to background.")
+					at.refreshViewport()
+				}
+			}
+		}
+		return at, nil
+
 	case "tab":
 		// Autocomplete slash command.
 		val := at.input.Value()
@@ -1211,6 +1322,43 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		return at, nil
 
 	default:
+		// Handle reverse history search input.
+		if at.historySearchActive {
+			key := msg.String()
+			switch key {
+			case "esc":
+				at.historySearchActive = false
+				at.refreshViewport()
+				return at, nil
+			case "enter":
+				if at.historySearchResult != "" {
+					at.input.SetValue(at.historySearchResult)
+					at.input.CursorEnd()
+				}
+				at.historySearchActive = false
+				at.refreshViewport()
+				return at, nil
+			case "backspace":
+				if len(at.historySearchQuery) > 0 {
+					at.historySearchQuery = at.historySearchQuery[:len(at.historySearchQuery)-1]
+				}
+			default:
+				if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+					at.historySearchQuery += key
+				}
+			}
+			// Find matching history entry.
+			at.historySearchResult = ""
+			query := strings.ToLower(at.historySearchQuery)
+			for i := len(at.inputHistory) - 1; i >= 0; i-- {
+				if strings.Contains(strings.ToLower(at.inputHistory[i]), query) {
+					at.historySearchResult = at.inputHistory[i]
+					break
+				}
+			}
+			at.refreshViewport()
+			return at, nil
+		}
 		var cmd tea.Cmd
 		at.input, cmd = at.input.Update(msg)
 		// After input changes, check for @ trigger to activate file picker.

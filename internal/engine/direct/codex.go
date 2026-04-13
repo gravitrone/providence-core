@@ -190,16 +190,13 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 		default:
 		}
 
-		// Ensure tokens are fresh.
 		tokens, err := auth.EnsureValidOpenAITokens()
 		if err != nil {
 			e.emitError(fmt.Errorf("openai auth: %w", err))
 			return
 		}
 
-		// Build request.
-		// Note: OpenAI Codex (chatgpt.com/backend-api) does not support prompt caching
-		// via cache_control. The system prompt is sent as plain text. See W3 implementation notes.
+		// OpenAI Codex does not support prompt caching via cache_control; system prompt is plain text.
 		reqBody := codexRequest{
 			Model:        e.model,
 			Store:        false,
@@ -241,7 +238,6 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 			return
 		}
 
-		// Parse SSE stream.
 		textParts, toolCalls, err := e.parseCodexStream(ctx, resp.Body)
 		resp.Body.Close()
 		if err != nil {
@@ -249,7 +245,6 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 			return
 		}
 
-		// Build assistant content parts for the event.
 		var contentParts []engine.ContentPart
 		fullText := strings.Join(textParts, "")
 		if fullText != "" {
@@ -259,7 +254,6 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 			})
 		}
 
-		// Add tool calls to content parts.
 		for _, tc := range toolCalls {
 			var input any
 			_ = json.Unmarshal([]byte(tc.RawArgs), &input)
@@ -271,7 +265,6 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 			})
 		}
 
-		// Emit assistant event.
 		e.events <- engine.ParsedEvent{
 			Type: "assistant",
 			Data: &engine.AssistantEvent{
@@ -280,14 +273,13 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 			},
 		}
 
-		// Add assistant reply to codex history.
 		if fullText != "" {
 			e.codexHistory = append(e.codexHistory, codexHistoryEntry{
 				Role:    "assistant",
 				Content: fullText,
 			})
 		}
-		// Add function_call items to history so codex can match call_ids.
+		// Append function_call items so Codex can match call_ids on the next turn.
 		for _, tc := range toolCalls {
 			e.codexHistory = append(e.codexHistory, codexHistoryEntry{
 				Role:     "function_call",
@@ -297,13 +289,11 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 			})
 		}
 
-		// If no tool calls, we're done.
 		if len(toolCalls) == 0 {
 			compressCodexToolResults(e.codexHistory, 2000)
 			return
 		}
 
-		// Execute tool calls.
 		for _, tc := range toolCalls {
 			var input map[string]any
 			_ = json.Unmarshal([]byte(tc.RawArgs), &input)
@@ -321,7 +311,6 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 				continue
 			}
 
-			// Permission check.
 			if e.permissions.NeedsPermission(tool) {
 				approved := e.permissions.RequestPermission(tc.ID, e.events, tc.Name, input)
 				if !approved {
@@ -336,7 +325,6 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 
 			result := tool.Execute(ctx, input)
 
-			// Emit tool_result event so the UI can store the output.
 			e.events <- engine.ParsedEvent{
 				Type: "tool_result",
 				Data: &engine.ToolResultEvent{
@@ -348,7 +336,6 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 				},
 			}
 
-			// Add result to codex history for the next API call.
 			e.codexHistory = append(e.codexHistory, codexHistoryEntry{
 				Role:    "tool",
 				Content: result.Content,
@@ -357,7 +344,6 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 		}
 		compressCodexToolResults(e.codexHistory, 2000)
 
-		// Drain steered messages.
 		e.drainSteeredMessagesCodex()
 	}
 }
@@ -377,7 +363,6 @@ func (e *DirectEngine) parseCodexStream(ctx context.Context, body io.Reader) ([]
 
 	var textParts []string
 	var toolCalls []codexToolCall
-	// Track in-progress tool calls by item_id.
 	toolCallArgs := make(map[string]*codexToolCall)
 
 	for scanner.Scan() {
@@ -389,7 +374,6 @@ func (e *DirectEngine) parseCodexStream(ctx context.Context, body io.Reader) ([]
 
 		line := scanner.Text()
 
-		// SSE format: "event: <type>" followed by "data: <json>".
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
@@ -398,7 +382,6 @@ func (e *DirectEngine) parseCodexStream(ctx context.Context, body io.Reader) ([]
 			break
 		}
 
-		// Try to determine the event type from the JSON.
 		var baseEvent struct {
 			Type string `json:"type"`
 		}
@@ -414,7 +397,6 @@ func (e *DirectEngine) parseCodexStream(ctx context.Context, body io.Reader) ([]
 			}
 			if err := json.Unmarshal([]byte(data), &delta); err == nil && delta.Delta != "" {
 				textParts = append(textParts, delta.Delta)
-				// Emit streaming text delta.
 				e.events <- engine.ParsedEvent{
 					Type: "stream_event",
 					Data: &engine.StreamEvent{

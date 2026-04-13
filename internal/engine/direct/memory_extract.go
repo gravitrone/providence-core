@@ -15,7 +15,6 @@ import (
 func (e *DirectEngine) extractSessionMemory() string {
 	msgs := e.history.Messages()
 
-	// Count user turns (each user message = 1 turn).
 	userTurns := 0
 	for _, msg := range msgs {
 		if msg.Role == "user" {
@@ -36,7 +35,6 @@ func (e *DirectEngine) extractSessionMemory() string {
 	modifiedSet := map[string]bool{}
 
 	for _, msg := range msgs {
-		// Collect key user decisions.
 		if msg.Role == "user" {
 			for _, block := range msg.Content {
 				if block.OfText == nil {
@@ -56,7 +54,6 @@ func (e *DirectEngine) extractSessionMemory() string {
 			}
 		}
 
-		// Scan assistant tool_use blocks.
 		if msg.Role == "assistant" {
 			for _, block := range msg.Content {
 				tu := block.OfToolUse
@@ -65,7 +62,6 @@ func (e *DirectEngine) extractSessionMemory() string {
 				}
 				toolCounts[tu.Name]++
 
-				// Extract file paths from Edit/Write tool calls.
 				if tu.Name == "Edit" || tu.Name == "Write" {
 					if fp := extractInputField(tu.Input, "file_path"); fp != "" {
 						if !modifiedSet[fp] {
@@ -78,7 +74,6 @@ func (e *DirectEngine) extractSessionMemory() string {
 		}
 	}
 
-	// Build the title from first user message.
 	title := truncateTitle(firstUserMsg, 60)
 	if title == "" {
 		title = "untitled session"

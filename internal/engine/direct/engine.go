@@ -110,7 +110,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	isCodex := cfg.Provider == "openai"
 	isOpenRouter := cfg.Provider == "openrouter"
 
-	// Resolve OpenRouter API key: explicit cfg field > env var.
+	// Resolve OpenRouter API key: explicit config field takes precedence over env var.
 	openrouterKey := cfg.OpenRouterAPIKey
 	if isOpenRouter && openrouterKey == "" {
 		openrouterKey = os.Getenv("OPENROUTER_API_KEY")
@@ -140,9 +140,8 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		}
 	}
 
-	// Build tool registry with all built-in tools.
 	fs := tools.NewFileState()
-	planState := tools.NewPlanModeState(nil) // event wiring comes in Phase 5
+	planState := tools.NewPlanModeState(nil)
 	todoTool := tools.NewTodoWriteTool()
 	coreTools := []tools.Tool{
 		tools.NewReadTool(fs),
@@ -154,7 +153,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		&tools.WebFetchTool{},
 		&tools.WebSearchTool{},
 		todoTool,
-		tools.NewAskUserQuestionTool(nil), // event wiring comes in Phase 5
+		tools.NewAskUserQuestionTool(nil),
 		tools.NewEnterPlanModeTool(planState),
 		tools.NewExitPlanModeTool(planState),
 		tools.NewSkillTool(),
@@ -184,18 +183,16 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		providerName = engine.ProviderOpenRouter
 	}
 
-	// Resolve system prompt: prefer structured blocks, fall back to flat string.
+	// Prefer structured blocks; fall back to wrapping the flat string as a single cacheable block.
 	sysBlocks := cfg.SystemBlocks
 	sysFlat := cfg.SystemPrompt
 	if len(sysBlocks) == 0 && sysFlat != "" {
-		// Legacy path: wrap flat string as a single cacheable block.
 		sysBlocks = []engine.SystemBlock{{Text: sysFlat, Cacheable: true}}
 	}
 	if sysFlat == "" && len(sysBlocks) > 0 {
 		sysFlat = engine.FlattenBlocks(sysBlocks)
 	}
 
-	// Build hooks runner from config entries.
 	hooksMap := make(map[string][]hooks.HookConfig)
 	for event, entries := range cfg.HooksMap {
 		for _, entry := range entries {
@@ -237,7 +234,6 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		hooksRunner:      hooksRunner,
 	}
 
-	// Register subagent TaskTool and SendMessage now that the engine exists for the executor.
 	taskTool := tools.NewTaskTool(e.subagentRunner, e.subagentExecutor)
 	registry.Register(taskTool)
 	sendMsgTool := tools.NewSendMessageTool(e.subagentRunner)
@@ -424,12 +420,10 @@ func (e *DirectEngine) Send(text string) error {
 	}
 
 	e.mu.Lock()
-	// Consume pending images.
 	images := e.pendingImages
 	e.pendingImages = nil
 	e.mu.Unlock()
 
-	// Fire SessionStart hook on first Send call.
 	if !e.sessionStarted {
 		e.sessionStarted = true
 		e.fireHookAsync(hooks.SessionStart, hooks.HookInput{
@@ -438,12 +432,10 @@ func (e *DirectEngine) Send(text string) error {
 		})
 	}
 
-	// Fire UserPromptSubmit hook.
 	e.fireHookAsync(hooks.UserPromptSubmit, hooks.HookInput{
 		ToolInput: text,
 	})
 
-	// Publish new message event to session bus.
 	e.sessionBus.Publish(session.Event{Type: session.EventNewMessage, Data: text})
 
 	if e.codexMode {
@@ -696,7 +688,6 @@ func (e *DirectEngine) subagentExecutor(ctx context.Context, prompt string, agen
 		model = e.model
 	}
 
-	// Resolve working directory (worktree may override).
 	workDir := e.workDir
 	if agentType.WorkDir != "" {
 		workDir = agentType.WorkDir
@@ -724,7 +715,6 @@ func (e *DirectEngine) subagentExecutor(ctx context.Context, prompt string, agen
 	}
 	defer sub.Close()
 
-	// Apply agent's permission mode if set.
 	if agentType.PermissionMode != "" && agentType.PermissionMode != "inherit" {
 		switch agentType.PermissionMode {
 		case "plan":
@@ -833,7 +823,6 @@ func (e *DirectEngine) subagentContextExecutor(ctx context.Context, prompt strin
 		model = e.model
 	}
 
-	// Resolve working directory (worktree may override).
 	workDir := e.workDir
 	if agentType.WorkDir != "" {
 		workDir = agentType.WorkDir
@@ -855,7 +844,6 @@ func (e *DirectEngine) subagentContextExecutor(ctx context.Context, prompt strin
 	}
 	defer sub.Close()
 
-	// Restore parent conversation context into the child engine.
 	if state != nil && len(state.Messages) > 0 {
 		restored := make([]engine.RestoredMessage, 0, len(state.Messages))
 		for _, pm := range state.Messages {
@@ -921,10 +909,8 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		msgs := e.history.Messages()
 		msgs, _ = compact.Microcompact(msgs)
 
-		// Build tool params.
 		toolParams := e.toolParams()
 
-		// Call Messages API with streaming + 429 retry + 413 reactive compact.
 		apiParams := anthropic.MessageNewParams{
 			Model:     anthropic.Model(e.model),
 			MaxTokens: 16384,
@@ -987,17 +973,15 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			int(accumulated.Usage.CacheCreationInputTokens),
 		)
 
-		// Add assistant message to history.
 		e.history.AddAssistant(accumulated)
 		if e.compactor != nil {
 			e.compactor.TriggerIfNeeded(ctx)
 		}
 
-		// Emit full assistant event.
 		e.emitAssistant(accumulated)
 
-		// Max output tokens recovery: when the model hits max_tokens, inject a
-		// recovery prompt and retry up to MaxOutputTokensRecoveryLimit times.
+		// Max output tokens recovery: inject a recovery prompt and retry up to
+		// MaxOutputTokensRecoveryLimit times.
 		if accumulated.StopReason == anthropic.StopReasonMaxTokens {
 			if e.maxOutputRecoveryCount < MaxOutputTokensRecoveryLimit {
 				e.maxOutputRecoveryCount++
@@ -1015,13 +999,11 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			return
 		}
 
-		// If no tool use, we're done.
 		if accumulated.StopReason != anthropic.StopReasonToolUse {
 			e.history.CompressLongToolResults(2000)
 			return
 		}
 
-		// Execute tools.
 		toolCalls := extractToolCalls(accumulated)
 		queue := NewStreamingToolQueue(e.registry)
 		for _, tc := range toolCalls {
@@ -1083,12 +1065,6 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		}
 		queue.Wait()
 
-		// Collect results, emit tool_result events, add to history.
-		// BG agent wiring verified: EventToolCallResult is published here for each
-		// tool result, and EventToolCallStart is published per-tool above. The
-		// Red-Team-Advisor subscriber fires in agent_tab.go after tool-use turns
-		// when BGAgentsEnabled=true. The Smart-Pre-processor is wired on-demand via
-		// SetStore/SetStore pattern; it is currently triggered from the TUI layer.
 		var resultBlocks []anthropic.ContentBlockParamUnion
 		for _, r := range queue.Results() {
 			e.sessionBus.Publish(session.Event{Type: session.EventToolCallResult, Data: r.Result.Content})
@@ -1123,7 +1099,6 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		e.history.AddToolResults(resultBlocks)
 		e.history.CompressLongToolResults(2000)
 
-		// Check for steered messages.
 		e.drainSteeredMessages()
 	}
 }
@@ -1178,6 +1153,7 @@ func (e *DirectEngine) emitAssistant(msg anthropic.Message) {
 	}
 }
 
+// emitUsageUpdate emits a usage_update event with token counts.
 func (e *DirectEngine) emitUsageUpdate(inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens int) {
 	if inputTokens == 0 && outputTokens == 0 && cacheReadTokens == 0 && cacheCreateTokens == 0 {
 		return

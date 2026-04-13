@@ -299,7 +299,6 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 			return
 		}
 
-		// Build assistant content parts for the UI event.
 		var contentParts []engine.ContentPart
 		fullText := strings.Join(textParts, "")
 		if fullText != "" {
@@ -327,8 +326,7 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 			},
 		}
 
-		// Append assistant turn to history (text + tool_calls in a single
-		// message, matching OpenAI's chat completions contract).
+		// Append assistant turn: single message with text + tool_calls per OpenAI contract.
 		assistantEntry := openrouterHistoryEntry{
 			Role:    "assistant",
 			Content: fullText,
@@ -349,7 +347,6 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 		}
 		e.openrouterHistory = append(e.openrouterHistory, assistantEntry)
 
-		// No tool calls -> turn is complete.
 		if len(toolCalls) == 0 {
 			openrouterMsgs := buildOpenRouterMessages("", e.openrouterHistory)
 			if compressOpenRouterToolResults(openrouterMsgs, 2000) > 0 {
@@ -363,7 +360,6 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 			return
 		}
 
-		// Execute tool calls, mirroring codex agent loop semantics.
 		for _, tc := range toolCalls {
 			var input map[string]any
 			_ = json.Unmarshal([]byte(tc.RawArgs), &input)

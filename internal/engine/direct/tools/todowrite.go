@@ -17,13 +17,11 @@ type TodoItem struct {
 	ParentID   string `json:"parentId"`
 }
 
-var (
-	currentTodos []TodoItem
-	todoMu       sync.Mutex
-)
-
 // TodoWriteTool manages a structured task list with full-replacement semantics.
-type TodoWriteTool struct{}
+type TodoWriteTool struct {
+	todos []TodoItem
+	mu    sync.Mutex
+}
 
 // NewTodoWriteTool creates a TodoWriteTool.
 func NewTodoWriteTool() *TodoWriteTool { return &TodoWriteTool{} }
@@ -88,9 +86,9 @@ func (t *TodoWriteTool) Execute(_ context.Context, input map[string]any) ToolRes
 	}
 
 	if allCompleted {
-		todoMu.Lock()
-		currentTodos = nil
-		todoMu.Unlock()
+		t.mu.Lock()
+		t.todos = nil
+		t.mu.Unlock()
 		return ToolResult{Content: "All tasks completed. List cleared."}
 	}
 
@@ -126,9 +124,9 @@ func (t *TodoWriteTool) Execute(_ context.Context, input map[string]any) ToolRes
 		}
 	}
 
-	todoMu.Lock()
-	currentTodos = items
-	todoMu.Unlock()
+	t.mu.Lock()
+	t.todos = items
+	t.mu.Unlock()
 
 	return ToolResult{
 		Content: fmt.Sprintf("Tasks updated successfully. %d pending, 1 in progress, %d completed.", pending, completed),
@@ -136,17 +134,17 @@ func (t *TodoWriteTool) Execute(_ context.Context, input map[string]any) ToolRes
 }
 
 // GetCurrentTodos returns a copy of the current todo list.
-func GetCurrentTodos() []TodoItem {
-	todoMu.Lock()
-	defer todoMu.Unlock()
-	out := make([]TodoItem, len(currentTodos))
-	copy(out, currentTodos)
+func (t *TodoWriteTool) GetCurrentTodos() []TodoItem {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]TodoItem, len(t.todos))
+	copy(out, t.todos)
 	return out
 }
 
 // ResetTodos clears the todo list (used in tests).
-func ResetTodos() {
-	todoMu.Lock()
-	currentTodos = nil
-	todoMu.Unlock()
+func (t *TodoWriteTool) ResetTodos() {
+	t.mu.Lock()
+	t.todos = nil
+	t.mu.Unlock()
 }

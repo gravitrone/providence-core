@@ -32,6 +32,7 @@ func init() {
 }
 
 // DirectEngine implements engine.Engine using the Anthropic Messages API directly.
+// It also implements engine.TodoProvider for per-session todo state.
 type DirectEngine struct {
 	client      anthropic.Client
 	model       string
@@ -66,6 +67,9 @@ type DirectEngine struct {
 	// fallbackActive is true when we've already fallen back to a fast model
 	// for this turn, preventing infinite fallback loops.
 	fallbackActive bool
+
+	// Per-session TodoWrite tool instance.
+	todoTool *tools.TodoWriteTool
 
 	// Codex mode: use OpenAI Codex API instead of Anthropic.
 	codexMode    bool
@@ -122,6 +126,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	// Build tool registry with all built-in tools.
 	fs := tools.NewFileState()
 	planState := tools.NewPlanModeState(nil) // event wiring comes in Phase 5
+	todoTool := tools.NewTodoWriteTool()
 	coreTools := []tools.Tool{
 		tools.NewReadTool(fs),
 		tools.NewWriteTool(fs),
@@ -131,7 +136,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		&tools.GrepTool{},
 		&tools.WebFetchTool{},
 		&tools.WebSearchTool{},
-		tools.NewTodoWriteTool(),
+		todoTool,
 		tools.NewAskUserQuestionTool(nil), // event wiring comes in Phase 5
 		tools.NewEnterPlanModeTool(planState),
 		tools.NewExitPlanModeTool(planState),
@@ -181,6 +186,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		subagentRunner:   subagent.NewRunner(),
 		apiKey:           cfg.APIKey,
 		sessionBus:       session.NewBus(),
+		todoTool:         todoTool,
 	}
 
 	// Register subagent TaskTool now that the engine exists for the executor.
@@ -345,6 +351,22 @@ func (e *DirectEngine) Cancel() {
 // Close cleanly shuts down the engine and closes the events channel.
 func (e *DirectEngine) Close() {
 	e.Interrupt()
+}
+
+// GetCurrentTodos implements engine.TodoProvider.
+func (e *DirectEngine) GetCurrentTodos() []engine.TodoItem {
+	raw := e.todoTool.GetCurrentTodos()
+	out := make([]engine.TodoItem, len(raw))
+	for i, t := range raw {
+		out[i] = engine.TodoItem{
+			ID:       t.ID,
+			Content:  t.Content,
+			Status:   t.Status,
+			Priority: t.Priority,
+			ParentID: t.ParentID,
+		}
+	}
+	return out
 }
 
 // Status returns the current engine status (thread-safe).

@@ -9,7 +9,6 @@ import (
 )
 
 func TestTodoWriteValidInProgress(t *testing.T) {
-	ResetTodos()
 	tool := NewTodoWriteTool()
 
 	result := tool.Execute(context.Background(), map[string]any{
@@ -25,12 +24,11 @@ func TestTodoWriteValidInProgress(t *testing.T) {
 	assert.Contains(t, result.Content, "1 in progress")
 	assert.Contains(t, result.Content, "0 completed")
 
-	todos := GetCurrentTodos()
+	todos := tool.GetCurrentTodos()
 	assert.Len(t, todos, 2)
 }
 
 func TestTodoWriteNoInProgress(t *testing.T) {
-	ResetTodos()
 	tool := NewTodoWriteTool()
 
 	result := tool.Execute(context.Background(), map[string]any{
@@ -46,7 +44,6 @@ func TestTodoWriteNoInProgress(t *testing.T) {
 }
 
 func TestTodoWriteMultipleInProgress(t *testing.T) {
-	ResetTodos()
 	tool := NewTodoWriteTool()
 
 	result := tool.Execute(context.Background(), map[string]any{
@@ -62,7 +59,6 @@ func TestTodoWriteMultipleInProgress(t *testing.T) {
 }
 
 func TestTodoWriteAllCompleted(t *testing.T) {
-	ResetTodos()
 	tool := NewTodoWriteTool()
 
 	// First set some todos.
@@ -71,7 +67,7 @@ func TestTodoWriteAllCompleted(t *testing.T) {
 			map[string]any{"id": "1", "content": "Fix bug", "status": "in_progress"},
 		},
 	})
-	require.Len(t, GetCurrentTodos(), 1)
+	require.Len(t, tool.GetCurrentTodos(), 1)
 
 	// Now mark all completed - list should clear.
 	result := tool.Execute(context.Background(), map[string]any{
@@ -82,11 +78,10 @@ func TestTodoWriteAllCompleted(t *testing.T) {
 
 	require.False(t, result.IsError, result.Content)
 	assert.Contains(t, result.Content, "All tasks completed")
-	assert.Empty(t, GetCurrentTodos())
+	assert.Empty(t, tool.GetCurrentTodos())
 }
 
 func TestTodoWriteWithSubtasks(t *testing.T) {
-	ResetTodos()
 	tool := NewTodoWriteTool()
 
 	result := tool.Execute(context.Background(), map[string]any{
@@ -101,7 +96,7 @@ func TestTodoWriteWithSubtasks(t *testing.T) {
 	assert.Contains(t, result.Content, "2 pending")
 	assert.Contains(t, result.Content, "1 in progress")
 
-	todos := GetCurrentTodos()
+	todos := tool.GetCurrentTodos()
 	assert.Len(t, todos, 3)
 
 	// Verify parent-child relationships.

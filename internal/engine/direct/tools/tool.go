@@ -10,6 +10,12 @@ type ToolResult struct {
 	Content  string
 	IsError  bool
 	Metadata map[string]any // optional (e.g. base64 images)
+
+	// ContextModifier is an optional function the tool can return to mutate
+	// engine state after execution (e.g. update file read cache, change
+	// permission mode). Called in the engine's tool execution loop after the
+	// result is recorded. May be nil.
+	ContextModifier func()
 }
 
 // Tool is the interface all direct-engine tools must implement.

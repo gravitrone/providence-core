@@ -43,6 +43,21 @@ import (
 	"github.com/gravitrone/providence-core/internal/ui/tree"
 )
 
+// Tab constants for the tab system (replaces sidebar).
+const (
+	tabChat    = 0
+	tabAgents  = 1
+	tabTasks   = 2
+	tabFiles   = 3
+	tabTokens  = 4
+	tabErrors  = 5
+	tabCompact = 6
+	tabHooks   = 7
+	tabCount   = 8
+)
+
+var tabNames = []string{"Chat", "Agents", "Tasks", "Files", "Tokens", "Errors", "Compact", "Hooks"}
+
 // completionSpring is a critically-damped spring for the completion cool-down animation.
 // FPS(12) matches the flame tick rate (~80ms). Quick settle, no oscillation.
 var completionSpring = harmonica.NewSpring(harmonica.FPS(12), 6.0, 0.8)
@@ -293,9 +308,14 @@ type AgentTab struct {
 	// Tree view state.
 	treeViewOpen bool
 
-	// Dashboard split-pane state.
-	dashboardVisible bool // default true, toggle via /dashboard
-	dashboard        dashboard.DashboardModel
+	// Tab system (replaces sidebar).
+	tab          int
+	tabNav       bool
+	tabSpring    harmonica.Spring
+	tabIndicator float64
+	tabIndVel    float64
+	tabIndTarget float64
+	dashboard    dashboard.DashboardModel
 
 	// Context portability: pending state to restore after engine switch.
 	pendingPortableState *engine.ConversationState
@@ -403,7 +423,8 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		store:            st,
 		focus:            FocusInput,
 		transcript:       NewTranscriptModel(),
-		dashboardVisible: true,
+		tab:       tabChat,
+		tabSpring: harmonica.NewSpring(harmonica.FPS(60), 10.0, 1.0),
 		dashboard:        dashboard.New(),
 		kairos:           kairos.New(),
 		discoveredSkills: discoveredSkills,
@@ -530,6 +551,8 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 				at.compactVel = 0.0
 			}
 		}
+		// Tab indicator spring animation.
+		at.tabIndicator, at.tabIndVel = at.tabSpring.Update(at.tabIndicator, at.tabIndVel, at.tabIndTarget)
 		at.notifications.Tick()
 		// Poll for completed background subagents and inject notifications.
 		at.drainCompletedSubagents()
@@ -781,6 +804,21 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			at.refreshViewport()
 			return at, nil
 		}
+	}
+
+	// Number keys switch tabs when input is empty.
+	if at.input.Value() == "" && len(key) == 1 && key[0] >= '1' && key[0] <= '8' {
+		newTab := int(key[0] - '1')
+		if newTab < tabCount {
+			at.switchTab(newTab)
+			return at, nil
+		}
+	}
+
+	// Escape returns to chat tab from any other tab.
+	if key == "esc" && at.tab != tabChat {
+		at.switchTab(tabChat)
+		return at, nil
 	}
 
 	// Slash table navigation takes priority when the table is visible.
@@ -1692,22 +1730,62 @@ func (at AgentTab) View(width, height int) string {
 		at.Resize(width, height)
 	}
 
-	// Split-pane: if dashboard visible and terminal wide enough, render side-by-side.
-	showDash := at.dashboardVisible && width >= 80
-	if showDash {
-		chatW := width * 65 / 100
-		dashW := width - chatW
-		chatView := at.renderChatPane(chatW, height)
-		at.dashboard.SetSize(dashW, height)
-		dashView := at.dashboard.View()
-		dashStyle := lipgloss.NewStyle().
-			BorderLeft(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("#4A2010"))
-		return lipgloss.JoinHorizontal(lipgloss.Top, chatView, dashStyle.Render(dashView))
+	// Tab bar + content routing.
+	tabBar := at.renderTabBar()
+
+	// Content based on active tab.
+	var content string
+	switch at.tab {
+	case tabChat:
+		content = at.renderChatPane(width, height-1) // -1 for tab bar
+	default:
+		content = at.renderDashboardTab(width, height-1)
 	}
 
-	return at.renderChatPane(width, height)
+	return tabBar + "\n" + content
+}
+
+// renderTabBar renders the horizontal tab strip at the top of the view.
+func (at AgentTab) renderTabBar() string {
+	var tabs []string
+	for i, name := range tabNames {
+		style := lipgloss.NewStyle().Padding(0, 1)
+		if i == at.tab {
+			style = style.Bold(true).Foreground(ColorPrimary)
+		} else {
+			style = style.Foreground(ColorMuted)
+		}
+		tabs = append(tabs, style.Render(name))
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+}
+
+// switchTab changes the active tab and kicks off the indicator spring.
+func (at *AgentTab) switchTab(newTab int) {
+	at.tab = newTab
+	at.tabIndTarget = float64(newTab)
+	at.tabNav = true
+}
+
+// renderDashboardTab renders a full-width dashboard panel for non-chat tabs.
+func (at AgentTab) renderDashboardTab(width, height int) string {
+	switch at.tab {
+	case tabAgents:
+		return at.dashboard.RenderAgentsTab(width, height)
+	case tabTasks:
+		return at.dashboard.RenderTasksTab(width, height)
+	case tabFiles:
+		return at.dashboard.RenderFilesTab(width, height)
+	case tabTokens:
+		return at.dashboard.RenderTokensTab(width, height)
+	case tabErrors:
+		return at.dashboard.RenderErrorsTab(width, height)
+	case tabCompact:
+		return at.dashboard.RenderCompactTab(width, height)
+	case tabHooks:
+		return at.dashboard.RenderHooksTab(width, height)
+	}
+	return ""
 }
 
 // renderChatPane renders the full chat view (viewport + divider + preview + input)
@@ -3765,31 +3843,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		return true, nil
 
 	case "/dashboard":
-		if args == "" || args == "toggle" {
-			at.dashboardVisible = !at.dashboardVisible
-			if at.dashboardVisible {
-				at.addSystemMessage("Dashboard visible")
-			} else {
-				at.addSystemMessage("Dashboard hidden")
-			}
-		} else if strings.HasPrefix(args, "pin ") {
-			// /dashboard pin approvals,agents - expand named panels.
-			ids := strings.Split(strings.TrimPrefix(args, "pin "), ",")
-			for _, id := range ids {
-				at.dashboard.SetPanelVisible(strings.TrimSpace(id), true)
-			}
-			at.addSystemMessage("Pinned panels: " + strings.Join(ids, ", "))
-		} else if strings.HasPrefix(args, "hide ") {
-			// /dashboard hide errors - collapse named panels.
-			ids := strings.Split(strings.TrimPrefix(args, "hide "), ",")
-			for _, id := range ids {
-				at.dashboard.SetPanelVisible(strings.TrimSpace(id), false)
-			}
-			at.addSystemMessage("Hidden panels: " + strings.Join(ids, ", "))
-		} else {
-			at.addSystemMessage("Usage: /dashboard [toggle|pin <ids>|hide <ids>]")
-		}
-		at.refreshViewport()
+		at.addSystemMessage("Tabs: 1-Chat 2-Agents 3-Tasks 4-Files 5-Tokens 6-Errors 7-Compact 8-Hooks\nPress number key to switch.")
 		return true, nil
 
 	case "/tree":

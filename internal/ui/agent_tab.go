@@ -5802,12 +5802,20 @@ func (at *AgentTab) serializeConversationState() *subagent.ConversationState {
 		}
 	}
 
-	return &subagent.ConversationState{
+	state := &subagent.ConversationState{
 		Messages:     msgs,
 		SystemPrompt: "", // child uses its own system prompt
 		Model:        at.model,
 		Engine:       string(at.engineType),
 	}
+
+	// Cache-sharing: pass parent's pre-built system blocks so the child
+	// engine reuses the same prompt cache key (near-zero extra input cost).
+	if de, ok := at.engine.(*direct.DirectEngine); ok {
+		state.CacheSafeSystemBlocks = de.CacheSafeSystemBlocks()
+	}
+
+	return state
 }
 
 // cursorMessage returns the ChatMessage at the current transcript cursor position,

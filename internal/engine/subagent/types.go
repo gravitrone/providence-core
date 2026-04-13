@@ -27,6 +27,7 @@ type TaskInput struct {
 	SubagentType  string `json:"subagent_type"`
 	Model         string `json:"model,omitempty"`
 	Engine        string `json:"engine,omitempty"`
+	Mode          string `json:"mode,omitempty"`
 	RunInBG       bool   `json:"run_in_background,omitempty"`
 	Name          string `json:"name,omitempty"`
 	Tools         string `json:"tools,omitempty"`

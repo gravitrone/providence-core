@@ -41,15 +41,16 @@ type Runner struct {
 
 // RunningAgent tracks the state of an in-flight subagent.
 type RunningAgent struct {
-	ID        string
-	Name      string
-	Type      string
-	Status    string // running, completed, failed, killed
-	StartedAt time.Time
-	Cancel    context.CancelFunc
-	Result    *TaskResult
-	Done      chan struct{}
-	Inbox     chan string // messages from SendMessage tool
+	ID          string
+	Name        string
+	Type        string
+	Status      string // running, completed, failed, killed
+	StartedAt   time.Time
+	CompletedAt time.Time // zero value if still running
+	Cancel      context.CancelFunc
+	Result      *TaskResult
+	Done        chan struct{}
+	Inbox       chan string // messages from SendMessage tool
 }
 
 // NewRunner creates a Runner.
@@ -60,6 +61,8 @@ func NewRunner() *Runner {
 // Spawn creates a new subagent goroutine. For sync agents it blocks until completion.
 // For async agents (RunInBG=true) it returns immediately with the agent ID.
 func (r *Runner) Spawn(ctx context.Context, input TaskInput, agentType AgentType, executor Executor) (string, error) {
+	r.reapCompleted()
+
 	agentID := "agent-" + uuid.New().String()[:8]
 	ctx, cancel := context.WithCancel(ctx) //nolint:gosec // cancel stored in agent.Cancel, called by Kill()
 
@@ -118,6 +121,8 @@ func (r *Runner) SpawnWithContext(ctx context.Context, input TaskInput, agentTyp
 		r.mu.Lock()
 		defer r.mu.Unlock()
 
+		now := time.Now()
+
 		if ctx.Err() != nil && agent.Status == "killed" {
 			if agent.Result == nil {
 				agent.Result = &TaskResult{
@@ -127,6 +132,7 @@ func (r *Runner) SpawnWithContext(ctx context.Context, input TaskInput, agentTyp
 					DurationMS: time.Since(start).Milliseconds(),
 				}
 			}
+			agent.CompletedAt = now
 			return
 		}
 
@@ -147,6 +153,7 @@ func (r *Runner) SpawnWithContext(ctx context.Context, input TaskInput, agentTyp
 				DurationMS: time.Since(start).Milliseconds(),
 			}
 		}
+		agent.CompletedAt = now
 	}
 
 	if input.RunInBG {
@@ -200,6 +207,8 @@ func (r *Runner) runAgent(ctx context.Context, agent *RunningAgent, input TaskIn
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	now := time.Now()
+
 	if ctx.Err() != nil && agent.Status == "killed" {
 		// Already killed, preserve killed status.
 		if agent.Result == nil {
@@ -210,6 +219,7 @@ func (r *Runner) runAgent(ctx context.Context, agent *RunningAgent, input TaskIn
 				DurationMS: time.Since(start).Milliseconds(),
 			}
 		}
+		agent.CompletedAt = now
 		return
 	}
 
@@ -230,6 +240,7 @@ func (r *Runner) runAgent(ctx context.Context, agent *RunningAgent, input TaskIn
 			DurationMS: time.Since(start).Milliseconds(),
 		}
 	}
+	agent.CompletedAt = now
 }
 
 // Kill stops a running agent by cancelling its context.
@@ -265,8 +276,50 @@ func (r *Runner) Get(agentID string) (*RunningAgent, bool) {
 	return a, ok
 }
 
+// KillAll cancels all running agents and clears the map.
+func (r *Runner) KillAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, agent := range r.agents {
+		if agent.Status == "running" {
+			agent.Status = "killed"
+			agent.Result = &TaskResult{
+				AgentID:    agent.ID,
+				Status:     "killed",
+				Result:     "killed by KillAll",
+				DurationMS: time.Since(agent.StartedAt).Milliseconds(),
+			}
+			agent.CompletedAt = time.Now()
+			agent.Cancel()
+		}
+	}
+	r.agents = make(map[string]*RunningAgent)
+}
+
+// Close kills all agents and releases resources.
+func (r *Runner) Close() {
+	r.KillAll()
+}
+
+// reapCompleted removes agents from the map that completed more than 5 minutes ago.
+// Called on Spawn and List to prevent unbounded map growth.
+func (r *Runner) reapCompleted() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	cutoff := time.Now().Add(-5 * time.Minute)
+	for id, agent := range r.agents {
+		if agent.Status != "running" && !agent.CompletedAt.IsZero() && agent.CompletedAt.Before(cutoff) {
+			delete(r.agents, id)
+		}
+	}
+}
+
 // List returns all agents (both running and completed).
 func (r *Runner) List() []*RunningAgent {
+	r.reapCompleted()
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]*RunningAgent, 0, len(r.agents))

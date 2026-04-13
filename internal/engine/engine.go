@@ -86,6 +86,20 @@ type Engine interface {
 	SessionBus() *session.Bus
 }
 
+// TodoItem mirrors the direct/tools TodoItem for cross-package access.
+type TodoItem struct {
+	ID       string `json:"id"`
+	Content  string `json:"content"`
+	Status   string `json:"status"`
+	Priority int    `json:"priority"`
+	ParentID string `json:"parentId"`
+}
+
+// TodoProvider is optionally implemented by engines that support TodoWrite.
+type TodoProvider interface {
+	GetCurrentTodos() []TodoItem
+}
+
 // ParsedEvent is a decoded event from an AI engine.
 type ParsedEvent struct {
 	Type string

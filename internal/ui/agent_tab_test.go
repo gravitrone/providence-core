@@ -682,7 +682,6 @@ func TestBatchGrouping_MixedTools(t *testing.T) {
 func TestBatchGrouping_ExpandedShowsAll(t *testing.T) {
 	at := NewAgentTab("", config.Config{}, nil)
 	at.width = 120
-	at.toolsExpanded = true
 	for i := 0; i < 3; i++ {
 		at.messages = append(at.messages, ChatMessage{
 			Role:       "tool",
@@ -692,6 +691,7 @@ func TestBatchGrouping_ExpandedShowsAll(t *testing.T) {
 			ToolBody:   "read ok",
 			Done:       true,
 		})
+		at.toolsExpanded[i] = true
 	}
 	rendered := at.renderMessages()
 	// When expanded, all individual tools should render (no batch header).
@@ -741,7 +741,6 @@ func TestHintsShowFreezeControls(t *testing.T) {
 func TestToolOutputShownWhenExpanded(t *testing.T) {
 	at := NewAgentTab("", config.Config{}, nil)
 	at.width = 120
-	at.toolsExpanded = true
 	at.messages = append(at.messages, ChatMessage{
 		Role:       "tool",
 		ToolName:   "Read",
@@ -751,6 +750,7 @@ func TestToolOutputShownWhenExpanded(t *testing.T) {
 		ToolOutput: "package main\n\nfunc main() {}",
 		Done:       true,
 	})
+	at.toolsExpanded[0] = true
 	rendered := at.renderMessages()
 	assert.Contains(t, rendered, "package main", "expanded tool should show output content")
 }

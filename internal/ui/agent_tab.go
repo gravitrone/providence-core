@@ -30,7 +30,6 @@ import (
 	_ "github.com/gravitrone/providence-core/internal/engine/codex_re" // register codex_re factory
 	"github.com/gravitrone/providence-core/internal/engine/customtools"
 	"github.com/gravitrone/providence-core/internal/engine/direct" // register direct factory + image types
-	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
 	"github.com/gravitrone/providence-core/internal/engine/kairos"
 	"github.com/gravitrone/providence-core/internal/engine/outputstyles"
 	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
@@ -248,8 +247,8 @@ type AgentTab struct {
 	// Streaming tool input: accumulates partial JSON from tool_input_delta events.
 	toolInputBuffer string
 
-	// Tool expansion: toggled via freeze mode.
-	toolsExpanded bool
+	// Tool expansion: per-message toggle via freeze mode.
+	toolsExpanded map[int]bool
 
 	// Focus arbiter: controls which sub-model receives key events.
 	focus Focus
@@ -439,6 +438,7 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		customTools:      customTools,
 		filePicker:       fp,
 		keybindings:      keybindings,
+		toolsExpanded:    make(map[int]bool),
 	}
 }
 
@@ -1307,6 +1307,28 @@ func (at AgentTab) handleTranscriptKey(key string) (AgentTab, tea.Cmd) {
 		at.refreshViewport()
 		return at, nil
 
+	case "e":
+		// Toggle expand/collapse for all tool messages.
+		hasAny := false
+		for _, v := range at.toolsExpanded {
+			if v {
+				hasAny = true
+				break
+			}
+		}
+		if hasAny {
+			at.toolsExpanded = make(map[int]bool)
+		} else {
+			for i, msg := range at.messages {
+				if msg.Role == "tool" {
+					at.toolsExpanded[i] = true
+				}
+			}
+		}
+		at.messagesDirty = true
+		at.refreshViewport()
+		return at, nil
+
 	case "q", "esc", "ctrl+o":
 		// Exit freeze mode, return to input.
 		at.transcript.SetFrozen(false)
@@ -1612,7 +1634,9 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 			}
 			// Wire TodoWrite results to dashboard TASKS panel.
 			if tr.ToolName == "TodoWrite" && !tr.IsError {
-				at.dashboard.SetTasks(convertTodosToTaskInfo(tools.GetCurrentTodos()))
+				if tp, ok := at.engine.(engine.TodoProvider); ok {
+					at.dashboard.SetTasks(convertTodosToTaskInfo(tp.GetCurrentTodos()))
+				}
 			}
 		}
 		return at, at.safeWaitForEvent()
@@ -2437,7 +2461,7 @@ func (at *AgentTab) refreshViewport() {
 	// Messages re-render when dirty, streaming, animating, viz breathing, or batch tools animating.
 	// When idle with no changes, use the cached render to avoid flicker.
 	hasViz := at.hasVizMessages()
-	hasBatch := at.streaming && !at.toolsExpanded && at.hasBatchTools()
+	hasBatch := at.streaming && len(at.toolsExpanded) == 0 && at.hasBatchTools()
 	compactLive := at.compactPhase != ""
 	if at.messagesDirty || at.streaming || at.completionActive || compactLive || hasViz || hasBatch || at.cachedMessages == "" {
 		at.cachedMessages = at.renderMessages()
@@ -2577,7 +2601,7 @@ func (at AgentTab) renderMessages() string {
 			continue
 		}
 		// Skip batched tool messages (handled by batch header).
-		if msg.Role == "tool" && batchSkip[i] && !at.toolsExpanded {
+		if msg.Role == "tool" && batchSkip[i] && !at.toolsExpanded[i] {
 			continue
 		}
 
@@ -2598,7 +2622,7 @@ func (at AgentTab) renderMessages() string {
 		case "permission":
 			b.WriteString(at.renderPermissionMessage(msg, contentW))
 		case "tool":
-			if g, ok := batchStart[i]; ok && !at.toolsExpanded {
+			if g, ok := batchStart[i]; ok && !at.toolsExpanded[i] {
 				// Collect messages for this batch by indices.
 				batchMsgs := make([]ChatMessage, len(g.indices))
 				for bi, idx := range g.indices {
@@ -2606,7 +2630,7 @@ func (at AgentTab) renderMessages() string {
 				}
 				b.WriteString(at.renderBatchToolHeader(g.name, g.count, batchMsgs))
 			} else {
-				b.WriteString(at.renderToolMessage(msg, i == lastToolIdx))
+				b.WriteString(at.renderToolMessage(msg, i, i == lastToolIdx))
 			}
 		case "thinking":
 			b.WriteString(at.renderThinkingMessage(msg))
@@ -3050,7 +3074,7 @@ func (at AgentTab) renderPermissionMessage(msg ChatMessage, contentW int) string
 //	      1 first line
 //	      2 second line
 //	    ... +N lines (ctrl+o to expand)
-func (at AgentTab) renderToolMessage(msg ChatMessage, isLatest bool) string {
+func (at AgentTab) renderToolMessage(msg ChatMessage, msgIdx int, isLatest bool) string {
 	frozen := !at.streaming || !isLatest
 
 	var icon string
@@ -3100,11 +3124,16 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, isLatest bool) string {
 		result = "\n" + resultPrefix + lipgloss.NewStyle().Foreground(ColorError).Italic(true).Render(msg.ToolBody+"...")
 	}
 
-	// Expandable tool output when at.toolsExpanded is true.
-	if at.toolsExpanded && msg.ToolOutput != "" {
+	// Expandable tool output when at.toolsExpanded[msgIdx] is true.
+	if at.toolsExpanded[msgIdx] && msg.ToolOutput != "" {
 		outputLines := strings.Split(msg.ToolOutput, "\n")
 		maxLines := 20
 		outputStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+
+		// Detect diff-like output for Edit/Write tools and color-code.
+		isDiffLike := (msg.ToolName == "Edit" || msg.ToolName == "Write") && looksLikeDiff(msg.ToolOutput)
+		addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700"))
+		delStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#e05050"))
 
 		var preview strings.Builder
 		for j, line := range outputLines {
@@ -3112,7 +3141,13 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, isLatest bool) string {
 				preview.WriteString(outputStyle.Render(fmt.Sprintf("  ... +%d more lines", len(outputLines)-maxLines)))
 				break
 			}
-			preview.WriteString(outputStyle.Render("  "+line) + "\n")
+			if isDiffLike && strings.HasPrefix(line, "+") {
+				preview.WriteString(addStyle.Render("  "+line) + "\n")
+			} else if isDiffLike && strings.HasPrefix(line, "-") {
+				preview.WriteString(delStyle.Render("  "+line) + "\n")
+			} else {
+				preview.WriteString(outputStyle.Render("  "+line) + "\n")
+			}
 		}
 		result += "\n" + preview.String()
 	}
@@ -3383,7 +3418,18 @@ func formatTaskInput(input any) string {
 }
 
 // convertTodosToTaskInfo maps tools.TodoItem slice to dashboard.TaskInfo slice.
-func convertTodosToTaskInfo(items []tools.TodoItem) []dashboard.TaskInfo {
+// looksLikeDiff returns true if the text looks like unified diff output.
+func looksLikeDiff(text string) bool {
+	diffLines := 0
+	for _, line := range strings.SplitN(text, "\n", 20) {
+		if strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
+			diffLines++
+		}
+	}
+	return diffLines >= 2
+}
+
+func convertTodosToTaskInfo(items []engine.TodoItem) []dashboard.TaskInfo {
 	out := make([]dashboard.TaskInfo, len(items))
 	for i, item := range items {
 		out[i] = dashboard.TaskInfo{

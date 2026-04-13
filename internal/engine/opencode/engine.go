@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/gravitrone/providence-core/internal/engine"
+	"github.com/gravitrone/providence-core/internal/engine/session"
 )
 
 // EngineTypeOpenCode is the engine type identifier for the OpenCode backend.
@@ -97,4 +98,9 @@ func (e *OpenCodeEngine) RestoreHistory(_ []engine.RestoredMessage) error {
 // TriggerCompact requests manual context compaction. Not supported by opencode.
 func (e *OpenCodeEngine) TriggerCompact(_ context.Context) error {
 	return fmt.Errorf("opencode engine does not support manual compaction")
+}
+
+// SessionBus returns a no-op bus. OpenCode manages its own event system.
+func (e *OpenCodeEngine) SessionBus() *session.Bus {
+	return session.NewBus()
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/auth"
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/direct"
+	"github.com/gravitrone/providence-core/internal/engine/session"
 )
 
 // EngineTypeCodexRE is the engine type identifier for the Codex RE engine.
@@ -127,4 +128,9 @@ func (e *CodexREEngine) RestoreHistory(messages []engine.RestoredMessage) error 
 // TriggerCompact delegates compaction to the inner engine.
 func (e *CodexREEngine) TriggerCompact(ctx context.Context) error {
 	return e.inner.TriggerCompact(ctx)
+}
+
+// SessionBus delegates to the inner engine's session bus.
+func (e *CodexREEngine) SessionBus() *session.Bus {
+	return e.inner.SessionBus()
 }

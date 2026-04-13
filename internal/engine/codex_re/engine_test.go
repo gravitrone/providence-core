@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gravitrone/providence-core/internal/engine"
+	"github.com/gravitrone/providence-core/internal/engine/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -69,3 +70,4 @@ func (s *stubEngine) Close()                                        {}
 func (s *stubEngine) Status() engine.SessionStatus                  { return s.status }
 func (s *stubEngine) RestoreHistory([]engine.RestoredMessage) error { return nil }
 func (s *stubEngine) TriggerCompact(_ context.Context) error        { return nil }
+func (s *stubEngine) SessionBus() *session.Bus                      { return session.NewBus() }

@@ -16,6 +16,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/compact"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
+	"github.com/gravitrone/providence-core/internal/engine/session"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
 )
 
@@ -77,6 +78,9 @@ type DirectEngine struct {
 	// Subagent support.
 	subagentRunner *subagent.Runner
 	apiKey         string // stored for sub-engine creation
+
+	// Session event bus for background agents and plugin subscribers.
+	sessionBus *session.Bus
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -175,6 +179,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		openrouterAPIKey: openrouterKey,
 		subagentRunner:   subagent.NewRunner(),
 		apiKey:           cfg.APIKey,
+		sessionBus:       session.NewBus(),
 	}
 
 	// Register subagent TaskTool now that the engine exists for the executor.
@@ -192,6 +197,9 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	}
 
 	e.compactor = compact.New(provider, func(phase compact.Phase, err error) {
+		if phase == compact.PhaseRunning {
+			e.sessionBus.Publish(session.Event{Type: session.EventCompaction, Data: nil})
+		}
 		event := engine.ParsedEvent{
 			Type: "compaction",
 			Data: &engine.CompactionEvent{
@@ -222,6 +230,11 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 // (e.g. the TUI checking for completed background tasks).
 func (e *DirectEngine) SubagentRunner() *subagent.Runner {
 	return e.subagentRunner
+}
+
+// SessionBus returns the engine's session event bus.
+func (e *DirectEngine) SessionBus() *session.Bus {
+	return e.sessionBus
 }
 
 // SetRegistry replaces the tool registry (for use before first Send).
@@ -266,6 +279,9 @@ func (e *DirectEngine) Send(text string) error {
 	images := e.pendingImages
 	e.pendingImages = nil
 	e.mu.Unlock()
+
+	// Publish new message event to session bus.
+	e.sessionBus.Publish(session.Event{Type: session.EventNewMessage, Data: text})
 
 	if e.codexMode {
 		e.codexHistory = append(e.codexHistory, codexHistoryEntry{
@@ -587,6 +603,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		toolCalls := extractToolCalls(accumulated)
 		queue := NewStreamingToolQueue(e.registry)
 		for _, tc := range toolCalls {
+			e.sessionBus.Publish(session.Event{Type: session.EventToolCallStart, Data: tc.Name})
 			tool, ok := e.registry.Get(tc.Name)
 			if !ok {
 				// Unknown tool - add error result directly.
@@ -617,6 +634,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		// Collect results, emit tool_result events, add to history.
 		var resultBlocks []anthropic.ContentBlockParamUnion
 		for _, r := range queue.Results() {
+			e.sessionBus.Publish(session.Event{Type: session.EventToolCallResult, Data: r.Result.Content})
 			e.events <- engine.ParsedEvent{
 				Type: "tool_result",
 				Data: &engine.ToolResultEvent{

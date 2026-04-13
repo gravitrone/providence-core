@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"fmt"
+
+	"github.com/gravitrone/providence-core/internal/engine/session"
 )
 
 // EngineType identifies the backend.
@@ -78,6 +80,10 @@ type Engine interface {
 	RestoreHistory(messages []RestoredMessage) error
 	// TriggerCompact requests manual context compaction when supported.
 	TriggerCompact(ctx context.Context) error
+	// SessionBus returns the engine's session event bus for background agents
+	// and plugin subscribers. Engines that don't support event broadcasting
+	// return a no-op bus (publishes are silently dropped).
+	SessionBus() *session.Bus
 }
 
 // ParsedEvent is a decoded event from an AI engine.

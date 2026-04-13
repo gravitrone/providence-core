@@ -3797,34 +3797,45 @@ func (at AgentTab) renderToolCard(msg ChatMessage, msgIdx int, isLatest bool) st
 	// --- Header line ---
 	header := statusIcon + pill + chevron + primaryArg + secondaryArgs
 
-	// --- Agent dispatch info (inline, no nested card) ---
+	// --- Agent dispatch info (plain text, no nested card) ---
 	isAgentTool := msg.ToolName == "Agent" || msg.ToolName == "Task"
 	if isAgentTool && msg.ToolArgs != "" {
-		// Try to extract clean agent info from the formatted dispatch card.
-		// formatTaskInput wraps in a bordered card - strip it and show clean key-values.
-		raw := msg.ToolArgs
-		// Extract name + meta from first meaningful lines.
-		cleanLines := []string{}
-		for _, line := range strings.Split(raw, "\n") {
-			trimmed := strings.TrimSpace(line)
-			// Skip border characters, "Agent Dispatched" header, and empty lines.
-			if trimmed == "" || trimmed == "Agent Dispatched" {
-				continue
-			}
-			// Skip lines that are just box-drawing characters.
-			if strings.ContainsAny(trimmed, "╭╮╰╯│─┌┐└┘") && !strings.ContainsAny(trimmed, "abcdefghijklmnopqrstuvwxyz") {
-				continue
-			}
-			cleanLines = append(cleanLines, trimmed)
+		// Try parsing ToolArgs as raw JSON (available during streaming).
+		var agentInput struct {
+			Description  string `json:"description"`
+			SubagentType string `json:"subagent_type"`
+			Model        string `json:"model"`
+			Name         string `json:"name"`
+			RunInBG      bool   `json:"run_in_background"`
 		}
-		if len(cleanLines) > 0 {
+		if err := json.Unmarshal([]byte(msg.ToolArgs), &agentInput); err == nil && (agentInput.Name != "" || agentInput.Description != "") {
+			name := agentInput.Name
+			if name == "" {
+				name = agentInput.SubagentType
+			}
+			if name == "" {
+				name = "agent"
+			}
+			model := agentInput.Model
+			if model == "" {
+				model = "inherit"
+			}
+			mode := "in-process"
+			if agentInput.RunInBG {
+				mode = "background"
+			}
 			nameStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
-			header = statusIcon + pill + chevron + nameStyle.Render(cleanLines[0])
-			if len(cleanLines) > 1 {
-				descStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
-				header += "\n" + descStyle.Render("  "+cleanLines[1])
+			metaStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+			header = statusIcon + pill + chevron + nameStyle.Render(name) + " " + metaStyle.Render("["+model+", "+mode+"]")
+			desc := agentInput.Description
+			if len(desc) > 70 {
+				desc = desc[:67] + "..."
+			}
+			if desc != "" {
+				header += "\n" + lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render("  "+desc)
 			}
 		}
+		// If JSON parse fails (already formatted), just show primary arg as-is.
 	}
 
 	// --- Body ---

@@ -3236,20 +3236,9 @@ func formatTokenTrail(before, after int) string {
 	return b + " \u2192 " + formatTokenCount(after)
 }
 
-// formatTokenCount formats a token count compactly: <1000 raw, >=1000
-// uses "K" suffix with one decimal when meaningful.
+// formatTokenCount delegates to the canonical FormatTokens.
 func formatTokenCount(n int) string {
-	if n <= 0 {
-		return "0"
-	}
-	if n < 1000 {
-		return fmt.Sprintf("%d", n)
-	}
-	f := float64(n) / 1000.0
-	if f >= 100 {
-		return fmt.Sprintf("%.0fK", f)
-	}
-	return fmt.Sprintf("%.1fK", f)
+	return FormatTokens(n)
 }
 
 // renderUserMessage renders a user message in a rounded border box.
@@ -3792,7 +3781,7 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, msgIdx int, isLatest bool)
 			elapsed := ""
 			if !msg.Timestamp.IsZero() {
 				dur := time.Since(msg.Timestamp)
-				elapsed = " " + lipgloss.NewStyle().Foreground(ColorMuted).Render(components.FormatDuration(dur))
+				elapsed = " " + lipgloss.NewStyle().Foreground(ColorMuted).Render(FormatDuration(dur))
 			}
 			body = "\n" + connector + activityText + elapsed
 		} else if msg.ToolStatus == "success" && msg.ToolBody != "" {

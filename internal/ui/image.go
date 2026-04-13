@@ -116,15 +116,7 @@ close access f`, tmpFile)
 	return data, nil
 }
 
-// formatSize returns a human-readable file size string.
+// formatSize delegates to the canonical FormatFileSize.
 func formatSize(bytes int64) string {
-	if bytes < 1024 {
-		return fmt.Sprintf("%dB", bytes)
-	}
-	kb := float64(bytes) / 1024
-	if kb < 1024 {
-		return fmt.Sprintf("%.0fKB", kb)
-	}
-	mb := kb / 1024
-	return fmt.Sprintf("%.1fMB", mb)
+	return FormatFileSize(bytes)
 }

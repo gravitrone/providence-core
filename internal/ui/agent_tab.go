@@ -4389,11 +4389,18 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			at.refreshViewport()
 			return true, nil
 		}
-		var lines []string
+		var sb strings.Builder
+		sb.WriteString("## Discovered Skills\n\n")
+		sb.WriteString("| Name | Description |\n")
+		sb.WriteString("|------|-------------|\n")
 		for _, s := range skillList {
-			lines = append(lines, fmt.Sprintf("/%s - %s", s.Name, s.Description))
+			desc := s.Description
+			if len(desc) > 80 {
+				desc = desc[:77] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("| %s | %s |\n", s.Name, desc))
 		}
-		at.addSystemMessage(strings.Join(lines, "\n"))
+		at.addSystemMessage(sb.String())
 		at.refreshViewport()
 		return true, nil
 

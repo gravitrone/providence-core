@@ -1314,11 +1314,17 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 			if strings.Contains(errStr, "429") || strings.Contains(errStr, "rate_limit") {
 				if attempt < maxRetries-1 {
 					delay := engine.Backoff(attempt)
+					delaySec := int(delay.Seconds())
+					if delaySec < 1 {
+						delaySec = 1
+					}
 					e.events <- engine.ParsedEvent{
-						Type: "system_message",
-						Data: &engine.SystemMessageEvent{
-							Type:    "system_message",
-							Content: fmt.Sprintf("Rate limited. Retrying in %s...", delay),
+						Type: "rate_limit",
+						Data: &engine.RateLimitEvent{
+							Type:     "rate_limit",
+							DelaySec: delaySec,
+							Attempt:  attempt + 1,
+							MaxRetry: maxRetries,
 						},
 					}
 					time.Sleep(delay)

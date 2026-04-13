@@ -141,3 +141,12 @@ type ThinkingDelta struct {
 type ThinkingStopEvent struct {
 	Type string `json:"type"`
 }
+
+// RateLimitEvent is emitted when a 429 is encountered and the engine is retrying.
+// The UI can use DelaySec and Attempt to show a live countdown.
+type RateLimitEvent struct {
+	Type     string `json:"type"`
+	DelaySec int    `json:"delay_sec"` // total seconds until next retry
+	Attempt  int    `json:"attempt"`   // 1-indexed attempt number
+	MaxRetry int    `json:"max_retry"` // max retries (e.g. 3)
+}

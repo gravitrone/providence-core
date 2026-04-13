@@ -59,6 +59,10 @@ const (
 
 var tabNames = []string{"Chat", "Agents", "Tasks", "Files", "Tokens", "Errors", "Compact", "Hooks"}
 
+// compactBoundaryMarker is the sentinel content for the compaction boundary system message.
+// renderSystemMessage detects this and renders a styled visual separator instead of plain text.
+const compactBoundaryMarker = "\x00compact_boundary\x00"
+
 // completionSpring is a critically-damped spring for the completion cool-down animation.
 // FPS(12) matches the flame tick rate (~80ms). Quick settle, no oscillation.
 var completionSpring = harmonica.NewSpring(harmonica.FPS(12), 6.0, 0.8)
@@ -309,6 +313,17 @@ type AgentTab struct {
 	// Thinking block state: tracks streaming thinking content.
 	thinkingActive bool
 	thinkingBuffer string
+
+	// Rate limit countdown state.
+	rateLimitActive  bool
+	rateLimitExpiry  time.Time // when the countdown hits zero
+	rateLimitAttempt int       // 1-indexed
+	rateLimitMax     int       // max retries
+
+	// Active tool progress: tracks which tools are executing and when they started.
+	activeToolName  string    // name of the tool currently in flight
+	activeToolStart time.Time // when the current tool batch started
+	activeToolCount int       // how many same-name tools have started in this batch
 
 	// Rewind picker state.
 	rewindModel components.RewindModel
@@ -1476,6 +1491,8 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 							reduction,
 						))
 					}
+					// Insert visual boundary marker in transcript.
+					at.addMessage("system", compactBoundaryMarker, true)
 				}
 			case "failed":
 				at.compacting = false
@@ -1498,7 +1515,22 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		}
 		return at, at.safeWaitForEvent()
 
+	case "rate_limit":
+		if rl, ok := ev.Data.(*engine.RateLimitEvent); ok {
+			at.rateLimitActive = true
+			at.rateLimitExpiry = time.Now().Add(time.Duration(rl.DelaySec) * time.Second)
+			at.rateLimitAttempt = rl.Attempt
+			at.rateLimitMax = rl.MaxRetry
+			at.messagesDirty = true
+			at.refreshViewport()
+		}
+		return at, at.safeWaitForEvent()
+
 	case "stream_event":
+		// Clear rate limit state on any new stream data.
+		if at.rateLimitActive {
+			at.rateLimitActive = false
+		}
 		if se, ok := ev.Data.(*engine.StreamEvent); ok {
 			if se.Event.Delta != nil && se.Event.Delta.Type == "text_delta" {
 				at.streamBuffer += se.Event.Delta.Text
@@ -1611,6 +1643,14 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 				case "tool_use":
 					hasToolUse = true
 					at.toolInputBuffer = "" // Reset streaming tool input buffer.
+					// Track active tool progress for spinner display.
+					if part.Name == at.activeToolName {
+						at.activeToolCount++
+					} else {
+						at.activeToolName = part.Name
+						at.activeToolStart = time.Now()
+						at.activeToolCount = 1
+					}
 					toolArgs := formatToolArgs(part.Name, part.Input)
 					at.messages = append(at.messages, ChatMessage{
 						Role:       "tool",
@@ -1739,6 +1779,9 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		at.streamBuffer = ""
 		at.spinnerVerb = ""
 		at.visualizing = false
+		at.rateLimitActive = false
+		at.activeToolName = ""
+		at.activeToolCount = 0
 		at.messagesDirty = true
 		if re, ok := ev.Data.(*engine.ResultEvent); ok {
 			if re.IsError {
@@ -3077,6 +3120,21 @@ func (at AgentTab) processStreamingViz(text string) string {
 // renderSystemMessage renders a system message in italic muted with 2-char indent.
 // Completion messages get a harmonica spring cool-down: bright gold -> frozen ember.
 func (at AgentTab) renderSystemMessage(msg ChatMessage) string {
+	// Compaction boundary: styled visual separator.
+	if msg.Content == compactBoundaryMarker {
+		contentW := chatContentWidth(at.width)
+		label := " context compacted "
+		hint := "(ctrl+o for full history)"
+		dashCount := (contentW - len(label)) / 2
+		if dashCount < 3 {
+			dashCount = 3
+		}
+		dashes := strings.Repeat("\u2500", dashCount)
+		dimStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+		hintStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
+		return dimStyle.Render(dashes+label+dashes) + "\n" +
+			strings.Repeat(" ", (contentW-len(hint))/2) + hintStyle.Render(hint) + "\n"
+	}
 	// Check if this is the active completion message with spring animation.
 	if at.completionText != "" && msg.Content == at.completionText && at.completionActive {
 		c := completionColor(at.completionBright)
@@ -3329,7 +3387,7 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, msgIdx int, isLatest bool)
 		// Expanded tool output (crush-style content lines with subtle bg).
 		if at.toolsExpanded[msgIdx] && msg.ToolOutput != "" {
 			outputLines := strings.Split(msg.ToolOutput, "\n")
-			const maxLines = 10
+			const maxLines = 400
 			isDiffLike := (msg.ToolName == "Edit" || msg.ToolName == "Write") && looksLikeDiff(msg.ToolOutput)
 			addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700")).Background(ToolContentBgColor)
 			delStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#e05050")).Background(ToolContentBgColor)
@@ -3347,6 +3405,15 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, msgIdx int, isLatest bool)
 				} else {
 					bodyLines = append(bodyLines, ToolContentLineStyle.Render("  "+line))
 				}
+			}
+			// Scroll hint when output exceeds a reasonable viewport height.
+			vpH := at.height - 6
+			if vpH < 10 {
+				vpH = 10
+			}
+			if len(outputLines) > vpH {
+				bodyLines = append(bodyLines, lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render(
+					fmt.Sprintf("  scroll: %d lines total", len(outputLines))))
 			}
 		}
 

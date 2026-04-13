@@ -169,12 +169,42 @@ func (at AgentTab) renderSpinner() string {
 	elapsed := int(time.Since(at.spinnerStart).Seconds())
 	timerStyle := lipgloss.NewStyle().Foreground(ColorMuted)
 
+	// Rate limit countdown takes priority over all other spinner states.
+	if at.rateLimitActive {
+		remaining := int(time.Until(at.rateLimitExpiry).Seconds())
+		if remaining < 0 {
+			remaining = 0
+		}
+		rlSpinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(flameColor(at.spinnerFrame))).Bold(true)
+		rlVerbStyle := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+		rlCountStyle := lipgloss.NewStyle().Foreground(ColorWarning)
+		return "  " + rlSpinnerStyle.Render(frame) + " " +
+			rlVerbStyle.Render(fmt.Sprintf("Rate limited. Retrying in %ds...", remaining)) + " " +
+			rlCountStyle.Render(fmt.Sprintf("(attempt %d/%d)", at.rateLimitAttempt, at.rateLimitMax))
+	}
+
 	if at.visualizing {
 		vizSpinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(flameColor(at.spinnerFrame))).Bold(true)
 		vizVerbStyle := lipgloss.NewStyle().Foreground(ColorAccent).Italic(true)
 		return "  " + vizSpinnerStyle.Render(frame) + " " +
 			vizVerbStyle.Render(at.vizVerb+"...") + " " +
 			timerStyle.Render(fmt.Sprintf("(%ds)", elapsed))
+	}
+
+	// Active tool progress: show tool name + count + elapsed.
+	if at.activeToolName != "" && at.activeToolCount > 0 {
+		toolElapsed := int(time.Since(at.activeToolStart).Seconds())
+		toolSpinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(flameColor(at.spinnerFrame))).Bold(true)
+		toolVerbStyle := lipgloss.NewStyle().Foreground(ColorAccent).Italic(true)
+		var progressText string
+		if at.activeToolCount == 1 {
+			progressText = fmt.Sprintf("%s...", at.activeToolName)
+		} else {
+			progressText = batchVerb(at.activeToolName, at.activeToolCount, false) + "..."
+		}
+		return "  " + toolSpinnerStyle.Render(frame) + " " +
+			toolVerbStyle.Render(progressText) + " " +
+			timerStyle.Render(fmt.Sprintf("(%ds)", toolElapsed))
 	}
 
 	spinnerStyle := lipgloss.NewStyle().Foreground(ColorWarning)

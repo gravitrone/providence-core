@@ -5197,117 +5197,293 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			at.refreshViewport()
 			return true, nil
 		}
-		// Check if CLAUDE.md already exists.
-		candidatePaths := []string{
-			filepath.Join(cwd, ".claude", "CLAUDE.md"),
-			filepath.Join(cwd, "CLAUDE.md"),
-		}
-		for _, p := range candidatePaths {
-			if _, err := os.Stat(p); err == nil {
-				at.addSystemMessage("CLAUDE.md already exists. Edit it directly or delete to reinit.")
-				at.refreshViewport()
-				return true, nil
-			}
-		}
 
-		// Scan the project to detect language/framework.
-		detected := "Unknown project"
-		buildCmd := ""
-		testCmd := ""
+		// Phase 1: Detect project type.
+		type projectDetection struct {
+			Language  string
+			Framework string
+			Module    string
+			BuildCmd  string
+			TestCmd   string
+			LintCmd   string
+		}
+		det := projectDetection{}
 
 		if _, err := os.Stat(filepath.Join(cwd, "go.mod")); err == nil {
+			det.Language = "Go"
+			det.BuildCmd = "go build ./..."
+			det.TestCmd = "go test -race -count=1 ./..."
+			det.LintCmd = "golangci-lint run"
 			data, _ := os.ReadFile(filepath.Join(cwd, "go.mod"))
-			modLine := ""
 			for _, line := range strings.Split(string(data), "\n") {
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "module ") {
-					modLine = strings.TrimPrefix(line, "module ")
+					det.Module = strings.TrimPrefix(line, "module ")
 					break
 				}
 			}
-			if modLine != "" {
-				detected = "Go project (module: " + modLine + ")"
-			} else {
-				detected = "Go project"
-			}
-			buildCmd = "go build ./..."
-			testCmd = "go test -race -count=1 ./..."
 		} else if _, err := os.Stat(filepath.Join(cwd, "package.json")); err == nil {
+			det.Language = "TypeScript/JavaScript"
 			data, _ := os.ReadFile(filepath.Join(cwd, "package.json"))
 			pkg := struct {
-				Name string `json:"name"`
+				Name    string            `json:"name"`
+				Scripts map[string]string `json:"scripts"`
 			}{}
 			_ = json.Unmarshal(data, &pkg)
-			if pkg.Name != "" {
-				detected = "Node.js project (name: " + pkg.Name + ")"
-			} else {
-				detected = "Node.js project"
+			det.Module = pkg.Name
+			// Detect framework from scripts or dependencies.
+			raw := string(data)
+			if strings.Contains(raw, "\"next\"") {
+				det.Framework = "Next.js"
+			} else if strings.Contains(raw, "\"react\"") {
+				det.Framework = "React"
+			} else if strings.Contains(raw, "\"vue\"") {
+				det.Framework = "Vue"
+			} else if strings.Contains(raw, "\"svelte\"") {
+				det.Framework = "Svelte"
 			}
-			buildCmd = "npm run build"
-			testCmd = "npm test"
+			if pkg.Scripts["build"] != "" {
+				det.BuildCmd = "npm run build"
+			}
+			if pkg.Scripts["test"] != "" {
+				det.TestCmd = "npm test"
+			} else if pkg.Scripts["test:unit"] != "" {
+				det.TestCmd = "npm run test:unit"
+			}
+			if pkg.Scripts["lint"] != "" {
+				det.LintCmd = "npm run lint"
+			}
 		} else if _, err := os.Stat(filepath.Join(cwd, "Cargo.toml")); err == nil {
-			detected = "Rust project"
-			buildCmd = "cargo build"
-			testCmd = "cargo test"
+			det.Language = "Rust"
+			det.BuildCmd = "cargo build"
+			det.TestCmd = "cargo test"
+			det.LintCmd = "cargo clippy"
+			data, _ := os.ReadFile(filepath.Join(cwd, "Cargo.toml"))
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "name = ") {
+					det.Module = strings.Trim(strings.TrimPrefix(line, "name = "), "\"")
+					break
+				}
+			}
 		} else if _, err := os.Stat(filepath.Join(cwd, "pyproject.toml")); err == nil {
-			detected = "Python project"
-			buildCmd = "pip install -e ."
-			testCmd = "pytest"
+			det.Language = "Python"
+			det.BuildCmd = "pip install -e ."
+			det.TestCmd = "pytest"
+			det.LintCmd = "ruff check ."
 		} else if _, err := os.Stat(filepath.Join(cwd, "requirements.txt")); err == nil {
-			detected = "Python project"
-			buildCmd = "pip install -r requirements.txt"
-			testCmd = "pytest"
+			det.Language = "Python"
+			det.BuildCmd = "pip install -r requirements.txt"
+			det.TestCmd = "pytest"
+			det.LintCmd = "ruff check ."
+		} else if _, err := os.Stat(filepath.Join(cwd, "Gemfile")); err == nil {
+			det.Language = "Ruby"
+			det.BuildCmd = "bundle install"
+			det.TestCmd = "bundle exec rspec"
+			det.LintCmd = "bundle exec rubocop"
+		} else if _, err := os.Stat(filepath.Join(cwd, "pom.xml")); err == nil {
+			det.Language = "Java"
+			det.Framework = "Maven"
+			det.BuildCmd = "mvn compile"
+			det.TestCmd = "mvn test"
+		} else if _, err := os.Stat(filepath.Join(cwd, "build.gradle")); err == nil {
+			det.Language = "Java/Kotlin"
+			det.Framework = "Gradle"
+			det.BuildCmd = "./gradlew build"
+			det.TestCmd = "./gradlew test"
+		} else if _, err := os.Stat(filepath.Join(cwd, "Makefile")); err == nil {
+			det.BuildCmd = "make"
+			det.TestCmd = "make test"
 		}
 
-		// Check for .git.
-		gitInfo := ""
+		// Phase 2: Scan codebase structure.
+		isGitRepo := false
 		if _, err := os.Stat(filepath.Join(cwd, ".git")); err == nil {
-			gitInfo = " (git repo)"
+			isGitRepo = true
 		}
 
-		// List top-level directories.
 		entries, _ := os.ReadDir(cwd)
 		var dirs []string
+		var keyFiles []string
 		for _, e := range entries {
-			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
-				dirs = append(dirs, e.Name())
+			if strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			if e.IsDir() {
+				dirs = append(dirs, e.Name()+"/")
+			} else {
+				// Track key config/entry files.
+				switch e.Name() {
+				case "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
+					".env.example", "Makefile", "justfile",
+					"README.md", "LICENSE", ".gitignore",
+					"tsconfig.json", ".eslintrc.js", ".eslintrc.json",
+					".prettierrc", ".golangci.yml", "rustfmt.toml":
+					keyFiles = append(keyFiles, e.Name())
+				}
 			}
 		}
-		dirList := ""
-		if len(dirs) > 0 {
-			dirList = strings.Join(dirs, ", ")
+
+		// Detect test framework from file structure.
+		testFramework := ""
+		for _, d := range dirs {
+			switch d {
+			case "test/", "tests/", "__tests__/", "spec/":
+				testFramework = d[:len(d)-1]
+			}
+		}
+		// Check for _test.go files in Go projects.
+		if det.Language == "Go" && testFramework == "" {
+			testFramework = "*_test.go files"
 		}
 
-		// Build CLAUDE.md content.
+		// Detect coding conventions from existing config files.
+		var conventions []string
+		if _, err := os.Stat(filepath.Join(cwd, ".editorconfig")); err == nil {
+			conventions = append(conventions, "EditorConfig detected")
+		}
+		if _, err := os.Stat(filepath.Join(cwd, ".prettierrc")); err == nil {
+			conventions = append(conventions, "Prettier detected")
+		}
+		if _, err := os.Stat(filepath.Join(cwd, ".eslintrc.js")); err == nil {
+			conventions = append(conventions, "ESLint detected")
+		} else if _, err := os.Stat(filepath.Join(cwd, ".eslintrc.json")); err == nil {
+			conventions = append(conventions, "ESLint detected")
+		} else if _, err := os.Stat(filepath.Join(cwd, "eslint.config.js")); err == nil {
+			conventions = append(conventions, "ESLint (flat config) detected")
+		}
+		if _, err := os.Stat(filepath.Join(cwd, ".golangci.yml")); err == nil {
+			conventions = append(conventions, "golangci-lint detected")
+		} else if _, err := os.Stat(filepath.Join(cwd, ".golangci.yaml")); err == nil {
+			conventions = append(conventions, "golangci-lint detected")
+		}
+		if _, err := os.Stat(filepath.Join(cwd, "rustfmt.toml")); err == nil {
+			conventions = append(conventions, "rustfmt detected")
+		}
+		if _, err := os.Stat(filepath.Join(cwd, "ruff.toml")); err == nil {
+			conventions = append(conventions, "Ruff detected")
+		}
+		if _, err := os.Stat(filepath.Join(cwd, ".flake8")); err == nil {
+			conventions = append(conventions, "Flake8 detected")
+		}
+
+		// Phase 3: Generate CLAUDE.md content.
 		var b strings.Builder
 		b.WriteString("# Project Instructions\n\n")
+
+		// Description.
 		b.WriteString("## Overview\n\n")
-		b.WriteString("Detected: " + detected + gitInfo + "\n")
-		if dirList != "" {
-			b.WriteString("Directories: " + dirList + "\n")
+		desc := det.Language
+		if desc == "" {
+			desc = "Unknown language"
 		}
-		b.WriteString("\n## Conventions\n\n")
-		b.WriteString("- [placeholder for user to fill]\n\n")
+		if det.Framework != "" {
+			desc += " + " + det.Framework
+		}
+		if det.Module != "" {
+			desc += " (" + det.Module + ")"
+		}
+		if isGitRepo {
+			desc += " [git]"
+		}
+		b.WriteString(desc + "\n\n")
+
+		// Structure.
+		if len(dirs) > 0 {
+			b.WriteString("## Structure\n\n")
+			b.WriteString("```\n")
+			for _, d := range dirs {
+				b.WriteString(d + "\n")
+			}
+			b.WriteString("```\n\n")
+		}
+		if len(keyFiles) > 0 {
+			b.WriteString("Key files: " + strings.Join(keyFiles, ", ") + "\n\n")
+		}
+
+		// Build & Test.
 		b.WriteString("## Build & Test\n\n")
-		b.WriteString("```\n")
-		if buildCmd != "" {
-			b.WriteString(buildCmd + "\n")
+		b.WriteString("```sh\n")
+		if det.BuildCmd != "" {
+			b.WriteString("# Build\n")
+			b.WriteString(det.BuildCmd + "\n\n")
 		}
-		if testCmd != "" {
-			b.WriteString(testCmd + "\n")
+		if det.TestCmd != "" {
+			b.WriteString("# Test\n")
+			b.WriteString(det.TestCmd + "\n")
+			if testFramework != "" {
+				b.WriteString("# Test dir: " + testFramework + "\n")
+			}
+			b.WriteString("\n")
 		}
-		if buildCmd == "" && testCmd == "" {
+		if det.LintCmd != "" {
+			b.WriteString("# Lint\n")
+			b.WriteString(det.LintCmd + "\n")
+		}
+		if det.BuildCmd == "" && det.TestCmd == "" && det.LintCmd == "" {
 			b.WriteString("# Add build and test commands here\n")
 		}
-		b.WriteString("```\n")
+		b.WriteString("```\n\n")
 
+		// Conventions.
+		b.WriteString("## Conventions\n\n")
+		if len(conventions) > 0 {
+			for _, c := range conventions {
+				b.WriteString("- " + c + "\n")
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("- TODO: add project-specific conventions\n")
+
+		content := b.String()
+
+		// Phase 4: Check for existing CLAUDE.md and show diff or write.
+		existingPath := ""
+		candidatePaths := []string{
+			filepath.Join(cwd, "CLAUDE.md"),
+			filepath.Join(cwd, ".claude", "CLAUDE.md"),
+		}
+		for _, p := range candidatePaths {
+			if _, err := os.Stat(p); err == nil {
+				existingPath = p
+				break
+			}
+		}
+
+		if existingPath != "" {
+			// CLAUDE.md exists: show what would change.
+			existing, err := os.ReadFile(existingPath)
+			if err != nil {
+				at.addSystemMessage("CLAUDE.md exists but could not be read: " + err.Error())
+				at.refreshViewport()
+				return true, nil
+			}
+			if string(existing) == content {
+				at.addSystemMessage("CLAUDE.md already exists and matches generated content. No changes needed.")
+				at.refreshViewport()
+				return true, nil
+			}
+			// Show diff summary.
+			existingLines := strings.Split(string(existing), "\n")
+			newLines := strings.Split(content, "\n")
+			at.addSystemMessage(fmt.Sprintf(
+				"CLAUDE.md exists at %s (%d lines).\nGenerated template has %d lines.\nDelete existing file and re-run /init to replace, or edit it directly.",
+				existingPath, len(existingLines), len(newLines),
+			))
+			// Show what would be written as preview.
+			at.addSystemMessage("Generated CLAUDE.md preview:\n\n" + content)
+			at.refreshViewport()
+			return true, nil
+		}
+
+		// Write new CLAUDE.md.
 		claudeMD := filepath.Join(cwd, "CLAUDE.md")
-		if err := os.WriteFile(claudeMD, []byte(b.String()), 0o644); err != nil {
+		if err := os.WriteFile(claudeMD, []byte(content), 0o644); err != nil {
 			at.addSystemMessage("Failed to write CLAUDE.md: " + err.Error())
 			at.refreshViewport()
 			return true, nil
 		}
-		at.addSystemMessage("Created CLAUDE.md with detected project info. Edit to customize.")
+		at.addSystemMessage("Wrote CLAUDE.md:\n\n" + content)
 		at.refreshViewport()
 		return true, nil
 

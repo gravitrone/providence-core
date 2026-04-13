@@ -1,0 +1,1073 @@
+{
+  "files": [
+    {
+      "path": ".claude/rules/go.md",
+      "desc": "Markdown"
+    },
+    {
+      "path": ".claude/rules/testing.md",
+      "desc": "Markdown"
+    },
+    {
+      "path": ".editorconfig"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "desc": "YAML config"
+    },
+    {
+      "path": ".gitignore",
+      "desc": "Git ignore rules"
+    },
+    {
+      "path": ".golangci.yml",
+      "desc": "YAML config"
+    },
+    {
+      "path": ".providence/skills/code-conventions/SKILL.md",
+      "desc": "Markdown"
+    },
+    {
+      "path": "AGENTS.md",
+      "desc": "Markdown"
+    },
+    {
+      "path": "CLAUDE.md",
+      "desc": "Claude Code instructions"
+    },
+    {
+      "path": "LICENSE"
+    },
+    {
+      "path": "Makefile",
+      "desc": "Build automation"
+    },
+    {
+      "path": "README.md",
+      "desc": "Project readme"
+    },
+    {
+      "path": "cliff.toml",
+      "desc": "TOML config"
+    },
+    {
+      "path": "cmd/providence/main.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "cmd/providence/main_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "go.mod",
+      "desc": "Go module definition"
+    },
+    {
+      "path": "go.sum",
+      "desc": "Go dependency checksums"
+    },
+    {
+      "path": "internal/auth/openai.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/auth/openai_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/bridge/macos/bridge.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/bridge/macos/bridge_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/config/config.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/config/config_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/backoff.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/backoff_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/claude/protocol.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/claude/protocol_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/claude/session.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/claude/session_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/codex_headless/engine.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/codex_headless/engine_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/codex_headless/protocol.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/codex_headless/protocol_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/codex_re/engine.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/codex_re/engine_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/compact/budget.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/compact/budget_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/compact/collapse.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/compact/collapse_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/compact/interfaces.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/compact/microcompact.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/compact/microcompact_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/compact/orchestrator.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/compact/orchestrator_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/compact/prompt.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/compact/snip.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/compact/snip_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/customtools/customtools.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/customtools/customtools_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/codex.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/codex_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/compact_anthropic.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/compact_anthropic_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/compact_codex.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/compact_codex_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/compact_openrouter.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/compact_openrouter_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/engine.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/engine_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/integration_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/learnings.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/memory_extract.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/memory_extract_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/messages.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/messages_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/openrouter.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/openrouter_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/permission.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/permission_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/stream.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/stream_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/toolqueue.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/toolqueue_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/askuser.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/askuser_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/bash.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/bash_security.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/bash_security_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/bash_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/clipboard.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/clipboard_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/desktop_apps.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/desktop_apps_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/desktop_click.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/desktop_click_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/desktop_type.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/desktop_type_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/edit.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/edit_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/filestate.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/filestate_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/glob.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/glob_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/grep.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/grep_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/planmode.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/planmode_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/read.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/read_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/screenshot.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/screenshot_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/sendmessage.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/sendmessage_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/session_read.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/session_read_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/session_search.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/session_search_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/skill.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/skill_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/sleep.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/sleep_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/task.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/task_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/todowrite.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/todowrite_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/tool.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/tool_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/toolsearch.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/toolsearch_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/webfetch.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/webfetch_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/websearch.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/websearch_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/direct/tools/write.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/direct/tools/write_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/ember/checkpoint.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/ember/checkpoint_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/ember/ember.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/ember/ember_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/ember/taskqueue.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/ember/taskqueue_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/engine.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/engine_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/filewatch/watcher.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/filewatch/watcher_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/headless/protocol.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/headless/protocol_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/headless/server.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/headless/server_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/hooks/hooks.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/hooks/hooks_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/hooks/http.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/hooks/http_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/hooks/shell.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/hooks/shell_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/mcp/client.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/mcp/client_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/mcp/config.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/mcp/config_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/mcp/manager.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/mcp/manager_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/mcp/tool.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/mcp/tool_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/opencode/engine.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/opencode/engine_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/outputstyles/outputstyles.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/outputstyles/outputstyles_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/permissions/chain.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/permissions/chain_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/permissions/match.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/permissions/match_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/permissions/permissions.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/permissions/permissions_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/plugin/plugin.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/plugin/plugin_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/portability.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/portability_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/prompt.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/prompt_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/protocol.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/protocol_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/query/deps.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/query/executor.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/query/executor_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/query/loop.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/query/loop_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/query/state.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/session/bus.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/session/bus_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/skills/skills.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/skills/skills_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/subagent/anti_recursion.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/subagent/background.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/subagent/builtin.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/subagent/builtin_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/subagent/loader.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/subagent/loader_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/subagent/runner.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/subagent/runner_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/subagent/tools.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/subagent/tools_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/subagent/types.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/subagent/worktree.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/subagent/worktree_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/engine/tiers.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/engine/tiers_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/store/message.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/store/session.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/store/store.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/store/store_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/agent_tab.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/agent_tab_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/app.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/app_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/banner.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/banner_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/components/.gitkeep"
+    },
+    {
+      "path": "internal/ui/components/agentstatus.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/components/agentstatus_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/components/box.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/components/box_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/components/charm_adapters.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/components/charm_adapters_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/components/diff.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/components/diff_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/components/quote.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/components/quote_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/components/rewind.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/components/rewind_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/components/sanitize.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/components/sanitize_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/components/statusbar.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/components/statusbar_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/components/tablegrid.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/components/tablegrid_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/dashboard/dashboard.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/dashboard/dashboard_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/firstrun.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/firstrun_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/flameanim.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/flameanim_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/image.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/image_render.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/image_render_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/integration_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/keybindings.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/keys.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/keys_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/model_catalog.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/model_catalog_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/notification.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/notification_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/onboarding.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/panels/agents.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/panels/approvals.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/panels/compact.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/panels/errors.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/panels/files.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/panels/helpers.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/panels/hooks.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/panels/panels_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/panels/tasks.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/panels/tokens.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/picker/filepicker.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/picker/filepicker_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/spinner.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/spinner_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/styles.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/styles_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/transcript.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/transcript_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/tree/tree.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/tree/tree_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/viz.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/viz_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "internal/ui/worktree_index.go",
+      "desc": "Go source"
+    },
+    {
+      "path": "internal/ui/worktree_index_test.go",
+      "desc": "Go test"
+    },
+    {
+      "path": "scripts/pre-commit"
+    }
+  ],
+  "total": 268
+}

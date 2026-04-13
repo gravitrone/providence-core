@@ -131,6 +131,12 @@ type DirectEngine struct {
 	preExecMu      sync.Mutex
 	preExecWg      sync.WaitGroup
 
+	// Unattended retry mode: when true, 429/529 errors retry indefinitely
+	// (with max 5min backoff, 30s heartbeat, 6hr total cap) instead of
+	// giving up after maxRetries. Set by ember autonomous mode or
+	// PROVIDENCE_UNATTENDED_RETRY env var.
+	unattendedRetry bool
+
 	// Content replacement tracking: maps toolUseID -> original content for
 	// tool results that were compressed or cleared by microcompact/budget passes.
 	// Allows future restore if context re-expansion is needed.
@@ -410,6 +416,30 @@ func (e *DirectEngine) SessionBus() *session.Bus {
 // SetRegistry replaces the tool registry (for use before first Send).
 func (e *DirectEngine) SetRegistry(r *tools.Registry) {
 	e.registry = r
+}
+
+// SetUnattendedRetry enables or disables unattended retry mode.
+// When active, 429/529 errors retry indefinitely with max 5min backoff
+// and a 6hr total cap instead of giving up after maxRetries.
+func (e *DirectEngine) SetUnattendedRetry(on bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.unattendedRetry = on
+}
+
+// isUnattendedRetry returns true if unattended retry mode is active,
+// checking both the engine flag and the PROVIDENCE_UNATTENDED_RETRY env var.
+func (e *DirectEngine) isUnattendedRetry() bool {
+	e.mu.Lock()
+	flag := e.unattendedRetry
+	e.mu.Unlock()
+	if flag {
+		return true
+	}
+	if v := os.Getenv("PROVIDENCE_UNATTENDED_RETRY"); v != "" {
+		return v == "true" || v == "1"
+	}
+	return false
 }
 
 // EnableBackgroundAgents activates background agent processing. When enabled,
@@ -692,6 +722,29 @@ func (e *DirectEngine) MCPInstructions() string {
 		return ""
 	}
 	return e.mcpManager.GetInstructions()
+}
+
+// MCPServerInfo holds status information for a single MCP server.
+type MCPServerInfo struct {
+	Name      string
+	ToolCount int
+}
+
+// MCPStatus returns status information for all configured MCP servers.
+// Returns nil when no MCP manager is configured.
+func (e *DirectEngine) MCPStatus() []MCPServerInfo {
+	if e.mcpManager == nil {
+		return nil
+	}
+	allTools := e.mcpManager.GetAllTools()
+	out := make([]MCPServerInfo, 0, len(allTools))
+	for name, tools := range allTools {
+		out = append(out, MCPServerInfo{
+			Name:      name,
+			ToolCount: len(tools),
+		})
+	}
+	return out
 }
 
 // Status returns the current engine status (thread-safe).
@@ -1169,9 +1222,20 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			}
 		}
 
-		// Image error classification: detect image-specific API errors and
-		// show user-friendly messages with resize hints.
+		// Content error classification: detect PDF, multi-image, and image
+		// API errors and show user-friendly messages with actionable hints.
 		if streamErr != nil {
+			if contentMsg := classifyContentError(streamErr); contentMsg != "" {
+				e.events <- engine.ParsedEvent{
+					Type: "system_message",
+					Data: &engine.SystemMessageEvent{
+						Type:    "system_message",
+						Content: contentMsg,
+					},
+				}
+				e.emitError(fmt.Errorf("content error: %s", contentMsg))
+				return
+			}
 			if imgMsg := classifyImageError(streamErr); imgMsg != "" {
 				e.events <- engine.ParsedEvent{
 					Type: "system_message",
@@ -1691,22 +1755,44 @@ func streamIdleTimeout() time.Duration {
 	return 90 * time.Second
 }
 
+// unattendedMaxBackoff is the maximum delay between retries in unattended mode.
+const unattendedMaxBackoff = 5 * time.Minute
+
+// unattendedHeartbeat is how often keep-alive events are emitted during long waits.
+const unattendedHeartbeat = 30 * time.Second
+
+// unattendedTotalCap is the maximum total wall time for unattended retry loops.
+const unattendedTotalCap = 6 * time.Hour
+
 // streamWithRetry calls the Messages API with streaming, retrying on 429 rate
 // limit errors. Uses Retry-After header delay when available, falling back to
 // exponential backoff. Max retries configurable via PROVIDENCE_MAX_RETRIES (default 10).
+// When unattended retry mode is active (ember/autonomous), 429 and 529 errors
+// retry indefinitely with max 5min backoff, 30s heartbeat, and 6hr total cap.
 // A stream idle watchdog cancels the attempt if no events arrive within the
 // idle timeout (PROVIDENCE_STREAM_IDLE_TIMEOUT_MS, default 90000ms).
 // ReadOnly tools are pre-executed as their blocks complete during streaming.
 func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.MessageNewParams) (anthropic.Message, error) {
 	maxRetries := streamMaxRetries()
 	idleTimeout := streamIdleTimeout()
+	unattended := e.isUnattendedRetry()
+	startTime := time.Now()
 
 	// Reset pre-execution state for this streaming call.
 	e.preExecMu.Lock()
 	e.preExecResults = make(map[string]tools.ToolResult)
 	e.preExecMu.Unlock()
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := 0; ; attempt++ {
+		// In normal mode, enforce the max retry limit.
+		if !unattended && attempt >= maxRetries {
+			break
+		}
+		// In unattended mode, enforce the total time cap.
+		if unattended && time.Since(startTime) > unattendedTotalCap {
+			return anthropic.Message{}, fmt.Errorf("unattended retry cap reached (%s)", unattendedTotalCap)
+		}
+
 		// Create a child context so the idle watchdog can cancel just this attempt.
 		attemptCtx, attemptCancel := context.WithCancel(ctx)
 
@@ -1765,7 +1851,10 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 
 		if err := stream.Err(); err != nil {
 			// Idle watchdog fired - treat as a transient error and retry.
-			if idleTriggered && attempt < maxRetries-1 {
+			if idleTriggered {
+				if !unattended && attempt >= maxRetries-1 {
+					return accumulated, err
+				}
 				continue
 			}
 
@@ -1778,16 +1867,27 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 			}
 
 			errStr := err.Error()
-			if strings.Contains(errStr, "429") || strings.Contains(errStr, "rate_limit") {
-				if attempt < maxRetries-1 {
-					// Prefer server-provided Retry-After delay; fall back to exponential backoff.
+			isRateLimit := strings.Contains(errStr, "429") || strings.Contains(errStr, "rate_limit")
+			isOverload := isOverloadError(err)
+
+			if isRateLimit || (unattended && isOverload) {
+				canRetry := unattended || attempt < maxRetries-1
+				if canRetry {
 					delay := extractRetryDelay(err)
 					if delay == 0 {
 						delay = engine.Backoff(attempt)
 					}
+					// In unattended mode, cap backoff at 5 minutes.
+					if unattended && delay > unattendedMaxBackoff {
+						delay = unattendedMaxBackoff
+					}
 					delaySec := int(delay.Seconds())
 					if delaySec < 1 {
 						delaySec = 1
+					}
+					displayMax := maxRetries
+					if unattended {
+						displayMax = -1 // signals "indefinite" to UI
 					}
 					e.events <- engine.ParsedEvent{
 						Type: "rate_limit",
@@ -1795,10 +1895,10 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 							Type:     "rate_limit",
 							DelaySec: delaySec,
 							Attempt:  attempt + 1,
-							MaxRetry: maxRetries,
+							MaxRetry: displayMax,
 						},
 					}
-					time.Sleep(delay)
+					e.sleepWithHeartbeat(ctx, delay)
 					continue
 				}
 			}
@@ -1806,8 +1906,34 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 		}
 		return accumulated, nil
 	}
-	// Unreachable, but satisfies the compiler.
 	return anthropic.Message{}, fmt.Errorf("stream retry exhausted")
+}
+
+// sleepWithHeartbeat sleeps for the given duration, emitting keep-alive system
+// messages every unattendedHeartbeat so the TUI doesn't appear frozen.
+func (e *DirectEngine) sleepWithHeartbeat(ctx context.Context, total time.Duration) {
+	remaining := total
+	for remaining > 0 {
+		chunk := unattendedHeartbeat
+		if chunk > remaining {
+			chunk = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(chunk):
+		}
+		remaining -= chunk
+		if remaining > 0 {
+			e.events <- engine.ParsedEvent{
+				Type: "system_message",
+				Data: &engine.SystemMessageEvent{
+					Type:    "system_message",
+					Content: fmt.Sprintf("Waiting for rate limit... %s remaining", remaining.Round(time.Second)),
+				},
+			}
+		}
+	}
 }
 
 // maybePreExecuteTool checks if the tool_use block at the given index in the

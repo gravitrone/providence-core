@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 	"github.com/gravitrone/providence-core/internal/ui/dashboard"
+	"github.com/gravitrone/providence-core/internal/ui/panels"
 	"github.com/gravitrone/providence-core/internal/ui/picker"
 	"github.com/gravitrone/providence-core/internal/ui/tree"
 )
@@ -193,7 +195,7 @@ var slashCommands = []slashCommand{
 	{"/agents", "List built-in agent types"},
 	{"/permissions", "Manage permission rules (allow/deny/ask/reset)"},
 	{"/hooks", "Show hook configuration"},
-	{"/diff", "Show git diff --stat"},
+	{"/diff", "Show files changed this session (--git for git diff)"},
 	{"/plan", "Toggle plan mode (read-only tools)"},
 	{"/branch", "Fork conversation into a new session"},
 	{"/branches", "Show git branches"},
@@ -203,6 +205,11 @@ var slashCommands = []slashCommand{
 	{"/fork", "Fork N background agents from current context"},
 	{"/index", "Index worktree files and write .providence/worktree-index.json"},
 	{"/init", "Create CLAUDE.md in project root with detected project info"},
+	{"/exit", "Clean exit (alias /quit)"},
+	{"/quit", "Clean exit (alias /exit)"},
+	{"/copy", "Copy last assistant response to clipboard"},
+	{"/context", "Show context usage bar"},
+	{"/mcp", "List connected MCP servers with status"},
 	{"/help", "Show available commands"},
 }
 
@@ -426,8 +433,18 @@ type AgentTab struct {
 	// Turn tracking: counts user turns for status bar display.
 	turnCount int
 
+	// Per-turn file diff tracking: populated from Edit/Write tool results.
+	turnDiffs []TurnDiff
+
 	// Error message expansion: per-message-index toggle for long error messages.
 	errorExpanded map[int]bool
+}
+
+// TurnDiff records a file modification that happened during a conversation turn.
+type TurnDiff struct {
+	Turn     int
+	FilePath string
+	ToolName string // "Edit" or "Write"
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -4309,7 +4326,7 @@ func resolveModelAlias(input string) (string, bool) {
 }
 
 // trackToolFile extracts file path info from a tool_use event and updates the
-// dashboard FILES panel. Supports Read, Write, Edit, Glob, Grep, Bash tools.
+// dashboard FILES panel and per-turn diff tracking. Supports Read, Write, Edit.
 func (at *AgentTab) trackToolFile(toolName string, input any) {
 	m, ok := input.(map[string]any)
 	if !ok {
@@ -4323,10 +4340,20 @@ func (at *AgentTab) trackToolFile(toolName string, input any) {
 	case "Write":
 		if p, ok := m["file_path"].(string); ok {
 			at.dashboard.AddFile(p, "write")
+			at.turnDiffs = append(at.turnDiffs, TurnDiff{
+				Turn:     at.turnCount,
+				FilePath: p,
+				ToolName: "Write",
+			})
 		}
 	case "Edit":
 		if p, ok := m["file_path"].(string); ok {
 			at.dashboard.AddFile(p, "edit")
+			at.turnDiffs = append(at.turnDiffs, TurnDiff{
+				Turn:     at.turnCount,
+				FilePath: p,
+				ToolName: "Edit",
+			})
 		}
 	}
 }
@@ -4796,9 +4823,15 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			// Toggle ember mode.
 			if at.ember.ShouldTick() || at.ember.Active {
 				at.ember.Deactivate()
+				if de, ok := at.engine.(*direct.DirectEngine); ok {
+					de.SetUnattendedRetry(false)
+				}
 				at.addSystemMessage("Ember autonomous mode deactivated")
 			} else {
 				at.ember.Activate()
+				if de, ok := at.engine.(*direct.DirectEngine); ok {
+					de.SetUnattendedRetry(true)
+				}
 				at.addSystemMessage("Ember autonomous mode activated - ticks will fire after each turn")
 			}
 		} else {
@@ -5107,13 +5140,44 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		return true, nil
 
 	case "/diff":
-		out, err := exec.Command("git", "diff", "--stat").Output()
-		if err != nil {
-			at.addSystemMessage("No git changes")
-		} else if len(strings.TrimSpace(string(out))) == 0 {
-			at.addSystemMessage("Working tree clean")
+		if strings.TrimSpace(args) == "--git" {
+			// Legacy behavior: actual git diff --stat.
+			out, err := exec.Command("git", "diff", "--stat").Output()
+			if err != nil {
+				at.addSystemMessage("No git changes")
+			} else if len(strings.TrimSpace(string(out))) == 0 {
+				at.addSystemMessage("Working tree clean")
+			} else {
+				at.addSystemMessage(string(out))
+			}
 		} else {
-			at.addSystemMessage(string(out))
+			// Per-turn file tracking for this session.
+			if len(at.turnDiffs) == 0 {
+				at.addSystemMessage("No files changed this session.\nUse /diff --git for git diff --stat.")
+			} else {
+				// Group diffs by turn.
+				turnMap := make(map[int][]TurnDiff)
+				for _, d := range at.turnDiffs {
+					turnMap[d.Turn] = append(turnMap[d.Turn], d)
+				}
+				// Collect and sort turn numbers.
+				turns := make([]int, 0, len(turnMap))
+				for t := range turnMap {
+					turns = append(turns, t)
+				}
+				sort.Ints(turns)
+				var b strings.Builder
+				b.WriteString("Files changed this session:\n\n")
+				for _, t := range turns {
+					diffs := turnMap[t]
+					for _, d := range diffs {
+						b.WriteString(fmt.Sprintf("  Turn %d: %s %s\n", d.Turn, strings.ToLower(d.ToolName), d.FilePath))
+					}
+				}
+				b.WriteString(fmt.Sprintf("\n%d file operations across %d turns", len(at.turnDiffs), len(turns)))
+				b.WriteString("\nUse /diff --git for git diff --stat")
+				at.addSystemMessage(b.String())
+			}
 		}
 		at.refreshViewport()
 		return true, nil
@@ -5619,6 +5683,66 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			return true, nil
 		}
 		at.addSystemMessage("Tagged: " + args)
+		at.refreshViewport()
+		return true, nil
+
+	case "/exit", "/quit":
+		// Clean shutdown: close engine, exit process.
+		if at.engine != nil {
+			at.engine.Close()
+		}
+		return true, tea.Quit
+
+	case "/copy":
+		// Copy the last assistant response to clipboard via pbcopy.
+		var lastAssistant string
+		for i := len(at.messages) - 1; i >= 0; i-- {
+			if at.messages[i].Role == "assistant" && at.messages[i].Content != "" {
+				lastAssistant = at.messages[i].Content
+				break
+			}
+		}
+		if lastAssistant == "" {
+			at.addSystemMessage("No assistant response to copy")
+		} else {
+			cmd := exec.Command("pbcopy")
+			cmd.Stdin = strings.NewReader(lastAssistant)
+			if err := cmd.Run(); err != nil {
+				at.addSystemMessage("Copy failed: " + err.Error())
+			} else {
+				at.addSystemMessage(fmt.Sprintf("Copied %d bytes to clipboard", len(lastAssistant)))
+			}
+		}
+		at.refreshViewport()
+		return true, nil
+
+	case "/context":
+		// Show context usage as a simple bar (reuses tokens panel logic).
+		ctxWindow := engine.ContextWindowFor(at.model)
+		bar := panels.RenderTokens(at.currentTokens, ctxWindow, 50)
+		at.addSystemMessage(bar)
+		at.refreshViewport()
+		return true, nil
+
+	case "/mcp":
+		// List connected MCP servers with status.
+		de, ok := at.engine.(*direct.DirectEngine)
+		if !ok || de == nil {
+			at.addSystemMessage("MCP servers only available with direct engine")
+			at.refreshViewport()
+			return true, nil
+		}
+		servers := de.MCPStatus()
+		if len(servers) == 0 {
+			at.addSystemMessage("No MCP servers connected")
+		} else {
+			var b strings.Builder
+			b.WriteString("MCP Servers:\n\n")
+			for _, s := range servers {
+				b.WriteString(fmt.Sprintf("  %s - %d tools\n", s.Name, s.ToolCount))
+			}
+			at.addSystemMessage(b.String())
+		}
 		at.refreshViewport()
 		return true, nil
 

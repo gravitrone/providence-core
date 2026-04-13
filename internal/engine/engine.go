@@ -25,7 +25,8 @@ const (
 // EngineConfig holds creation parameters for any engine.
 type EngineConfig struct {
 	Type         EngineType
-	SystemPrompt string
+	SystemPrompt string         // Legacy: flat string for subagents, tests, headless.
+	SystemBlocks []SystemBlock  // Preferred: structured blocks with cache metadata.
 	AllowedTools []string
 	Model        string
 	APIKey       string

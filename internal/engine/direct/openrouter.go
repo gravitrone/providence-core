@@ -124,15 +124,19 @@ func buildOpenRouterTools(registry *tools.Registry) []openrouterTool {
 // buildOpenRouterMessages converts internal history to OpenAI chat messages.
 // A system message is prepended when non-empty.
 func buildOpenRouterMessages(system string, history []openrouterHistoryEntry) []openrouterMessage {
-	return buildOpenRouterMessagesForModel("", system, history)
+	return buildOpenRouterMessagesWithBlocks("", nil, system, history)
 }
 
 func buildOpenRouterMessagesForModel(model string, system string, history []openrouterHistoryEntry) []openrouterMessage {
+	return buildOpenRouterMessagesWithBlocks(model, nil, system, history)
+}
+
+func buildOpenRouterMessagesWithBlocks(model string, blocks []engine.SystemBlock, system string, history []openrouterHistoryEntry) []openrouterMessage {
 	msgs := make([]openrouterMessage, 0, len(history)+1)
-	if system != "" {
+	if system != "" || len(blocks) > 0 {
 		msgs = append(msgs, openrouterMessage{
 			Role:    "system",
-			Content: buildOpenRouterSystemContent(model, system),
+			Content: buildOpenRouterSystemContentFromBlocks(model, blocks, system),
 		})
 	}
 	for _, entry := range history {
@@ -193,17 +197,20 @@ func compressOpenRouterToolResults(msgs []openrouterMessage, minLen int) int {
 	return compressed
 }
 
-func buildOpenRouterSystemContent(model string, system string) any {
+// buildOpenRouterSystemContentFromBlocks converts structured blocks to OpenRouter
+// content array with cache control on the last cacheable block.
+// For Anthropic models via OpenRouter, returns structured content blocks.
+// For other models, returns the flat string.
+func buildOpenRouterSystemContentFromBlocks(model string, blocks []engine.SystemBlock, flat string) any {
 	if !strings.HasPrefix(model, "anthropic/") {
-		return system
+		return flat
 	}
 
-	blocks := engine.BuildSystemBlocks(nil)
-	if system != engine.BuildSystemPrompt(nil) {
-		blocks = []engine.SystemBlock{{
-			Text:      system,
-			Cacheable: true,
-		}}
+	if len(blocks) == 0 {
+		if flat == "" {
+			return flat
+		}
+		blocks = []engine.SystemBlock{{Text: flat, Cacheable: true}}
 	}
 
 	content := make([]openrouterSystemContentBlock, 0, len(blocks))
@@ -221,7 +228,7 @@ func buildOpenRouterSystemContent(model string, system string) any {
 		}
 	}
 	if len(content) == 0 {
-		return system
+		return flat
 	}
 	if lastCacheable >= 0 {
 		content[lastCacheable].CacheControl = &openrouterCacheControl{Type: "ephemeral"}
@@ -248,7 +255,7 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 
 		reqBody := openrouterRequest{
 			Model:         e.model,
-			Messages:      buildOpenRouterMessagesForModel(e.model, e.system, e.openrouterHistory),
+			Messages:      buildOpenRouterMessagesWithBlocks(e.model, e.blocks, e.system, e.openrouterHistory),
 			Stream:        true,
 			StreamOptions: &openrouterStreamOptions{IncludeUsage: true},
 			Tools:         buildOpenRouterTools(e.registry),

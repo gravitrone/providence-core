@@ -68,6 +68,9 @@ type DirectEngine struct {
 	// for this turn, preventing infinite fallback loops.
 	fallbackActive bool
 
+	// Structured system prompt blocks (preferred over e.system).
+	blocks []engine.SystemBlock
+
 	// Per-session TodoWrite tool instance.
 	todoTool *tools.TodoWriteTool
 
@@ -171,10 +174,22 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		providerName = engine.ProviderOpenRouter
 	}
 
+	// Resolve system prompt: prefer structured blocks, fall back to flat string.
+	sysBlocks := cfg.SystemBlocks
+	sysFlat := cfg.SystemPrompt
+	if len(sysBlocks) == 0 && sysFlat != "" {
+		// Legacy path: wrap flat string as a single cacheable block.
+		sysBlocks = []engine.SystemBlock{{Text: sysFlat, Cacheable: true}}
+	}
+	if sysFlat == "" && len(sysBlocks) > 0 {
+		sysFlat = engine.FlattenBlocks(sysBlocks)
+	}
+
 	e := &DirectEngine{
 		client:           client,
 		model:            model,
-		system:           cfg.SystemPrompt,
+		system:           sysFlat,
+		blocks:           sysBlocks,
 		events:           make(chan engine.ParsedEvent, 64),
 		history:          history,
 		registry:         registry,
@@ -960,16 +975,17 @@ func (e *DirectEngine) toolParams() []anthropic.ToolUnionParam {
 }
 
 // systemBlocks returns the system prompt as TextBlockParam slice.
+// Uses pre-computed e.blocks directly - no comparison hack needed.
 func (e *DirectEngine) systemBlocks() []anthropic.TextBlockParam {
-	if e.system == "" {
+	if len(e.blocks) == 0 && e.system == "" {
 		return nil
 	}
 
-	systemPrompt := e.system
-	blocks := engine.BuildSystemBlocks(nil)
-	if systemPrompt != engine.BuildSystemPrompt(nil) {
+	blocks := e.blocks
+	if len(blocks) == 0 {
+		// Fallback for engines created without structured blocks.
 		blocks = []engine.SystemBlock{{
-			Text:      systemPrompt,
+			Text:      e.system,
 			Cacheable: true,
 		}}
 	}

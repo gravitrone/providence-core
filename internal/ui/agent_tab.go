@@ -4778,42 +4778,43 @@ func isOpenRouterModel(model string) bool {
 	return spec != nil && spec.Provider == "openrouter"
 }
 
-// buildSystemPromptWithStyle builds the system prompt, prepends the active
-// output style if configured, and appends discovered CLAUDE.md/AGENTS.md
-// instruction files plus system reminders.
-func buildSystemPromptWithStyle(outputStyleName string) string {
-	base := engine.BuildSystemPrompt(nil)
+// buildSystemBlocks assembles a PromptConfig from the active output style,
+// discovered instruction files, and environment context, then returns the
+// full set of structured SystemBlocks for prompt caching.
+func buildSystemBlocks(outputStyleName, model string) []engine.SystemBlock {
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
 
-	// Prepend output style if configured.
+	var styleName, stylePrompt string
 	if outputStyleName != "" {
-		cwd, _ := os.Getwd()
-		home, _ := os.UserHomeDir()
 		styles, err := outputstyles.LoadOutputStyles(cwd, home)
 		if err == nil {
 			for _, s := range styles {
 				if s.Name == outputStyleName && s.Prompt != "" {
-					base = s.Prompt + "\n\n" + base
+					styleName = s.Name
+					stylePrompt = s.Prompt
 					break
 				}
 			}
 		}
 	}
 
-	// Discover and inject CLAUDE.md, AGENTS.md, .claude/rules/*.md.
-	cwd, _ := os.Getwd()
-	home, _ := os.UserHomeDir()
-	instructionFiles := engine.DiscoverInstructionFiles(cwd, home)
-	if injection := engine.FormatInstructionInjection(instructionFiles); injection != "" {
-		base = base + "\n\n" + injection
+	cfg := &engine.PromptConfig{
+		OutputStyle:      styleName,
+		OutputStylePrompt: stylePrompt,
+		EnvInfo:          engine.ComputeEnvInfo("", model),
+		InstructionFiles: engine.DiscoverInstructionFiles(cwd, home),
+		Reminders:        engine.ReminderState{},
 	}
 
-	// Append system reminders (date, plan mode, etc).
-	reminders := engine.BuildSystemReminders(engine.ReminderState{})
-	if reminders != "" {
-		base = base + "\n\n" + reminders
-	}
+	return engine.BuildSystemBlocks(cfg)
+}
 
-	return base
+// buildSystemPromptWithStyle builds the system prompt as a flat string.
+// Kept for backward compatibility with claude headless engine.
+func buildSystemPromptWithStyle(outputStyleName string) string {
+	blocks := buildSystemBlocks(outputStyleName, "")
+	return engine.FlattenBlocks(blocks)
 }
 
 // createEngineAndSend spawns a new engine session and sends the first prompt.
@@ -4828,9 +4829,11 @@ func createEngineAndSend(prompt, model string, engineType engine.EngineType, out
 
 		wd, _ := os.Getwd()
 
+		blocks := buildSystemBlocks(outputStyle, model)
 		cfg := engine.EngineConfig{
 			Type:         engineType,
-			SystemPrompt: buildSystemPromptWithStyle(outputStyle),
+			SystemBlocks: blocks,
+			SystemPrompt: engine.FlattenBlocks(blocks), // backward compat for claude headless
 			AllowedTools: allowedTools,
 			Model:        model,
 			APIKey:       os.Getenv("ANTHROPIC_API_KEY"),
@@ -4877,9 +4880,11 @@ func createEngineAndRestore(restored []engine.RestoredMessage, model string, eng
 
 		wd, _ := os.Getwd()
 
+		blocks := buildSystemBlocks(outputStyle, model)
 		cfg := engine.EngineConfig{
 			Type:         engineType,
-			SystemPrompt: buildSystemPromptWithStyle(outputStyle),
+			SystemBlocks: blocks,
+			SystemPrompt: engine.FlattenBlocks(blocks),
 			AllowedTools: allowedTools,
 			Model:        model,
 			APIKey:       os.Getenv("ANTHROPIC_API_KEY"),

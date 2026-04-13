@@ -202,17 +202,21 @@ func (m *Model) View(width, height, flameFrame int) string {
 	}
 
 	// Wrap each line with side borders and pad to innerW.
+	// Each body line gets: "│" + content padded to innerW + "│"
 	var out strings.Builder
 	out.WriteString(topLine + "\n")
 	for _, line := range bodyLines {
 		lineW := lipgloss.Width(line)
-		pad := innerW - lineW
+		contentW := innerW
+		if lineW > contentW {
+			line = truncateToWidth(line, contentW)
+			lineW = contentW
+		}
+		pad := contentW - lineW
 		if pad < 0 {
 			pad = 0
-			// Truncate line to innerW.
-			line = truncateToWidth(line, innerW)
 		}
-		out.WriteString(bc.Render("│") + " " + line + strings.Repeat(" ", pad-1) + bc.Render("│") + "\n")
+		out.WriteString(bc.Render("│") + line + strings.Repeat(" ", pad) + bc.Render("│") + "\n")
 	}
 	out.WriteString(bottomLine)
 

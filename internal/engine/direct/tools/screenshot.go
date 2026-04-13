@@ -27,6 +27,11 @@ func (t *ScreenshotTool) Description() string {
 }
 func (t *ScreenshotTool) ReadOnly() bool { return true }
 
+// Prompt implements ToolPrompter.
+func (t *ScreenshotTool) Prompt() string {
+	return `Capture the screen or a region and return the image as base64. Use the Read tool to view the resulting image. Take a screenshot before any DesktopClick to verify the target coordinates.`
+}
+
 func (t *ScreenshotTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",

@@ -32,6 +32,32 @@ func (t *TodoWriteTool) Description() string {
 }
 func (t *TodoWriteTool) ReadOnly() bool { return false }
 
+// Prompt implements ToolPrompter with CC-parity guidance for todo tracking.
+func (t *TodoWriteTool) Prompt() string {
+	return `Use this tool to create and manage a structured task list for your current session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
+
+When to use:
+- Complex multi-step tasks (3+ distinct steps)
+- Non-trivial tasks requiring careful planning
+- User explicitly requests todo list
+- User provides multiple tasks (numbered or comma-separated)
+- After receiving new instructions - capture requirements as todos immediately
+- Mark tasks in_progress BEFORE beginning work. Only one task in_progress at a time.
+- Mark tasks completed IMMEDIATELY after finishing, not in batches.
+
+When NOT to use:
+- Single, straightforward task
+- Trivial task completable in under 3 steps
+- Purely conversational or informational response
+
+Task states: pending, in_progress, completed.
+Task descriptions must have two forms:
+- content: imperative form ("Run tests", "Build the project")
+- activeForm: present continuous form shown during execution ("Running tests", "Building the project")
+
+ONLY mark a task completed when FULLY accomplished. If you hit errors or blockers, keep as in_progress.`
+}
+
 func (t *TodoWriteTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",

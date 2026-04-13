@@ -25,6 +25,11 @@ func (t *DesktopAppsTool) Description() string {
 }
 func (t *DesktopAppsTool) ReadOnly() bool { return true }
 
+// Prompt implements ToolPrompter.
+func (t *DesktopAppsTool) Prompt() string {
+	return `List running applications, focus an app by name, or launch a new app. macOS only. Use for computer-use workflows that need to switch between apps.`
+}
+
 func (t *DesktopAppsTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",

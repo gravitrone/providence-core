@@ -1,6 +1,9 @@
 package tools
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // ToolResult is the output of a tool execution.
 type ToolResult struct {
@@ -16,6 +19,13 @@ type Tool interface {
 	InputSchema() map[string]any // JSON Schema as Go map
 	ReadOnly() bool              // true = safe for parallel execution
 	Execute(ctx context.Context, input map[string]any) ToolResult
+}
+
+// ToolPrompter is an optional interface tools can implement to provide
+// detailed guidance text injected into the system prompt alongside the tool schema.
+// Modeled after CC's per-tool prompt system.
+type ToolPrompter interface {
+	Prompt() string
 }
 
 // Registry holds a set of named tools.
@@ -50,6 +60,46 @@ func (r *Registry) All() []Tool {
 		out = append(out, t)
 	}
 	return out
+}
+
+// CollectToolPrompts iterates all registered tools and concatenates the Prompt()
+// output from those implementing ToolPrompter. The result is a single string
+// suitable for injection into the system prompt.
+func CollectToolPrompts(reg *Registry) string {
+	var parts []string
+	for _, t := range reg.All() {
+		if p, ok := t.(ToolPrompter); ok {
+			if text := p.Prompt(); text != "" {
+				parts = append(parts, "## "+t.Name()+"\n\n"+text)
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "# Tool Guidance\n\n" + strings.Join(parts, "\n\n")
+}
+
+// DefaultToolPrompts returns the collected tool prompt text using a minimal
+// set of core tools. This is safe to call without runtime dependencies
+// (no FileState, no subagent.Runner, no macos.Bridge needed) because Prompt()
+// methods only return static text.
+func DefaultToolPrompts() string {
+	fs := NewFileState()
+	prompters := []Tool{
+		NewReadTool(fs),
+		NewWriteTool(fs),
+		NewEditTool(fs),
+		&BashTool{},
+		&GlobTool{},
+		&GrepTool{},
+		NewTodoWriteTool(),
+		NewAskUserQuestionTool(nil),
+		NewSkillTool(),
+		SleepTool{},
+	}
+	reg := NewRegistry(prompters...)
+	return CollectToolPrompts(reg)
 }
 
 // -- type-safe param helpers --

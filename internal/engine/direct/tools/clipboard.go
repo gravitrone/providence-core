@@ -24,6 +24,11 @@ func (t *ClipboardTool) Description() string {
 }
 func (t *ClipboardTool) ReadOnly() bool { return false }
 
+// Prompt implements ToolPrompter.
+func (t *ClipboardTool) Prompt() string {
+	return `Read or write the system clipboard (macOS only). Use action "read" to get current clipboard contents, "write" to set new contents.`
+}
+
 func (t *ClipboardTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",

@@ -24,6 +24,11 @@ func (t *DesktopTypeTool) Description() string {
 }
 func (t *DesktopTypeTool) ReadOnly() bool { return false }
 
+// Prompt implements ToolPrompter.
+func (t *DesktopTypeTool) Prompt() string {
+	return `Type text at the current cursor position or send a keyboard shortcut (e.g. command+v). Use after DesktopClick to interact with GUI applications.`
+}
+
 func (t *DesktopTypeTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",

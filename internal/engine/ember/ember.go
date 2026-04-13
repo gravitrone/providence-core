@@ -1,4 +1,4 @@
-package kairos
+package ember
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// State tracks the kairos autonomous loop state.
+// State tracks the ember autonomous loop state.
 type State struct {
 	Active     bool
 	Paused     bool
@@ -23,12 +23,12 @@ type State struct {
 // session "unfocused" (autonomous mode).
 const FocusTimeout = 5 * time.Minute
 
-// New creates a new kairos state with defaults.
+// New creates a new ember state with defaults.
 func New() *State {
 	return &State{FocusState: "unknown"}
 }
 
-// Activate enables kairos mode.
+// Activate enables ember mode.
 func (s *State) Activate() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -36,7 +36,7 @@ func (s *State) Activate() {
 	s.Paused = false
 }
 
-// Deactivate disables kairos mode.
+// Deactivate disables ember mode.
 func (s *State) Deactivate() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -95,7 +95,7 @@ func (s *State) UpdateFocus() {
 	}
 }
 
-// Status returns a human-readable summary of the current kairos state.
+// Status returns a human-readable summary of the current ember state.
 func (s *State) Status() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -112,7 +112,7 @@ func (s *State) Status() string {
 		lastTick = s.LastTickAt.Format("3:04:05 PM")
 	}
 
-	return fmt.Sprintf("kairos: %s | focus: %s | ticks: %d | last tick: %s",
+	return fmt.Sprintf("ember: %s | focus: %s | ticks: %d | last tick: %s",
 		stateStr, s.FocusState, s.TickCount, lastTick)
 }
 

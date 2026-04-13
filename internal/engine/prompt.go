@@ -24,8 +24,8 @@ type PromptConfig struct {
 	OutputStylePrompt string
 	// EnvInfo is computed environment context (CWD, platform, model, etc).
 	EnvInfo *EnvInfo
-	// KairosActive enables the full Kairos autonomous protocol.
-	KairosActive bool
+	// EmberActive enables the full Ember autonomous protocol.
+	EmberActive bool
 	// InstructionFiles are discovered CLAUDE.md/AGENTS.md/rules files.
 	InstructionFiles []InstructionFile
 	// Reminders holds system reminder state (date, plan mode, todos).
@@ -136,13 +136,13 @@ func BuildSystemBlocks(cfg *PromptConfig) []SystemBlock {
 		Cacheable: true,
 	})
 
-	// 8. Kairos Protocol (always present for cache stability, content gated)
-	kairosActive := false
+	// 8. Ember Protocol (always present for cache stability, content gated)
+	emberActive := false
 	if cfg != nil {
-		kairosActive = cfg.KairosActive
+		emberActive = cfg.EmberActive
 	}
 	blocks = append(blocks, SystemBlock{
-		Text:      kairosProtocol(kairosActive),
+		Text:      emberProtocol(emberActive),
 		Cacheable: true,
 	})
 
@@ -328,16 +328,16 @@ func gitSafety() string {
  - Never add co-author tags to commits.`
 }
 
-func kairosProtocol(active bool) string {
+func emberProtocol(active bool) string {
 	if !active {
-		return `# Kairos
+		return `# Ember
 
-Kairos autonomous mode is currently inactive. When activated, you will receive <tick> heartbeat messages and operate independently with bias toward action. For now, operate in collaborative mode: ask before taking significant actions.`
+Ember autonomous mode is currently inactive. When activated, you will receive <tick> heartbeat messages and operate independently with bias toward action. For now, operate in collaborative mode: ask before taking significant actions.`
 	}
 
-	return `# Kairos
+	return `# Ember
 
-You are operating in Kairos autonomous mode. Key protocol:
+You are operating in Ember autonomous mode. Key protocol:
 
  - <tick> messages are heartbeats. When multiple arrive during a tool call, process only the latest.
  - Use the Sleep tool for pacing. Cache-aware: sleeping >5 minutes causes a prompt cache miss, so prefer shorter intervals.

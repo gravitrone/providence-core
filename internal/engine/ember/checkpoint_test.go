@@ -1,4 +1,4 @@
-package kairos
+package ember
 
 import (
 	"os"
@@ -20,7 +20,7 @@ func TestSaveLoadCheckpoint(t *testing.T) {
 		TurnCount:   42,
 		TokenCount:  8192,
 		LastTaskID:  "task-7",
-		KairosState: "active",
+		EmberState: "active",
 		CreatedAt:   time.Now().Truncate(time.Second),
 	}
 
@@ -42,7 +42,7 @@ func TestSaveLoadCheckpoint(t *testing.T) {
 	assert.Equal(t, cp.TurnCount, loaded.TurnCount)
 	assert.Equal(t, cp.TokenCount, loaded.TokenCount)
 	assert.Equal(t, cp.LastTaskID, loaded.LastTaskID)
-	assert.Equal(t, cp.KairosState, loaded.KairosState)
+	assert.Equal(t, cp.EmberState, loaded.EmberState)
 	// Time comparison with truncation to avoid nanosecond mismatch.
 	assert.Equal(t, cp.CreatedAt.Unix(), loaded.CreatedAt.Unix())
 }
@@ -59,7 +59,7 @@ func TestClearCheckpoint(t *testing.T) {
 
 	cp := Checkpoint{
 		SessionID:   "sess-456",
-		KairosState: "paused",
+		EmberState: "paused",
 		CreatedAt:   time.Now(),
 	}
 	require.NoError(t, SaveCheckpoint(dir, cp))

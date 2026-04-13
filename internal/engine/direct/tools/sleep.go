@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// SleepTool pauses the kairos loop for a specified duration.
+// SleepTool pauses the ember loop for a specified duration.
 // Prefer this over Bash(sleep) - doesn't hold a shell process.
 // Cache-aware: sleeping >5min forces cache miss on next wake.
 type SleepTool struct{}

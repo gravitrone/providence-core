@@ -1,4 +1,4 @@
-package kairos
+package ember
 
 import (
 	"os"

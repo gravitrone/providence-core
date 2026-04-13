@@ -31,7 +31,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/customtools"
 	"github.com/gravitrone/providence-core/internal/engine/direct"       // register direct factory + image types
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools" // tool prompts
-	"github.com/gravitrone/providence-core/internal/engine/kairos"
+	"github.com/gravitrone/providence-core/internal/engine/ember"
 	"github.com/gravitrone/providence-core/internal/engine/outputstyles"
 	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
 	"github.com/gravitrone/providence-core/internal/engine/skills"
@@ -165,7 +165,7 @@ var slashCommands = []slashCommand{
 	{"/dashboard", "Toggle dashboard panel (or: pin, hide)"},
 	{"/tree", "Toggle conversation tree view"},
 	{"/clear", "Clear chat history"},
-	{"/kairos", "Toggle kairos autonomous mode"},
+	{"/ember", "Toggle ember autonomous mode"},
 	{"/cost", "Show token usage and context window"},
 	{"/doctor", "Health check (Go, OS, API keys, engine)"},
 	{"/stats", "Session statistics (messages, tokens)"},
@@ -330,8 +330,8 @@ type AgentTab struct {
 	// Context portability: pending state to restore after engine switch.
 	pendingPortableState *engine.ConversationState
 
-	// Kairos autonomous mode state.
-	kairos *kairos.State
+	// Ember autonomous mode state.
+	ember *ember.State
 
 	// Notification toast system.
 	notifications NotificationModel
@@ -443,7 +443,7 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		tab:       tabChat,
 		tabSpring: harmonica.NewSpring(harmonica.FPS(60), 10.0, 1.0),
 		dashboard:        dashboard.New(),
-		kairos:           kairos.New(),
+		ember:            ember.New(),
 		discoveredSkills: discoveredSkills,
 		customAgents:     customAgents,
 		customTools:      customTools,
@@ -1096,9 +1096,9 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		// Transfer images to engine before sending.
 		at.transferImagesToEngine()
 
-		// Track user activity for kairos focus detection.
-		if at.kairos != nil {
-			at.kairos.RecordUserMessage()
+		// Track user activity for ember focus detection.
+		if at.ember != nil {
+			at.ember.RecordUserMessage()
 		}
 
 		// Send to existing session.
@@ -1835,9 +1835,9 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 			at.spinnerStart = time.Now()
 			at.spinnerLastVerb = time.Now()
 			at.refreshViewport()
-			// Track user activity for kairos focus detection.
-			if at.kairos != nil {
-				at.kairos.RecordUserMessage()
+			// Track user activity for ember focus detection.
+			if at.ember != nil {
+				at.ember.RecordUserMessage()
 			}
 			if err := at.engine.Send(text); err != nil {
 				at.addSystemMessage(fmt.Sprintf("send error: %s", err))
@@ -1848,13 +1848,13 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 			return at, tea.Batch(at.safeWaitForEvent(), spinnerTick())
 		}
 
-		// Kairos tick injection: after turn completes, fire next tick.
-		if at.kairos != nil && at.kairos.ShouldTick() {
-			at.kairos.RecordTick()
-			tickMsg := kairos.GenerateTick()
+		// Ember tick injection: after turn completes, fire next tick.
+		if at.ember != nil && at.ember.ShouldTick() {
+			at.ember.RecordTick()
+			tickMsg := ember.GenerateTick()
 			go func() {
 				time.Sleep(100 * time.Millisecond)
-				if at.engine != nil && at.kairos.ShouldTick() {
+				if at.engine != nil && at.ember.ShouldTick() {
 					at.engine.Send(tickMsg)
 				}
 			}()
@@ -4342,28 +4342,28 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		at.messagesDirty = true
 		at.refreshViewport()
 		return true, nil
-	case "/kairos":
+	case "/ember":
 		if args == "" {
-			// Toggle kairos mode.
-			if at.kairos.ShouldTick() || at.kairos.Active {
-				at.kairos.Deactivate()
-				at.addSystemMessage("Kairos autonomous mode deactivated")
+			// Toggle ember mode.
+			if at.ember.ShouldTick() || at.ember.Active {
+				at.ember.Deactivate()
+				at.addSystemMessage("Ember autonomous mode deactivated")
 			} else {
-				at.kairos.Activate()
-				at.addSystemMessage("Kairos autonomous mode activated - ticks will fire after each turn")
+				at.ember.Activate()
+				at.addSystemMessage("Ember autonomous mode activated - ticks will fire after each turn")
 			}
 		} else {
 			switch strings.TrimSpace(args) {
 			case "status":
-				at.addSystemMessage(at.kairos.Status())
+				at.addSystemMessage(at.ember.Status())
 			case "pause":
-				at.kairos.Pause()
-				at.addSystemMessage("Kairos paused - ticks suspended")
+				at.ember.Pause()
+				at.addSystemMessage("Ember paused - ticks suspended")
 			case "resume":
-				at.kairos.Resume()
-				at.addSystemMessage("Kairos resumed - ticks active")
+				at.ember.Resume()
+				at.addSystemMessage("Ember resumed - ticks active")
 			default:
-				at.addSystemMessage("Usage: /kairos [status|pause|resume]")
+				at.addSystemMessage("Usage: /ember [status|pause|resume]")
 			}
 		}
 		at.refreshViewport()

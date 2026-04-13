@@ -1,4 +1,4 @@
-package kairos
+package ember
 
 import (
 	"encoding/json"
@@ -15,7 +15,7 @@ type Checkpoint struct {
 	TurnCount   int       `json:"turn_count"`
 	TokenCount  int       `json:"token_count"`
 	LastTaskID  string    `json:"last_task_id"`
-	KairosState string    `json:"kairos_state"` // active, paused
+	EmberState  string    `json:"ember_state"` // active, paused
 	CreatedAt   time.Time `json:"created_at"`
 }
 

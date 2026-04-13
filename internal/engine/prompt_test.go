@@ -65,7 +65,7 @@ func TestBuildSystemBlocksWithConfigHasDynamicBlocks(t *testing.T) {
 
 func TestBuildSystemBlocksSection9StaticBlocks(t *testing.T) {
 	blocks := BuildSystemBlocks(nil)
-	// Should have exactly 9 static blocks (identity, system, actions, tools, coding, output, git, kairos, viz).
+	// Should have exactly 9 static blocks (identity, system, actions, tools, coding, output, git, ember, viz).
 	assert.Equal(t, 9, len(blocks), "expected 9 static blocks, got %d", len(blocks))
 }
 
@@ -81,7 +81,7 @@ func TestBuildSystemBlocksSectionOrder(t *testing.T) {
 	assert.Contains(t, blocks[4].Text, "Doing tasks", "block 4: coding guidelines")
 	assert.Contains(t, blocks[5].Text, "Output efficiency", "block 5: output efficiency")
 	assert.Contains(t, blocks[6].Text, "Git safety", "block 6: git safety")
-	assert.Contains(t, blocks[7].Text, "Kairos", "block 7: kairos protocol")
+	assert.Contains(t, blocks[7].Text, "Ember", "block 7: ember protocol")
 	assert.Contains(t, blocks[8].Text, "providence-viz", "block 8: viz examples")
 }
 
@@ -149,39 +149,39 @@ func TestBuildSystemPromptContainsNewSections(t *testing.T) {
 	assert.Contains(t, prompt, "Never update the git config")
 	assert.Contains(t, prompt, "Never add co-author tags")
 
-	// Kairos section (inactive).
-	assert.Contains(t, prompt, "Kairos autonomous mode is currently inactive")
+	// Ember section (inactive).
+	assert.Contains(t, prompt, "Ember autonomous mode is currently inactive")
 }
 
-func TestKairosActiveContent(t *testing.T) {
-	cfg := &PromptConfig{KairosActive: true}
+func TestEmberActiveContent(t *testing.T) {
+	cfg := &PromptConfig{EmberActive: true}
 	blocks := BuildSystemBlocks(cfg)
 
-	var kairosText string
+	var emberText string
 	for _, b := range blocks {
-		if strings.Contains(b.Text, "Kairos") {
-			kairosText = b.Text
+		if strings.Contains(b.Text, "Ember") {
+			emberText = b.Text
 			break
 		}
 	}
-	require.NotEmpty(t, kairosText)
-	assert.Contains(t, kairosText, "<tick>")
-	assert.Contains(t, kairosText, "Sleep tool")
-	assert.NotContains(t, kairosText, "currently inactive")
+	require.NotEmpty(t, emberText)
+	assert.Contains(t, emberText, "<tick>")
+	assert.Contains(t, emberText, "Sleep tool")
+	assert.NotContains(t, emberText, "currently inactive")
 }
 
-func TestKairosInactiveContent(t *testing.T) {
+func TestEmberInactiveContent(t *testing.T) {
 	blocks := BuildSystemBlocks(nil)
 
-	var kairosText string
+	var emberText string
 	for _, b := range blocks {
-		if strings.Contains(b.Text, "Kairos") {
-			kairosText = b.Text
+		if strings.Contains(b.Text, "Ember") {
+			emberText = b.Text
 			break
 		}
 	}
-	require.NotEmpty(t, kairosText)
-	assert.Contains(t, kairosText, "currently inactive")
+	require.NotEmpty(t, emberText)
+	assert.Contains(t, emberText, "currently inactive")
 }
 
 func TestFlattenBlocks(t *testing.T) {

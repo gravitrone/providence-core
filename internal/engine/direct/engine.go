@@ -14,6 +14,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/uuid"
+	"github.com/gravitrone/providence-core/internal/auth"
 	"github.com/gravitrone/providence-core/internal/bridge/macos"
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/compact"
@@ -1614,6 +1615,14 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 			}
 		}
 		if err := stream.Err(); err != nil {
+			// Auth errors: attempt recovery (OAuth refresh) once, then fail.
+			if isAuthError(err) {
+				if e.handleAuthError(err) {
+					continue // recovery succeeded, retry
+				}
+				return accumulated, err
+			}
+
 			errStr := err.Error()
 			if strings.Contains(errStr, "429") || strings.Contains(errStr, "rate_limit") {
 				if attempt < maxRetries-1 {
@@ -1699,6 +1708,123 @@ func (e *DirectEngine) synthesizeErrorToolResults(accumulated anthropic.Message)
 		))
 	}
 	e.history.AddToolResults(resultBlocks)
+}
+
+// isAuthError returns true if the error indicates an authentication or
+// authorization failure (HTTP 401 or 403).
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "401") ||
+		strings.Contains(msg, "403") ||
+		strings.Contains(msg, "authentication_error") ||
+		strings.Contains(msg, "permission_error") ||
+		strings.Contains(msg, "organization_disabled")
+}
+
+// classifyAuthError returns a user-friendly message for auth errors, or empty
+// string if the error is not auth-related.
+func classifyAuthError(err error, provider string) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+
+	// 403 with organization disabled.
+	if strings.Contains(msg, "organization_disabled") || strings.Contains(msg, "organization") && strings.Contains(msg, "403") {
+		return "API access denied: your organization has been disabled. Check your Anthropic dashboard."
+	}
+
+	// 401 handling differs by provider.
+	if strings.Contains(msg, "401") || strings.Contains(msg, "authentication_error") {
+		switch provider {
+		case engine.ProviderOpenAI:
+			return "OpenAI OAuth token invalid or expired. Attempting refresh..."
+		case engine.ProviderAnthropic:
+			return "API key invalid or expired. Check ANTHROPIC_API_KEY env var."
+		case engine.ProviderOpenRouter:
+			return "OpenRouter API key invalid or expired. Check OPENROUTER_API_KEY env var."
+		default:
+			return "API authentication failed. Check your API key or credentials."
+		}
+	}
+
+	// 403 generic.
+	if strings.Contains(msg, "403") || strings.Contains(msg, "permission_error") {
+		return "API access forbidden (403). Check your API key permissions."
+	}
+
+	return ""
+}
+
+// handleAuthError attempts to recover from auth errors. For OpenAI OAuth, it
+// tries to refresh the token and rebuild the client. Returns true if recovery
+// succeeded and the caller should retry.
+func (e *DirectEngine) handleAuthError(err error) bool {
+	if !isAuthError(err) {
+		return false
+	}
+
+	msg := err.Error()
+
+	// Only attempt OAuth refresh for OpenAI 401 errors.
+	if e.codexMode && (strings.Contains(msg, "401") || strings.Contains(msg, "authentication_error")) {
+		// Check if we have saved OAuth tokens to refresh.
+		tokens, loadErr := auth.LoadOpenAITokens()
+		if loadErr != nil {
+			return false
+		}
+		if tokens.RefreshToken == "" {
+			return false
+		}
+
+		e.events <- engine.ParsedEvent{
+			Type: "system_message",
+			Data: &engine.SystemMessageEvent{
+				Type:    "system_message",
+				Content: "OpenAI token expired. Refreshing...",
+			},
+		}
+
+		refreshed, refreshErr := auth.RefreshOpenAI(tokens.RefreshToken)
+		if refreshErr != nil {
+			e.events <- engine.ParsedEvent{
+				Type: "system_message",
+				Data: &engine.SystemMessageEvent{
+					Type:    "system_message",
+					Content: fmt.Sprintf("Token refresh failed: %v. Run /auth to re-authenticate.", refreshErr),
+				},
+			}
+			return false
+		}
+
+		// Save refreshed tokens.
+		_ = auth.SaveOpenAITokens(refreshed)
+
+		e.events <- engine.ParsedEvent{
+			Type: "system_message",
+			Data: &engine.SystemMessageEvent{
+				Type:    "system_message",
+				Content: "Token refreshed successfully. Retrying...",
+			},
+		}
+		return true
+	}
+
+	// For non-OAuth providers, emit the specific error message but don't recover.
+	if authMsg := classifyAuthError(err, e.provider); authMsg != "" {
+		e.events <- engine.ParsedEvent{
+			Type: "system_message",
+			Data: &engine.SystemMessageEvent{
+				Type:    "system_message",
+				Content: authMsg,
+			},
+		}
+	}
+
+	return false
 }
 
 // isOverloadError returns true if the error indicates a model overload (HTTP 529

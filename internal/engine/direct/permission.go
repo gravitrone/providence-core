@@ -6,27 +6,57 @@ import (
 	"github.com/google/uuid"
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
+	"github.com/gravitrone/providence-core/internal/engine/permissions"
 )
+
+// defaultAllowRules auto-approves read-only tools that never mutate state.
+var defaultAllowRules = []permissions.Rule{
+	{Pattern: "Read", Behavior: permissions.Allow, Source: "builtin"},
+	{Pattern: "Glob", Behavior: permissions.Allow, Source: "builtin"},
+	{Pattern: "Grep", Behavior: permissions.Allow, Source: "builtin"},
+}
 
 // PermissionHandler manages permission requests for tool execution.
 // Non-read-only tools require explicit approval before running.
 type PermissionHandler struct {
-	pending map[string]chan bool // questionID -> response channel
-	mu      sync.Mutex
+	pending    map[string]chan bool // questionID -> response channel
+	mu         sync.Mutex
+	allowRules []permissions.Rule
+	denyRules  []permissions.Rule
 }
 
-// NewPermissionHandler creates a permission handler with no pending requests.
+// NewPermissionHandler creates a permission handler with default allow rules
+// for read-only tools (Read, Glob, Grep).
 func NewPermissionHandler() *PermissionHandler {
 	return &PermissionHandler{
-		pending: make(map[string]chan bool),
+		pending:    make(map[string]chan bool),
+		allowRules: defaultAllowRules,
 	}
 }
 
-// NeedsPermission returns true if the tool requires explicit approval.
-// Currently auto-approves all tools in direct engine mode - the user launched it themselves.
-// TODO: add configurable permission modes (auto, ask, deny) per tool.
-func (p *PermissionHandler) NeedsPermission(_ tools.Tool) bool {
-	return false
+// NewPermissionHandlerWithRules creates a permission handler with custom
+// allow and deny rules merged on top of the defaults.
+func NewPermissionHandlerWithRules(allow, deny []permissions.Rule) *PermissionHandler {
+	merged := make([]permissions.Rule, 0, len(defaultAllowRules)+len(allow))
+	merged = append(merged, defaultAllowRules...)
+	merged = append(merged, allow...)
+	return &PermissionHandler{
+		pending:    make(map[string]chan bool),
+		allowRules: merged,
+		denyRules:  deny,
+	}
+}
+
+// NeedsPermission returns true if the tool requires explicit user approval
+// according to the 7-step permission chain.
+func (p *PermissionHandler) NeedsPermission(t tools.Tool) bool {
+	ctx := &permissions.Context{
+		Mode:             permissions.ModeDefault,
+		AlwaysAllowRules: p.allowRules,
+		AlwaysDenyRules:  p.denyRules,
+	}
+	result := permissions.CheckPermission(ctx, t.Name(), nil)
+	return result.Decision == permissions.Ask
 }
 
 // RequestPermission emits a permission_request ParsedEvent on the events channel

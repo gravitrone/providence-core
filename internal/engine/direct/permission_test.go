@@ -12,10 +12,16 @@ import (
 )
 
 type permMockTool struct {
+	name     string
 	readOnly bool
 }
 
-func (t *permMockTool) Name() string                                              { return "test" }
+func (t *permMockTool) Name() string {
+	if t.name != "" {
+		return t.name
+	}
+	return "test"
+}
 func (t *permMockTool) Description() string                                        { return "" }
 func (t *permMockTool) InputSchema() map[string]any                                { return nil }
 func (t *permMockTool) ReadOnly() bool                                             { return t.readOnly }
@@ -25,9 +31,14 @@ func (t *permMockTool) Execute(_ context.Context, _ map[string]any) tools.ToolRe
 
 func TestPermissionHandler_NeedsPermission(t *testing.T) {
 	ph := NewPermissionHandler()
-	// Currently auto-approves all tools in direct engine mode.
-	assert.False(t, ph.NeedsPermission(&permMockTool{readOnly: false}))
-	assert.False(t, ph.NeedsPermission(&permMockTool{readOnly: true}))
+	// Read-only builtins (Read, Glob, Grep) are auto-allowed.
+	assert.False(t, ph.NeedsPermission(&permMockTool{name: "Read", readOnly: true}))
+	assert.False(t, ph.NeedsPermission(&permMockTool{name: "Glob", readOnly: true}))
+	assert.False(t, ph.NeedsPermission(&permMockTool{name: "Grep", readOnly: true}))
+	// Unknown/write tools require permission (Ask -> true).
+	assert.True(t, ph.NeedsPermission(&permMockTool{name: "Bash", readOnly: false}))
+	assert.True(t, ph.NeedsPermission(&permMockTool{name: "Write", readOnly: false}))
+	assert.True(t, ph.NeedsPermission(&permMockTool{name: "test", readOnly: false}))
 }
 
 func TestPermissionHandler_RequestAndApprove(t *testing.T) {

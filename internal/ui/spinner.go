@@ -71,7 +71,7 @@ func flameBlock(frame int) (string, string) {
 	return ch, color
 }
 
-var spinnerVerbs = []string{
+var defaultSpinnerVerbs = []string{
 	"Profaning",
 	"Purifying",
 	"Consecrating",
@@ -85,6 +85,17 @@ var spinnerVerbs = []string{
 	"Brimstoning",
 	"Devouring",
 	"Calamitizing",
+}
+
+var spinnerVerbs = defaultSpinnerVerbs
+
+// ApplyCustomSpinnerVerbs replaces the spinner verb list with custom verbs
+// from config. Called at startup when spinner_verbs is set.
+func ApplyCustomSpinnerVerbs(custom []string) {
+	if len(custom) == 0 {
+		return
+	}
+	spinnerVerbs = custom
 }
 
 // compactVerbs are the Providence-themed phrases shown while the context

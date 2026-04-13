@@ -159,6 +159,7 @@ var slashCommands = []slashCommand{
 	{"/branch", "Show git branches"},
 	{"/share", "Export session (coming soon)"},
 	{"/review", "Spawn code review agent"},
+	{"/fork", "Fork N background agents from current context"},
 	{"/help", "Show available commands"},
 }
 
@@ -303,6 +304,9 @@ type AgentTab struct {
 
 	// Track which background subagent IDs we already notified about.
 	notifiedAgents map[string]bool
+
+	// Permission "always allow" set - tool names that the user chose to auto-approve.
+	alwaysAllowTools map[string]bool
 
 	// Discovered skills, custom agents, and custom tools loaded at startup.
 	discoveredSkills []skills.SkillDefinition
@@ -635,6 +639,33 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 				_ = at.engine.RespondPermission(perm.QuestionID, optionID)
 			}
 			at.updateLastPermissionStatus("cancelled")
+			at.refreshViewport()
+			return at, at.safeWaitForEvent()
+		case "a":
+			// Always allow this tool for the rest of the session.
+			perm := at.pendingPerm
+			at.pendingPerm = nil
+			if at.alwaysAllowTools == nil {
+				at.alwaysAllowTools = make(map[string]bool)
+			}
+			at.alwaysAllowTools[perm.Tool.Name] = true
+			optionID := ""
+			for _, opt := range perm.Options {
+				if strings.Contains(strings.ToLower(opt.Label), "allow") ||
+					strings.Contains(strings.ToLower(opt.ID), "allow") ||
+					opt.ID == "yes" {
+					optionID = opt.ID
+					break
+				}
+			}
+			if optionID == "" && len(perm.Options) > 0 {
+				optionID = perm.Options[0].ID
+			}
+			if at.engine != nil && optionID != "" {
+				_ = at.engine.RespondPermission(perm.QuestionID, optionID)
+			}
+			at.updateLastPermissionStatus("success")
+			at.addSystemMessage(fmt.Sprintf("Always allowing %s for this session", perm.Tool.Name))
 			at.refreshViewport()
 			return at, at.safeWaitForEvent()
 		}
@@ -1317,6 +1348,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		return at, at.safeWaitForEvent()
 
 	case "assistant":
+		hasToolUse := false
 		if ae, ok := ev.Data.(*engine.AssistantEvent); ok {
 			var fullText string
 			for _, part := range ae.Message.Content {
@@ -1324,6 +1356,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 				case "text":
 					fullText += part.Text
 				case "tool_use":
+					hasToolUse = true
 					at.messages = append(at.messages, ChatMessage{
 						Role:       "tool",
 						ToolName:   part.Name,
@@ -1355,13 +1388,57 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 			at.refreshViewport()
 		}
 
+		// Fire Red-Team-Advisor background agent after tool-use turns.
+		if hasToolUse && at.cfg.BGAgentsEnabled {
+			if de, ok := at.engine.(*direct.DirectEngine); ok && de.SubagentRunner() != nil {
+				rtInput := subagent.TaskInput{
+					Description:  "Red team review",
+					Prompt:       "Review the last tool calls for drift, missed requirements, or repeat errors. If issues found, report them. If no issues, say LGTM.",
+					SubagentType: "Explore",
+					RunInBG:      true,
+				}
+				go de.SubagentRunner().Spawn(context.Background(), rtInput, subagent.BuiltinAgents["Explore"], de.SubagentExecutor()) //nolint:errcheck // fire-and-forget bg agent
+			}
+		}
+
 		return at, at.safeWaitForEvent()
 
 	case "permission_request":
 		if pr, ok := ev.Data.(*engine.PermissionRequestEvent); ok {
-			at.pendingPerm = pr
 			toolName := pr.Tool.Name
 			toolArgs := formatToolInput(pr.Tool.Input)
+
+			// Auto-approve if user previously chose "always allow" for this tool.
+			if at.alwaysAllowTools[toolName] {
+				optionID := ""
+				for _, opt := range pr.Options {
+					if strings.Contains(strings.ToLower(opt.Label), "allow") ||
+						strings.Contains(strings.ToLower(opt.ID), "allow") ||
+						opt.ID == "yes" {
+						optionID = opt.ID
+						break
+					}
+				}
+				if optionID == "" && len(pr.Options) > 0 {
+					optionID = pr.Options[0].ID
+				}
+				if at.engine != nil && optionID != "" {
+					_ = at.engine.RespondPermission(pr.QuestionID, optionID)
+				}
+				at.messages = append(at.messages, ChatMessage{
+					Role:       "permission",
+					Content:    fmt.Sprintf("%s: %s (auto-approved)", toolName, toolArgs),
+					Done:       true,
+					ToolName:   toolName,
+					ToolArgs:   toolArgs,
+					ToolStatus: "success",
+				})
+				at.trackToolFile(toolName, pr.Tool.Input)
+				at.refreshViewport()
+				return at, at.safeWaitForEvent()
+			}
+
+			at.pendingPerm = pr
 			at.messages = append(at.messages, ChatMessage{
 				Role:       "permission",
 				Content:    fmt.Sprintf("%s: %s", toolName, toolArgs),
@@ -1821,6 +1898,7 @@ func (at AgentTab) Hints() []components.HintItem {
 		return []components.HintItem{
 			{Key: "y", Desc: "approve"},
 			{Key: "n", Desc: "deny"},
+			{Key: "a", Desc: "always allow"},
 		}
 	}
 	if at.queueCursor >= 0 {
@@ -3649,6 +3727,45 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 
 	case "/review":
 		at.addSystemMessage("Code review: requires subagent system. Use /agents to see available types.")
+		at.refreshViewport()
+		return true, nil
+
+	case "/fork":
+		n := 1
+		if args != "" {
+			if parsed, err := strconv.Atoi(strings.Fields(args)[0]); err == nil && parsed > 0 {
+				n = parsed
+			}
+		}
+		if at.engine == nil {
+			at.addSystemMessage("No active engine for /fork")
+			at.refreshViewport()
+			return true, nil
+		}
+		de, ok := at.engine.(*direct.DirectEngine)
+		if !ok {
+			at.addSystemMessage("/fork requires native engine")
+			at.refreshViewport()
+			return true, nil
+		}
+		if de.SubagentRunner() == nil {
+			at.addSystemMessage("/fork: subagent runner not initialized")
+			at.refreshViewport()
+			return true, nil
+		}
+		for i := 0; i < n; i++ {
+			input := subagent.TaskInput{
+				Description: fmt.Sprintf("Fork %d of %d", i+1, n),
+				Prompt:      "Continue the current task. You have the full conversation context.",
+				RunInBG:     true,
+			}
+			agentID, err := de.SubagentRunner().Spawn(context.Background(), input, subagent.DefaultAgentType(), de.SubagentExecutor())
+			if err != nil {
+				at.addSystemMessage(fmt.Sprintf("Fork %d failed: %s", i+1, err))
+				continue
+			}
+			at.addSystemMessage(fmt.Sprintf("Fork %d spawned: %s", i+1, agentID))
+		}
 		at.refreshViewport()
 		return true, nil
 

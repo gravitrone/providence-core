@@ -232,6 +232,12 @@ func (e *DirectEngine) SubagentRunner() *subagent.Runner {
 	return e.subagentRunner
 }
 
+// SubagentExecutor returns the executor callback for spawning subagents
+// from outside the engine (e.g. /fork command in the TUI).
+func (e *DirectEngine) SubagentExecutor() subagent.Executor {
+	return e.subagentExecutor
+}
+
 // SessionBus returns the engine's session event bus.
 func (e *DirectEngine) SessionBus() *session.Bus {
 	return e.sessionBus

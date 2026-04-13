@@ -119,8 +119,11 @@ type authCompleteMsg struct {
 
 // compactTriggerMsg reports whether a manual compaction request started.
 type compactTriggerMsg struct {
-	AwaitEvents bool
-	Err         error
+	AwaitEvents  bool
+	Err          error
+	TokensBefore int
+	TokensAfter  int
+	CollapseOnly bool // true when collapse was sufficient, no full compaction needed
 }
 
 // clipboardImageMsg carries image data read from the system clipboard.
@@ -171,7 +174,7 @@ var slashCommands = []slashCommand{
 	{"/auth", "Login to OpenAI (Codex OAuth)"},
 	{"/sessions", "List past sessions, or search with /sessions <query>"},
 	{"/resume", "Resume a past session"},
-	{"/compact", "Manually trigger context compaction"},
+	{"/compact", "Trigger context compaction (--force skips collapse)"},
 	{"/rewind", "Rewind to a previous user message"},
 	{"/dashboard", "Toggle dashboard panel (or: pin, hide)"},
 	{"/tree", "Toggle conversation tree view"},
@@ -187,7 +190,9 @@ var slashCommands = []slashCommand{
 	{"/permissions", "Show current permission mode"},
 	{"/hooks", "Show hook configuration info"},
 	{"/diff", "Show git diff --stat"},
-	{"/branch", "Show git branches"},
+	{"/plan", "Toggle plan mode (read-only tools)"},
+	{"/branch", "Fork conversation into a new session"},
+	{"/branches", "Show git branches"},
 	{"/share", "Export session as JSONL"},
 	{"/tag", "Tag current session (usage: /tag <name>)"},
 	{"/review", "Spawn code review agent"},
@@ -367,6 +372,10 @@ type AgentTab struct {
 
 	// permissionMode is the active permission mode (default, acceptEdits, plan, bypassPermissions, dontAsk).
 	permissionMode string
+	// planModeActive tracks whether /plan mode is engaged (read-only tools).
+	planModeActive bool
+	// planPrevPermMode stores the permission mode before /plan toggled on.
+	planPrevPermMode string
 
 	// Discovered skills, custom agents, and custom tools loaded at startup.
 	discoveredSkills []skills.SkillDefinition
@@ -706,6 +715,24 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 			at.addSystemMessage("Compaction error: " + msg.Err.Error())
 			at.refreshViewport()
 			return at, nil
+		}
+		if msg.CollapseOnly {
+			// Collapse was enough, show stats immediately.
+			after := at.currentTokens
+			if msg.TokensBefore > 0 && after > 0 && after < msg.TokensBefore {
+				pct := (msg.TokensBefore - after) * 100 / msg.TokensBefore
+				at.addSystemMessage(fmt.Sprintf(
+					"Compacted (collapse): %s -> %s tokens (%d%% saved)",
+					formatTokenCount(msg.TokensBefore), formatTokenCount(after), pct,
+				))
+			} else {
+				at.addSystemMessage("Context collapse applied")
+			}
+			at.refreshViewport()
+			return at, nil
+		}
+		if msg.TokensBefore > 0 {
+			at.compactTokensBefore = msg.TokensBefore
 		}
 		if msg.AwaitEvents {
 			return at, at.safeWaitForEvent()
@@ -4634,12 +4661,36 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			return true, nil
 		}
 
+		forceFlag := strings.TrimSpace(args) == "--force"
 		eng := at.engine
 		awaitEvents := at.engineType == engine.EngineTypeDirect
+		tokensBefore := at.currentTokens
 		return true, func() tea.Msg {
+			// Try lightweight context collapse first (unless --force).
+			if !forceFlag {
+				if cp, ok := eng.(engine.CollapseProvider); ok {
+					collapsed, _ := cp.TriggerCollapse()
+					if collapsed > 0 {
+						// Collapse succeeded. Check if we're under the auto-compact
+						// threshold, and if so, skip full compaction.
+						ctxWindow := engine.ContextWindowFor(at.model)
+						threshold := ctxWindow * 80 / 100 // 80% as comfortable zone
+						if tokensBefore > 0 && tokensBefore < threshold {
+							return compactTriggerMsg{
+								TokensBefore: tokensBefore,
+								CollapseOnly: true,
+							}
+						}
+					}
+				}
+			}
+
+			// Full compaction.
+			err := eng.TriggerCompact(context.Background())
 			return compactTriggerMsg{
-				AwaitEvents: awaitEvents,
-				Err:         eng.TriggerCompact(context.Background()),
+				AwaitEvents:  awaitEvents,
+				Err:          err,
+				TokensBefore: tokensBefore,
 			}
 		}
 
@@ -4904,6 +4955,25 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		at.refreshViewport()
 		return true, nil
 
+	case "/plan":
+		if at.planModeActive {
+			// Toggle off: restore previous permission mode.
+			at.planModeActive = false
+			at.permissionMode = at.planPrevPermMode
+			at.planPrevPermMode = ""
+			at.addSystemMessage("Plan mode OFF - write tools restored.")
+		} else {
+			// Toggle on: save current mode, switch to plan.
+			at.planModeActive = true
+			at.planPrevPermMode = at.permissionMode
+			at.permissionMode = "plan"
+			at.addSystemMessage("Plan mode ON - read-only tools only. /plan again to exit.")
+			// Inject system reminder so the model respects plan mode.
+			at.addSystemMessage("Plan mode is active. Discuss the approach before making changes.")
+		}
+		at.refreshViewport()
+		return true, nil
+
 	case "/hooks":
 		at.addSystemMessage("Hooks: configured via ~/.claude/settings.json\nSee /help for hook events")
 		at.refreshViewport()
@@ -4922,6 +4992,49 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		return true, nil
 
 	case "/branch":
+		// Conversation branching: fork the current session into a new one.
+		if at.store == nil {
+			at.addSystemMessage("Session store not available for branching")
+			at.refreshViewport()
+			return true, nil
+		}
+		if at.sessionID == "" || len(at.messages) == 0 {
+			at.addSystemMessage("No active session to branch")
+			at.refreshViewport()
+			return true, nil
+		}
+		// Create new session.
+		newID := uuid.New().String()
+		cwd, _ := os.Getwd()
+		if err := at.store.CreateSession(newID, cwd, string(at.engineType), at.model); err != nil {
+			at.addSystemMessage("Branch failed: " + err.Error())
+			at.refreshViewport()
+			return true, nil
+		}
+		// Derive title from original.
+		origTitle := ""
+		if sess, err := at.store.GetSession(at.sessionID); err == nil && sess != nil {
+			origTitle = sess.Title
+		}
+		if origTitle == "" {
+			origTitle = at.sessionID[:8]
+		}
+		branchTitle := "Branch of: " + origTitle
+		at.store.UpdateSessionTitle(newID, branchTitle)
+		// Copy all messages into the new session.
+		for _, m := range at.messages {
+			if m.Role == "system" {
+				continue
+			}
+			at.store.AddMessage(newID, m.Role, m.Content, m.ToolName, m.ToolArgs, m.ToolStatus, m.ToolBody, m.ToolOutput, m.ImageCount, m.Done)
+		}
+		// Switch to the new session.
+		at.sessionID = newID
+		at.addSystemMessage("Branched conversation. Original session preserved.\nNew session: " + branchTitle)
+		at.refreshViewport()
+		return true, nil
+
+	case "/branches":
 		out, _ := exec.Command("git", "branch", "-v").Output()
 		at.addSystemMessage(string(out))
 		at.refreshViewport()

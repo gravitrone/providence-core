@@ -113,6 +113,15 @@ type TodoProvider interface {
 	GetCurrentTodos() []TodoItem
 }
 
+// CollapseProvider is optionally implemented by engines that support
+// lightweight context collapse (summarizing old tool-result groups in place)
+// as a cheaper alternative to full API-based compaction.
+type CollapseProvider interface {
+	// TriggerCollapse runs context collapse on the conversation history,
+	// returning the number of tool-result blocks collapsed.
+	TriggerCollapse() (int, error)
+}
+
 // ParsedEvent is a decoded event from an AI engine.
 type ParsedEvent struct {
 	Type string

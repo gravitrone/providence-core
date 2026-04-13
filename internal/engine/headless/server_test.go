@@ -404,6 +404,73 @@ func TestServerTranslatesPermissionRequest(t *testing.T) {
 	assert.True(t, found, "should have emitted a control_request for permission")
 }
 
+func TestEveryEventCarriesUUIDAndSessionID(t *testing.T) {
+	eng := newMockEngine()
+
+	// Inject multiple event types so we can verify all of them get stamped.
+	eng.events <- engine.ParsedEvent{
+		Type: "assistant",
+		Data: &engine.AssistantEvent{
+			Type: "assistant",
+			Message: engine.AssistantMsg{
+				Content: []engine.ContentPart{{Type: "text", Text: "hi"}},
+			},
+		},
+	}
+	eng.events <- engine.ParsedEvent{
+		Type: "usage_update",
+		Data: &engine.UsageUpdateEvent{
+			Type:        "usage_update",
+			TotalTokens: 42,
+		},
+	}
+	eng.events <- engine.ParsedEvent{
+		Type: "result",
+		Data: &engine.ResultEvent{
+			Type:    "result",
+			Subtype: "success",
+			Result:  "ok",
+		},
+	}
+
+	stdin := strings.NewReader("")
+	var stdout bytes.Buffer
+
+	srv := NewServer(eng, stdin, &stdout, "test-model", "test-engine")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_ = srv.Run(ctx)
+
+	lines := nonEmptyLines(stdout.String())
+	require.GreaterOrEqual(t, len(lines), 4, "init + 3 events")
+
+	seenUUIDs := map[string]bool{}
+	for _, line := range lines {
+		var ev OutputEvent
+		require.NoError(t, json.Unmarshal([]byte(line), &ev))
+
+		assert.NotEmpty(t, ev.UUID, "every event must have a uuid, got type=%s", ev.Type)
+		assert.NotEmpty(t, ev.SessionID, "every event must have session_id, got type=%s", ev.Type)
+
+		// UUIDs must be unique per event.
+		assert.False(t, seenUUIDs[ev.UUID], "duplicate uuid: %s", ev.UUID)
+		seenUUIDs[ev.UUID] = true
+	}
+
+	// All events share the same session_id.
+	var firstSessionID string
+	for _, line := range lines {
+		var ev OutputEvent
+		_ = json.Unmarshal([]byte(line), &ev)
+		if firstSessionID == "" {
+			firstSessionID = ev.SessionID
+		}
+		assert.Equal(t, firstSessionID, ev.SessionID, "all events must share session_id")
+	}
+}
+
 // --- Helpers ---
 
 func nonEmptyLines(s string) []string {

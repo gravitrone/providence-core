@@ -23,6 +23,7 @@ type PermissionHandler struct {
 	mu         sync.Mutex
 	allowRules []permissions.Rule
 	denyRules  []permissions.Rule
+	askRules   []permissions.Rule
 	mode       string // "", "auto", "deny", "plan"
 }
 
@@ -45,6 +46,27 @@ func NewPermissionHandlerWithRules(allow, deny []permissions.Rule) *PermissionHa
 		pending:    make(map[string]chan bool),
 		allowRules: merged,
 		denyRules:  deny,
+	}
+}
+
+// NewPermissionHandlerWithConfig creates a permission handler with rules from
+// both explicit allow/deny lists and config permission rules. Config rules are
+// appended after the defaults and explicit rules.
+func NewPermissionHandlerWithConfig(allow, deny []permissions.Rule, configAllow, configDeny, configAsk []permissions.Rule) *PermissionHandler {
+	mergedAllow := make([]permissions.Rule, 0, len(defaultAllowRules)+len(allow)+len(configAllow))
+	mergedAllow = append(mergedAllow, defaultAllowRules...)
+	mergedAllow = append(mergedAllow, allow...)
+	mergedAllow = append(mergedAllow, configAllow...)
+
+	mergedDeny := make([]permissions.Rule, 0, len(deny)+len(configDeny))
+	mergedDeny = append(mergedDeny, deny...)
+	mergedDeny = append(mergedDeny, configDeny...)
+
+	return &PermissionHandler{
+		pending:    make(map[string]chan bool),
+		allowRules: mergedAllow,
+		denyRules:  mergedDeny,
+		askRules:   configAsk,
 	}
 }
 
@@ -80,6 +102,7 @@ func (p *PermissionHandler) NeedsPermission(t tools.Tool) bool {
 		Mode:             permMode,
 		AlwaysAllowRules: p.allowRules,
 		AlwaysDenyRules:  p.denyRules,
+		AlwaysAskRules:   p.askRules,
 	}
 	result := permissions.CheckPermission(ctx, t.Name(), nil)
 	return result.Decision == permissions.Ask

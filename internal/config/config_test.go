@@ -254,6 +254,75 @@ func TestLoadCorruptFile(t *testing.T) {
 	assert.Equal(t, "", c.Engine)
 }
 
+func TestPermissionsConfigParse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	content := `engine = "direct"
+
+[permissions]
+mode = "default"
+allow = ["Read(*)", "Glob(*)", "Grep(*)"]
+deny = ["Bash(rm -rf *)"]
+ask = ["Bash(git push *)"]
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	c := LoadFromTOML(path)
+	assert.Equal(t, "default", c.Permissions.Mode)
+	assert.Equal(t, []string{"Read(*)", "Glob(*)", "Grep(*)"}, c.Permissions.Allow)
+	assert.Equal(t, []string{"Bash(rm -rf *)"}, c.Permissions.Deny)
+	assert.Equal(t, []string{"Bash(git push *)"}, c.Permissions.Ask)
+}
+
+func TestPermissionsConfigRules(t *testing.T) {
+	pc := PermissionsConfig{
+		Allow: []string{"Read(*)", "Glob(*)"},
+		Deny:  []string{"Bash(rm -rf *)"},
+		Ask:   []string{"Bash(git push *)"},
+	}
+
+	allowRules := pc.AllowRules("config")
+	assert.Len(t, allowRules, 2)
+	assert.Equal(t, "Read(*)", allowRules[0].Pattern)
+	assert.Equal(t, "allow", allowRules[0].Behavior)
+	assert.Equal(t, "config", allowRules[0].Source)
+
+	denyRules := pc.DenyRules("config")
+	assert.Len(t, denyRules, 1)
+	assert.Equal(t, "Bash(rm -rf *)", denyRules[0].Pattern)
+
+	askRules := pc.AskRules("config")
+	assert.Len(t, askRules, 1)
+	assert.Equal(t, "Bash(git push *)", askRules[0].Pattern)
+}
+
+func TestPermissionsConfigMerge(t *testing.T) {
+	homeDir := t.TempDir()
+	projectRoot := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	writeTestConfigFile(t, filepath.Join(homeDir, ".providence", "config.toml"), `
+[permissions]
+mode = "default"
+allow = ["Read(*)", "Glob(*)"]
+deny = ["Bash(rm -rf *)"]
+`)
+
+	writeTestConfigFile(t, filepath.Join(projectRoot, ".providence", "config.toml"), `
+[permissions]
+mode = "acceptEdits"
+allow = ["Write(*)", "Edit(*)"]
+`)
+
+	loaded := LoadMerged(projectRoot)
+	assert.Equal(t, "acceptEdits", loaded.Permissions.Mode)
+	// Project overrides should replace user-level allow list.
+	assert.Equal(t, []string{"Write(*)", "Edit(*)"}, loaded.Permissions.Allow)
+	// Deny from user-level should survive since project didn't override it.
+	assert.Equal(t, []string{"Bash(rm -rf *)"}, loaded.Permissions.Deny)
+}
+
 func TestSaveCreatesDir(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nested", "deep", "config.toml")

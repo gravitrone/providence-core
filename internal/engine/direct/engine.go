@@ -173,6 +173,10 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 
 	registry := tools.NewRegistry(coreTools...)
 
+	// Register ToolSearch tool (needs registry reference, so added after init).
+	toolSearchTool := tools.NewToolSearchTool(registry)
+	registry.Register(toolSearchTool)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	history := NewConversationHistory()
 
@@ -905,8 +909,14 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			}
 		}
 
-		// Microcompact: prune old tool results before the API call (zero cost).
+		// Snip: drop old message pairs as a cheap first pass.
 		msgs := e.history.Messages()
+		msgs = compact.SnipOldMessages(msgs, 0)
+
+		// Tool result budget: cap total tool result content.
+		msgs = compact.EnforceToolResultBudget(msgs, 0)
+
+		// Microcompact: prune old tool results before the API call (zero cost).
 		msgs, _ = compact.Microcompact(msgs)
 
 		toolParams := e.toolParams()

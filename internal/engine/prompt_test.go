@@ -232,6 +232,33 @@ func TestOutputStyleInjection(t *testing.T) {
 	assert.True(t, hasStyle, "should contain output style block")
 }
 
+func TestMCPInstructionsInjection(t *testing.T) {
+	cfg := &PromptConfig{
+		MCPInstructions: "# MCP Server Instructions\n\n## filesystem\nUse this to read files.",
+	}
+	blocks := BuildSystemBlocks(cfg)
+
+	hasMCP := false
+	for _, b := range blocks {
+		if strings.Contains(b.Text, "MCP Server Instructions") {
+			hasMCP = true
+			assert.False(t, b.Cacheable, "MCP instructions block should be dynamic")
+			assert.Contains(t, b.Text, "filesystem")
+		}
+	}
+	assert.True(t, hasMCP, "should contain MCP instructions block")
+}
+
+func TestMCPInstructionsEmptyOmitted(t *testing.T) {
+	cfg := &PromptConfig{
+		MCPInstructions: "",
+	}
+	blocks := BuildSystemBlocks(cfg)
+	for _, b := range blocks {
+		assert.NotContains(t, b.Text, "MCP Server Instructions")
+	}
+}
+
 func TestNoCyberRiskInstruction(t *testing.T) {
 	prompt := BuildSystemPrompt(nil)
 	assert.NotContains(t, prompt, "CYBER_RISK")

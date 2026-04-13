@@ -220,6 +220,73 @@ func TestTranscriptScrollClamp(t *testing.T) {
 	assert.LessOrEqual(t, tm.scrollTop, maxScroll, "scrollTop should not exceed max")
 }
 
+func TestFreezeKeyJ(t *testing.T) {
+	tm := NewTranscriptModel()
+	tm.SetViewport(80, 5)
+
+	render := stubRender(3)
+	for i := 0; i < 10; i++ {
+		tm.AddMessage(ChatMessage{Role: "user", Content: fmt.Sprintf("msg %d", i)})
+	}
+	_ = tm.View(render)
+
+	tm.SetFrozen(true)
+	// Scroll up first so we have room to scroll down.
+	tm.ScrollBy(-10)
+	before := tm.scrollTop
+
+	// j = scroll down by 1.
+	tm.ScrollBy(1)
+	assert.Equal(t, before+1, tm.scrollTop, "j (ScrollBy +1) should scroll down")
+}
+
+func TestFreezeKeyK(t *testing.T) {
+	tm := NewTranscriptModel()
+	tm.SetViewport(80, 5)
+
+	render := stubRender(3)
+	for i := 0; i < 10; i++ {
+		tm.AddMessage(ChatMessage{Role: "user", Content: fmt.Sprintf("msg %d", i)})
+	}
+	_ = tm.View(render)
+
+	tm.SetFrozen(true)
+	// Start at bottom, scroll up a bit, then test k.
+	tm.ScrollBy(-5)
+	before := tm.scrollTop
+	tm.ScrollBy(-1)
+	assert.Equal(t, before-1, tm.scrollTop, "k (ScrollBy -1) should scroll up")
+}
+
+func TestSearchFindsMatch(t *testing.T) {
+	tm := NewTranscriptModel()
+	tm.SetViewport(80, 20)
+
+	tm.AddMessage(ChatMessage{Role: "user", Content: "the quick brown fox"})
+	tm.AddMessage(ChatMessage{Role: "assistant", Content: "lazy dog"})
+	tm.AddMessage(ChatMessage{Role: "user", Content: "quick silver"})
+
+	tm.SetFrozen(true)
+	tm.SetSearchActive(true)
+	tm.SetSearchQuery("quick")
+
+	assert.Equal(t, 2, tm.SearchHitCount(), "should find 2 matches for 'quick'")
+}
+
+func TestSearchNoMatch(t *testing.T) {
+	tm := NewTranscriptModel()
+	tm.SetViewport(80, 20)
+
+	tm.AddMessage(ChatMessage{Role: "user", Content: "hello world"})
+	tm.AddMessage(ChatMessage{Role: "assistant", Content: "goodbye world"})
+
+	tm.SetFrozen(true)
+	tm.SetSearchActive(true)
+	tm.SetSearchQuery("zzzznotfound")
+
+	assert.Equal(t, 0, tm.SearchHitCount(), "should find 0 matches for nonexistent query")
+}
+
 func TestCountLines(t *testing.T) {
 	tests := []struct {
 		input string

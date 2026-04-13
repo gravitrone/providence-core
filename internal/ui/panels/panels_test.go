@@ -229,6 +229,70 @@ func TestRenderHooks(t *testing.T) {
 	})
 }
 
+// --- Zero/Empty edge cases ---
+
+func TestRenderTokensZero(t *testing.T) {
+	got := RenderTokens(0, 100000, 40)
+	assert.Contains(t, got, "0%")
+}
+
+func TestRenderTokensFull(t *testing.T) {
+	got := RenderTokens(100000, 100000, 40)
+	assert.Contains(t, got, "100%")
+}
+
+func TestRenderAgentsEmpty(t *testing.T) {
+	got := RenderAgents(nil, 80)
+	assert.Contains(t, got, "No active agents")
+}
+
+func TestRenderFilesEmpty(t *testing.T) {
+	got := RenderFiles(nil, 80)
+	assert.Contains(t, got, "No files touched")
+}
+
+func TestRenderErrorsEmpty(t *testing.T) {
+	got := RenderErrors(nil, 80)
+	assert.Contains(t, got, "No errors")
+}
+
+func TestAllEmptyPanelsReturnEmpty(t *testing.T) {
+	// Every render function with nil/zero input should return a non-empty
+	// placeholder string (not "").
+	checks := []string{
+		RenderAgents(nil, 80),
+		RenderFiles(nil, 80),
+		RenderErrors(nil, 80),
+		RenderTasks(nil, 80),
+		RenderApprovals(nil, 80),
+		RenderHooks(nil, 80),
+		RenderCompact(CompactInfo{}, 80),
+		RenderTokens(0, 0, 40),
+	}
+	for i, s := range checks {
+		assert.NotEmpty(t, s, "panel render %d should not be empty", i)
+	}
+}
+
+func TestPanelWidthRespected(t *testing.T) {
+	width := 60
+	agents := []AgentInfo{
+		{Name: "worker-1", Status: "active", Elapsed: "12s"},
+	}
+	got := RenderAgents(agents, width)
+	for _, line := range strings.Split(got, "\n") {
+		assert.LessOrEqual(t, len(line), width, "line exceeds panel width: %q", line)
+	}
+
+	files := []FileInfo{
+		{Path: strings.Repeat("x", 200), Modified: true},
+	}
+	got = RenderFiles(files, width)
+	for _, line := range strings.Split(got, "\n") {
+		assert.LessOrEqual(t, len(line), width, "line exceeds panel width: %q", line)
+	}
+}
+
 // --- Truncate ---
 
 func TestTruncate(t *testing.T) {

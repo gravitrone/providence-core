@@ -596,6 +596,189 @@ func truncatePath(s string, maxLen int) string {
 	return "..." + s[len(s)-maxLen+3:]
 }
 
+// --- Full-width tab renderers for the tab system ---
+
+func (d *DashboardModel) emptyTab(width, height int, label string) string {
+	return lipgloss.NewStyle().Width(width).Height(height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Foreground(lipgloss.Color(themeMutedColor)).
+		Render(label)
+}
+
+// renderAgentsTable renders the agents table at a given width (reused by panel and tab).
+func (d *DashboardModel) renderAgentsTable(width int) string {
+	nameW := width - 18
+	if nameW < 6 {
+		nameW = 6
+	}
+	cols := []table.Column{
+		{Title: "Agent", Width: nameW},
+		{Title: "Status", Width: 7},
+		{Title: "Time", Width: 5},
+	}
+	rows := make([]table.Row, len(d.Agents))
+	for i, a := range d.Agents {
+		rows[i] = table.Row{truncatePath(a.Name, nameW), a.Status, a.Elapsed}
+	}
+	t := table.New(
+		table.WithColumns(cols),
+		table.WithRows(rows),
+		table.WithHeight(len(rows)+1),
+	)
+	s := table.Styles{
+		Header:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeHeaderColor)),
+		Cell:     lipgloss.NewStyle().Foreground(lipgloss.Color(themeTextColor)),
+		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeAccentColor)),
+	}
+	t.SetStyles(s)
+	return t.View()
+}
+
+// RenderAgentsTab renders the agents panel at full width for the tab view.
+func (d *DashboardModel) RenderAgentsTab(width, height int) string {
+	if len(d.Agents) == 0 {
+		return d.emptyTab(width, height, "No active agents")
+	}
+	return d.renderAgentsTable(width)
+}
+
+// RenderTasksTab renders the tasks panel at full width.
+func (d *DashboardModel) RenderTasksTab(width, height int) string {
+	if len(d.Tasks) == 0 {
+		return d.emptyTab(width, height, "No tasks")
+	}
+	var b strings.Builder
+	for i, t := range d.Tasks {
+		marker := "○"
+		switch t.Status {
+		case "in_progress":
+			marker = "◐"
+		case "completed":
+			marker = "●"
+		}
+		line := fmt.Sprintf("  %s %s", marker, truncatePath(t.Text, width-6))
+		b.WriteString(line)
+		if i < len(d.Tasks)-1 {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// RenderFilesTab renders the files panel at full width.
+func (d *DashboardModel) RenderFilesTab(width, height int) string {
+	if len(d.Files) == 0 {
+		return d.emptyTab(width, height, "No files touched")
+	}
+	pathW := width - 10
+	if pathW < 8 {
+		pathW = 8
+	}
+	cols := []table.Column{
+		{Title: "Op", Width: 2},
+		{Title: "Path", Width: pathW},
+	}
+	rows := make([]table.Row, len(d.Files))
+	for i, f := range d.Files {
+		icon := "R"
+		switch f.Action {
+		case "write":
+			icon = "W"
+		case "edit":
+			icon = "E"
+		}
+		rows[i] = table.Row{icon, truncatePath(f.Path, pathW)}
+	}
+	t := table.New(
+		table.WithColumns(cols),
+		table.WithRows(rows),
+		table.WithHeight(len(rows)+1),
+	)
+	s := table.Styles{
+		Header:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeHeaderColor)),
+		Cell:     lipgloss.NewStyle().Foreground(lipgloss.Color(themeTextColor)),
+		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeAccentColor)),
+	}
+	t.SetStyles(s)
+	return t.View()
+}
+
+// RenderTokensTab renders the token usage panel at full width.
+func (d *DashboardModel) RenderTokensTab(width, height int) string {
+	barW := width - 20
+	if barW < 10 {
+		barW = 10
+	}
+	d.TokenProgress.SetWidth(barW)
+	var label string
+	if d.MaxTokens > 0 {
+		label = fmt.Sprintf("  %dk / %dk (%0.0f%%)", d.CurrentTokens/1000, d.MaxTokens/1000, d.TokenPct*100)
+	} else {
+		label = fmt.Sprintf("  %3.0f%% context", d.TokenPct*100)
+	}
+	return label + "\n  " + d.TokenProgress.ViewAs(d.TokenPct)
+}
+
+// RenderErrorsTab renders the errors panel at full width.
+func (d *DashboardModel) RenderErrorsTab(width, height int) string {
+	if len(d.Errors) == 0 {
+		return d.emptyTab(width, height, "No errors")
+	}
+	msgW := width - 12
+	if msgW < 8 {
+		msgW = 8
+	}
+	cols := []table.Column{
+		{Title: "Tool", Width: 8},
+		{Title: "Error", Width: msgW},
+	}
+	rows := make([]table.Row, len(d.Errors))
+	for i, e := range d.Errors {
+		rows[i] = table.Row{e.Tool, truncatePath(e.Message, msgW)}
+	}
+	t := table.New(
+		table.WithColumns(cols),
+		table.WithRows(rows),
+		table.WithHeight(len(rows)+1),
+	)
+	s := table.Styles{
+		Header:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeHeaderColor)),
+		Cell:     lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
+		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ff5555")),
+	}
+	t.SetStyles(s)
+	return t.View()
+}
+
+// RenderCompactTab renders the compaction panel at full width.
+func (d *DashboardModel) RenderCompactTab(width, height int) string {
+	switch d.Compact.Phase {
+	case "running":
+		if d.Compact.TokensBefore > 0 {
+			return fmt.Sprintf("  Compacting %dk tokens...", d.Compact.TokensBefore/1000)
+		}
+		return "  Compacting..."
+	case "complete":
+		if d.Compact.TokensBefore > 0 && d.Compact.TokensAfter > 0 {
+			saved := d.Compact.TokensBefore - d.Compact.TokensAfter
+			return fmt.Sprintf("  %dk -> %dk (saved %dk)", d.Compact.TokensBefore/1000, d.Compact.TokensAfter/1000, saved/1000)
+		}
+		return "  Compaction complete"
+	case "failed":
+		if d.Compact.ErrMsg != "" {
+			return fmt.Sprintf("  Failed: %s", d.Compact.ErrMsg)
+		}
+		return "  Compaction failed"
+	default:
+		return d.emptyTab(width, height, "Idle")
+	}
+}
+
+// RenderHooksTab renders the hooks panel at full width.
+func (d *DashboardModel) RenderHooksTab(width, height int) string {
+	return d.emptyTab(width, height, "No hooks configured")
+}
+
 // --- Default Panels (stubs - real renderers come in Phase 6 W2) ---
 
 func defaultPanels() []Panel {

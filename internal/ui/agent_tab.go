@@ -245,6 +245,9 @@ type AgentTab struct {
 	queuedBright float64
 	queuedVel    float64
 
+	// Streaming tool input: accumulates partial JSON from tool_input_delta events.
+	toolInputBuffer string
+
 	// Tool expansion: toggled via freeze mode.
 	toolsExpanded bool
 
@@ -1470,6 +1473,21 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		}
 		return at, at.safeWaitForEvent()
 
+	case "tool_input_delta":
+		if tid, ok := ev.Data.(*engine.ToolInputDelta); ok {
+			at.toolInputBuffer += tid.PartialJSON
+			// Update the last tool message's args display with streaming input.
+			for i := len(at.messages) - 1; i >= 0; i-- {
+				if at.messages[i].Role == "tool" && at.messages[i].ToolOutput == "" {
+					at.messages[i].ToolArgs = at.toolInputBuffer
+					at.messagesDirty = true
+					at.refreshViewport()
+					break
+				}
+			}
+		}
+		return at, at.safeWaitForEvent()
+
 	case "assistant":
 		hasToolUse := false
 		if ae, ok := ev.Data.(*engine.AssistantEvent); ok {
@@ -1480,6 +1498,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 					fullText += part.Text
 				case "tool_use":
 					hasToolUse = true
+					at.toolInputBuffer = "" // Reset streaming tool input buffer.
 					toolArgs := formatToolArgs(part.Name, part.Input)
 					at.messages = append(at.messages, ChatMessage{
 						Role:       "tool",

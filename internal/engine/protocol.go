@@ -102,3 +102,9 @@ type SystemMessageEvent struct {
 	Type    string `json:"type"`
 	Content string `json:"content"`
 }
+
+// ToolInputDelta carries a partial JSON fragment for a streaming tool input.
+type ToolInputDelta struct {
+	Type        string `json:"type"`
+	PartialJSON string `json:"partial_json"`
+}

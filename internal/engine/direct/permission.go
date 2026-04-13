@@ -23,6 +23,7 @@ type PermissionHandler struct {
 	mu         sync.Mutex
 	allowRules []permissions.Rule
 	denyRules  []permissions.Rule
+	mode       string // "", "auto", "deny", "plan"
 }
 
 // NewPermissionHandler creates a permission handler with default allow rules
@@ -47,11 +48,36 @@ func NewPermissionHandlerWithRules(allow, deny []permissions.Rule) *PermissionHa
 	}
 }
 
+// SetMode overrides the permission mode for this handler.
+// Supported modes: "auto" (approve all), "deny" (deny all), "plan" (read-only).
+func (p *PermissionHandler) SetMode(mode string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.mode = mode
+}
+
 // NeedsPermission returns true if the tool requires explicit user approval
 // according to the 7-step permission chain.
 func (p *PermissionHandler) NeedsPermission(t tools.Tool) bool {
+	p.mu.Lock()
+	mode := p.mode
+	p.mu.Unlock()
+
+	// Short-circuit for override modes.
+	switch mode {
+	case "auto":
+		return false // auto-approve everything
+	case "deny":
+		return true // always ask (caller will deny)
+	}
+
+	permMode := permissions.ModeDefault
+	if mode == "plan" {
+		permMode = permissions.ModePlan
+	}
+
 	ctx := &permissions.Context{
-		Mode:             permissions.ModeDefault,
+		Mode:             permMode,
 		AlwaysAllowRules: p.allowRules,
 		AlwaysDenyRules:  p.denyRules,
 	}

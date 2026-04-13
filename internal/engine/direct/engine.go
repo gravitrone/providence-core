@@ -477,8 +477,30 @@ func (e *DirectEngine) subagentExecutor(ctx context.Context, prompt string, agen
 	}
 	defer sub.Close()
 
+	// Apply agent's permission mode if set.
+	if agentType.PermissionMode != "" && agentType.PermissionMode != "inherit" {
+		switch agentType.PermissionMode {
+		case "plan":
+			// In plan mode, restrict to read-only tools by removing write/execute tools.
+			sub.permissions.SetMode("plan")
+		case "auto":
+			// Auto-approve all tool permissions.
+			sub.permissions.SetMode("auto")
+		case "deny":
+			// Deny all tool permissions.
+			sub.permissions.SetMode("deny")
+		}
+	}
+
 	if err := sub.Send(prompt); err != nil {
 		return "", fmt.Errorf("sub-engine send: %w", err)
+	}
+
+	// maxTurns enforcement: cap the number of agentic turns.
+	turnCount := 0
+	maxTurns := agentType.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = 100 // safety cap
 	}
 
 	var result strings.Builder
@@ -499,6 +521,12 @@ func (e *DirectEngine) subagentExecutor(ctx context.Context, prompt string, agen
 		case "result":
 			if re, ok := ev.Data.(*engine.ResultEvent); ok && re.IsError {
 				return "", fmt.Errorf("sub-engine error: %s", re.Result)
+			}
+			turnCount++
+			if turnCount >= maxTurns {
+				sub.Interrupt()
+				result.WriteString("\n[max turns reached]")
+				return result.String(), nil
 			}
 			return result.String(), nil
 		}

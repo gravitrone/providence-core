@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gravitrone/providence-core/internal/config"
@@ -101,6 +102,7 @@ type Server struct {
 
 	// Runtime state.
 	maxThinkingTokens int
+	sessionState      string // "idle", "running" - tracked for state change events
 
 	mu     sync.Mutex
 	closed bool
@@ -113,12 +115,13 @@ func NewServer(eng engine.Engine, r io.Reader, w io.Writer, model, engineID stri
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	return &Server{
-		engine:    eng,
-		scanner:   scanner,
-		writer:    json.NewEncoder(w),
-		sessionID: uuid.New().String(),
-		model:     model,
-		engineID:  engineID,
+		engine:       eng,
+		scanner:      scanner,
+		writer:       json.NewEncoder(w),
+		sessionID:    uuid.New().String(),
+		model:        model,
+		engineID:     engineID,
+		sessionState: "idle",
 	}
 }
 
@@ -162,10 +165,17 @@ func (s *Server) Run(ctx context.Context) error {
 		s.drainEvents()
 	}()
 
-	// 3. Read stdin line by line, dispatch messages.
+	// 3. Start keep_alive ticker (30s).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.keepAliveLoop(ctx)
+	}()
+
+	// 4. Read stdin line by line, dispatch messages.
 	err := s.readLoop(ctx)
 
-	// Cleanup: close engine (closes event channel), wait for drainer to finish.
+	// Cleanup: close engine (closes event channel), wait for drainer + ticker.
 	cancel()
 	s.engine.Close()
 	wg.Wait()
@@ -235,6 +245,8 @@ func (s *Server) dispatch(ctx context.Context, msg InputMessage) bool {
 		s.handleUser(msg)
 	case TypeControlResponse:
 		s.handleControlResponse(msg)
+	case TypeKeepAlive:
+		// Accept silently, no response needed.
 	default:
 		if msg.Type == TypeControlRequest {
 			return s.handleControlRequest(ctx, msg)
@@ -258,6 +270,7 @@ func (s *Server) handleUser(msg InputMessage) {
 		return
 	}
 
+	s.transitionState("running")
 	if err := s.engine.Send(body.Content); err != nil {
 		s.emitError("send failed: " + err.Error())
 	}
@@ -439,6 +452,7 @@ func (s *Server) translateEvent(ev engine.ParsedEvent) {
 				TotalCostUSD: re.TotalCostUSD,
 				IsError:      re.IsError,
 			})
+			s.transitionState("idle")
 		}
 
 	case "tool_result":
@@ -483,8 +497,28 @@ func (s *Server) translateEvent(ev engine.ParsedEvent) {
 			})
 		}
 
+	case "rate_limit":
+		if rl, ok := ev.Data.(*engine.RateLimitEvent); ok {
+			s.emit(OutputEvent{
+				Type:    TypeSystem,
+				Subtype: SubtypeAPIRetry,
+				Content: fmt.Sprintf(
+					`{"attempt":%d,"delay_sec":%d,"max_retry":%d}`,
+					rl.Attempt, rl.DelaySec, rl.MaxRetry,
+				),
+			})
+		}
+
 	case "compaction":
 		if ce, ok := ev.Data.(*engine.CompactionEvent); ok {
+			// Emit status event for compaction lifecycle.
+			status := "compaction_" + ce.Phase
+			s.emit(OutputEvent{
+				Type:    TypeSystem,
+				Subtype: SubtypeStatus,
+				Content: status,
+			})
+			// Also emit the legacy compact_boundary for backwards compat.
 			s.emit(OutputEvent{
 				Type:    TypeSystem,
 				Subtype: SubtypeCompactBoundary,
@@ -501,6 +535,43 @@ func (s *Server) translateEvent(ev engine.ParsedEvent) {
 			s.emit(OutputEvent{
 				Type:    ev.Type,
 				Content: ev.Raw,
+			})
+		}
+	}
+}
+
+// --- State Tracking ---
+
+// transitionState emits a session_state_changed event when the state changes.
+func (s *Server) transitionState(newState string) {
+	s.mu.Lock()
+	old := s.sessionState
+	if old == newState {
+		s.mu.Unlock()
+		return
+	}
+	s.sessionState = newState
+	s.mu.Unlock()
+
+	s.emit(OutputEvent{
+		Type:    TypeSystem,
+		Subtype: SubtypeSessionStateChanged,
+		Content: fmt.Sprintf(`{"from":%q,"to":%q}`, old, newState),
+	})
+}
+
+// keepAliveLoop emits keep_alive events every 30 seconds until ctx is cancelled.
+func (s *Server) keepAliveLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.emit(OutputEvent{
+				Type: TypeKeepAlive,
 			})
 		}
 	}

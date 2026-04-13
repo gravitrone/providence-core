@@ -917,6 +917,11 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		// Transfer images to engine before sending.
 		at.transferImagesToEngine()
 
+		// Track user activity for kairos focus detection.
+		if at.kairos != nil {
+			at.kairos.RecordUserMessage()
+		}
+
 		// Send to existing session.
 		if err := at.engine.Send(text); err != nil {
 			at.addSystemMessage(fmt.Sprintf("send error: %s", err))
@@ -1477,6 +1482,10 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 			at.spinnerStart = time.Now()
 			at.spinnerLastVerb = time.Now()
 			at.refreshViewport()
+			// Track user activity for kairos focus detection.
+			if at.kairos != nil {
+				at.kairos.RecordUserMessage()
+			}
 			if err := at.engine.Send(text); err != nil {
 				at.addSystemMessage(fmt.Sprintf("send error: %s", err))
 				at.streaming = false
@@ -1484,6 +1493,18 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 				return at, nil
 			}
 			return at, tea.Batch(at.safeWaitForEvent(), spinnerTick())
+		}
+
+		// Kairos tick injection: after turn completes, fire next tick.
+		if at.kairos != nil && at.kairos.ShouldTick() {
+			at.kairos.RecordTick()
+			tickMsg := kairos.GenerateTick()
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				if at.engine != nil && at.kairos.ShouldTick() {
+					at.engine.Send(tickMsg)
+				}
+			}()
 		}
 
 		at.refreshViewport()
@@ -3115,6 +3136,10 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				}
 				at.engineType = newType
 				at.addSystemMessage("Engine set to: " + string(newType))
+				// Apply per-engine banner text.
+				if theme, ok := EngineThemes[string(newType)]; ok {
+					SetBannerSubtitle(theme.BannerText + " - " + theme.Name)
+				}
 				// Restore conversation state into the new engine on next Send.
 				if portableState != nil && len(portableState.Messages) > 0 {
 					at.pendingPortableState = portableState

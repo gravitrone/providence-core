@@ -18,6 +18,14 @@ var bannerLines = []string{
 	"░░░░░        ░░░░░   ░░░░░    ░░░░░░░         ░░░      ░░░░░ ░░░░░░░░░░   ░░░░░░░░░░ ░░░░░    ░░░░░   ░░░░░░░░░  ░░░░░░░░░░ ",
 }
 
+// bannerSubtitle is the text shown below the ASCII art. Updated on engine switch.
+var bannerSubtitle = "The Profaned Core"
+
+// SetBannerSubtitle changes the banner subtitle (e.g. on engine switch).
+func SetBannerSubtitle(s string) {
+	bannerSubtitle = s
+}
+
 // bannerGradient is a top-to-bottom gradient for the static banner.
 // Recomputed on theme switch.
 var bannerGradient []string
@@ -59,7 +67,7 @@ func RenderBanner() string {
 	}
 
 	rendered += "\n"
-	subtitleText := "The Profaned Core"
+	subtitleText := bannerSubtitle
 	subtitleWidth := lipgloss.Width(subtitleText)
 
 	subtitleStyle := lipgloss.NewStyle().

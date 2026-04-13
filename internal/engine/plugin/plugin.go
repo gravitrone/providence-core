@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
+	"github.com/gravitrone/providence-core/internal/engine/mcp"
 )
 
 // Manifest is the plugin.yaml schema.
@@ -36,6 +39,7 @@ type Capabilities struct {
 	Commands   bool `yaml:"commands"`
 	Tools      bool `yaml:"tools"`
 	Background bool `yaml:"background"`
+	MCPServers bool `yaml:"mcpServers"` // plugin exposes tools via MCP stdio protocol
 }
 
 // Contributes declares the tabs and commands the plugin registers.
@@ -239,4 +243,38 @@ func (m *Manager) Stop(name string) error {
 	}
 	p.Process = nil
 	return nil
+}
+
+// RegisterPluginMCPTools starts all plugins that declare capabilities.mcpServers,
+// treats each as an MCP stdio server, and registers their tools in the given
+// tool registry. Errors per-plugin are non-fatal and logged to stderr.
+// Returns the MCP manager used (may be nil if no plugins declared mcpServers).
+func (m *Manager) RegisterPluginMCPTools(registry *tools.Registry) *mcp.Manager {
+	var mcpPlugins []mcp.ServerConfig
+	for _, p := range m.plugins {
+		if !p.Manifest.Capabilities.MCPServers {
+			continue
+		}
+		cfg := mcp.ServerConfig{
+			Name:    p.Manifest.Name,
+			Type:    "stdio",
+			Command: p.Manifest.Entrypoint.Command,
+			Args:    p.Manifest.Entrypoint.Args,
+		}
+		mcpPlugins = append(mcpPlugins, cfg)
+	}
+
+	if len(mcpPlugins) == 0 {
+		return nil
+	}
+
+	mgr := mcp.NewManager()
+	if err := mgr.ConnectAll(mcpPlugins); err != nil {
+		// non-fatal: log but proceed with whatever connected
+		fmt.Fprintf(os.Stderr, "plugin mcp: %v\n", err)
+	}
+	if mgr.ServerCount() > 0 {
+		mcp.RegisterMCPTools(mgr, registry)
+	}
+	return mgr
 }

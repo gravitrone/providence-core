@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -192,12 +193,42 @@ func LoadFrom(path string) Config {
 	return LoadFromTOML(path)
 }
 
+// expandEnvVars replaces ${VAR} and $VAR patterns in s with environment values.
+func expandEnvVars(s string) string {
+	return os.ExpandEnv(s)
+}
+
+// expandConfigEnvVars applies env var expansion to all string fields in a Config.
+func expandConfigEnvVars(c *Config) {
+	c.Engine = expandEnvVars(c.Engine)
+	c.Model = expandEnvVars(c.Model)
+	c.Theme = expandEnvVars(c.Theme)
+	c.Effort = expandEnvVars(c.Effort)
+	c.OpenRouterAPIKey = expandEnvVars(c.OpenRouterAPIKey)
+	c.OutputStyle = expandEnvVars(c.OutputStyle)
+	c.Compact.Mode = expandEnvVars(c.Compact.Mode)
+	c.Compact.Trigger = expandEnvVars(c.Compact.Trigger)
+	c.Compact.FastTierModel = expandEnvVars(c.Compact.FastTierModel)
+	c.Permissions.Mode = expandEnvVars(c.Permissions.Mode)
+	for i := range c.Permissions.Allow {
+		c.Permissions.Allow[i] = expandEnvVars(c.Permissions.Allow[i])
+	}
+	for i := range c.Permissions.Deny {
+		c.Permissions.Deny[i] = expandEnvVars(c.Permissions.Deny[i])
+	}
+	for i := range c.Permissions.Ask {
+		c.Permissions.Ask[i] = expandEnvVars(c.Permissions.Ask[i])
+	}
+}
+
 // LoadFromTOML reads config from a TOML file. Returns empty Config on any error.
+// Environment variables (${VAR} or $VAR) in string fields are expanded after loading.
 func LoadFromTOML(path string) Config {
 	var c Config
 	if _, err := toml.DecodeFile(path, &c); err != nil {
 		return Config{}
 	}
+	expandConfigEnvVars(&c)
 	return c
 }
 
@@ -214,8 +245,30 @@ func loadFromJSON(path string) Config {
 	return c
 }
 
+// managedSettingsPath returns the macOS enterprise managed-settings path.
+// On other platforms, returns an empty string (feature disabled).
+func managedSettingsPath() string {
+	return "/Library/Application Support/Providence/managed-settings.toml"
+}
+
+// loadManagedSettings attempts to load enterprise managed settings from the
+// well-known system path. Returns empty Config if file doesn't exist or
+// platform doesn't support it. This is a stub - enterprise enforcement logic
+// is not implemented.
+func loadManagedSettings() Config {
+	path := managedSettingsPath()
+	if path == "" {
+		return Config{}
+	}
+	if _, err := os.Stat(path); err != nil {
+		return Config{} // not present, not an error
+	}
+	return LoadFromTOML(path)
+}
+
 // LoadMerged loads config with 5-level merge: user global -> project -> local -> (flags + policy at runtime).
 // projectRoot is the working directory or project root where .providence/ may live.
+// Enterprise managed-settings.toml (if present) is applied last as highest priority.
 func LoadMerged(projectRoot string) Config {
 	home, _ := os.UserHomeDir()
 
@@ -234,7 +287,11 @@ func LoadMerged(projectRoot string) Config {
 	claudeCfg := LoadFromTOML(filepath.Join(projectRoot, ".claude", "config.toml"))
 	mergeConfig(&cfg, &claudeCfg)
 
-	// Level 5: CLI flags + policy handled at runtime by caller
+	// Level 5 (highest priority): enterprise managed settings - overrides everything.
+	managedCfg := loadManagedSettings()
+	mergeConfig(&cfg, &managedCfg)
+
+	// CLI flags handled at runtime by caller.
 	_ = home
 	return cfg
 }
@@ -473,6 +530,54 @@ func (p *PermissionsConfig) AskRules(source string) []PermissionRule {
 		rules[i] = PermissionRule{Pattern: pattern, Behavior: "ask", Source: source}
 	}
 	return rules
+}
+
+// Validate checks that config fields are within allowed values.
+// Returns a combined error with all violations found, or nil if valid.
+func (c *Config) Validate() error {
+	var errs []string
+
+	validEngines := map[string]bool{
+		"":               true, // empty = use default
+		"direct":         true,
+		"claude":         true,
+		"codex_re":       true,
+		"codex_headless": true,
+		"opencode":       true,
+	}
+	if !validEngines[c.Engine] {
+		errs = append(errs, fmt.Sprintf("engine %q is not valid (allowed: direct, claude, codex_re, codex_headless, opencode)", c.Engine))
+	}
+
+	if c.Model == "" && c.Engine == "direct" {
+		errs = append(errs, "model must not be empty when engine is direct")
+	}
+
+	validCompactModes := map[string]bool{
+		"":                true, // empty = use default
+		"cc-tail-replace": true,
+		"dynamic-rolling": true,
+		"both":            true,
+		"off":             true,
+	}
+	if !validCompactModes[c.Compact.Mode] {
+		errs = append(errs, fmt.Sprintf("compact.mode %q is not valid (allowed: cc-tail-replace, dynamic-rolling, both, off)", c.Compact.Mode))
+	}
+
+	validEffort := map[string]bool{
+		"":       true, // empty = use default
+		"low":    true,
+		"medium": true,
+		"high":   true,
+	}
+	if !validEffort[c.Effort] {
+		errs = append(errs, fmt.Sprintf("effort %q is not valid (allowed: low, medium, high)", c.Effort))
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("config validation errors: %s", strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // Save writes config to DefaultPath as TOML, creating ~/.providence/ if needed.

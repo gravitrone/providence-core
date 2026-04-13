@@ -1265,6 +1265,14 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 				})
 			}
 
+			// Apply context modifier if the tool returned one.
+			// Called after hooks but before appending to history so that
+			// state changes (e.g. file cache invalidation) are visible
+			// to the next turn.
+			if r.Result.ContextModifier != nil {
+				r.Result.ContextModifier()
+			}
+
 			e.events <- engine.ParsedEvent{
 				Type: "tool_result",
 				Data: &engine.ToolResultEvent{

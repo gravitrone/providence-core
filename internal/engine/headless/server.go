@@ -11,7 +11,10 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/engine"
+	"github.com/gravitrone/providence-core/internal/engine/mcp"
+	"github.com/gravitrone/providence-core/internal/engine/subagent"
 )
 
 // --- Input Message Types ---
@@ -90,6 +93,15 @@ type Server struct {
 	model     string
 	engineID  string
 
+	// Optional collaborators set via With* options before Run.
+	subagentRunner *subagent.Runner
+	mcpManager     *mcp.Manager
+	config         *config.Config
+	cancelCtx      context.CancelFunc
+
+	// Runtime state.
+	maxThinkingTokens int
+
 	mu     sync.Mutex
 	closed bool
 }
@@ -110,9 +122,27 @@ func NewServer(eng engine.Engine, r io.Reader, w io.Writer, model, engineID stri
 	}
 }
 
+// WithSubagentRunner sets the subagent runner for stop_task support.
+func (s *Server) WithSubagentRunner(r *subagent.Runner) {
+	s.subagentRunner = r
+}
+
+// WithMCPManager sets the MCP manager for mcp_status support.
+func (s *Server) WithMCPManager(m *mcp.Manager) {
+	s.mcpManager = m
+}
+
+// WithConfig sets the runtime config for get_settings/apply_flag_settings.
+func (s *Server) WithConfig(c *config.Config) {
+	s.config = c
+}
+
 // Run starts the headless serve loop. It blocks until ctx is cancelled,
 // stdin reaches EOF, or a fatal error occurs.
 func (s *Server) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	s.cancelCtx = cancel
+
 	// 1. Emit system/init.
 	s.emit(OutputEvent{
 		Type:      TypeSystem,
@@ -136,6 +166,7 @@ func (s *Server) Run(ctx context.Context) error {
 	err := s.readLoop(ctx)
 
 	// Cleanup: close engine (closes event channel), wait for drainer to finish.
+	cancel()
 	s.engine.Close()
 	wg.Wait()
 
@@ -190,26 +221,27 @@ func (s *Server) readLoop(ctx context.Context) error {
 			continue
 		}
 
-		s.dispatch(ctx, msg)
+		if s.dispatch(ctx, msg) {
+			return nil // end_session requested
+		}
 	}
 }
 
 // dispatch routes an input message to the appropriate handler.
-func (s *Server) dispatch(_ context.Context, msg InputMessage) {
+// Returns true if the main loop should exit (e.g. end_session).
+func (s *Server) dispatch(ctx context.Context, msg InputMessage) bool {
 	switch msg.Type {
 	case TypeUser:
 		s.handleUser(msg)
 	case TypeControlResponse:
 		s.handleControlResponse(msg)
 	default:
-		// Check for control_request subtypes on the type field itself.
-		// Some clients send {type: "control_request", subtype: "initialize"}.
 		if msg.Type == TypeControlRequest {
-			s.handleControlRequest(msg)
-			return
+			return s.handleControlRequest(ctx, msg)
 		}
 		s.emitError(fmt.Sprintf("unknown message type: %s", msg.Type))
 	}
+	return false
 }
 
 // handleUser parses the user message body and sends it to the engine.
@@ -232,10 +264,12 @@ func (s *Server) handleUser(msg InputMessage) {
 }
 
 // handleControlRequest handles inbound control requests from the host.
-func (s *Server) handleControlRequest(msg InputMessage) {
+// Returns true if the serve loop should exit (end_session).
+func (s *Server) handleControlRequest(ctx context.Context, msg InputMessage) bool {
+	params := parseParams(msg.Message)
+
 	switch msg.Subtype {
 	case SubtypeInit, "initialize":
-		// Respond with capabilities.
 		s.emit(OutputEvent{
 			Type:      TypeSystem,
 			Subtype:   "initialized",
@@ -243,17 +277,90 @@ func (s *Server) handleControlRequest(msg InputMessage) {
 			Model:     s.model,
 			Engine:    s.engineID,
 		})
+
 	case "interrupt":
 		s.engine.Interrupt()
+
 	case "set_model":
-		// Model switching not yet supported, ack anyway.
 		s.emit(OutputEvent{
 			Type:    TypeSystem,
 			Subtype: "model_set",
 		})
+
+	case "set_permission_mode":
+		mode, _ := params["mode"].(string)
+		if mode == "" {
+			s.emitError("set_permission_mode: missing mode param")
+			return false
+		}
+		s.setPermissionMode(mode)
+		s.emit(OutputEvent{
+			Type:    TypeSystem,
+			Subtype: "permission_mode_set",
+			Content: mode,
+		})
+
+	case "get_context_usage":
+		s.emit(s.buildContextUsageEvent())
+
+	case "end_session":
+		s.engine.Close()
+		s.emit(OutputEvent{
+			Type:    TypeSystem,
+			Subtype: "session_ended",
+		})
+		if s.cancelCtx != nil {
+			s.cancelCtx()
+		}
+		return true
+
+	case "stop_task":
+		taskID, _ := params["task_id"].(string)
+		if taskID == "" {
+			s.emitError("stop_task: missing task_id param")
+			return false
+		}
+		if s.subagentRunner == nil {
+			s.emitError("stop_task: no subagent runner configured")
+			return false
+		}
+		if err := s.subagentRunner.Kill(taskID); err != nil {
+			s.emitError(fmt.Sprintf("stop_task: %v", err))
+			return false
+		}
+		s.emit(OutputEvent{
+			Type:    TypeSystem,
+			Subtype: "task_stopped",
+			Content: taskID,
+		})
+
+	case "set_max_thinking_tokens":
+		val, _ := params["max_thinking_tokens"].(float64)
+		s.maxThinkingTokens = int(val)
+		s.emit(OutputEvent{
+			Type:    TypeSystem,
+			Subtype: "max_thinking_tokens_set",
+			Content: fmt.Sprintf("%d", s.maxThinkingTokens),
+		})
+
+	case "get_settings":
+		s.emit(s.buildSettingsEvent())
+
+	case "apply_flag_settings":
+		s.applyFlagSettings(params)
+		s.emit(OutputEvent{
+			Type:    TypeSystem,
+			Subtype: "settings_applied",
+		})
+
+	case "mcp_status":
+		s.emit(s.buildMCPStatusEvent())
+
 	default:
 		s.emitError(fmt.Sprintf("unknown control_request subtype: %s", msg.Subtype))
 	}
+	_ = ctx
+	return false
 }
 
 // handleControlResponse handles responses to permission requests.
@@ -397,6 +504,122 @@ func (s *Server) translateEvent(ev engine.ParsedEvent) {
 			})
 		}
 	}
+}
+
+// --- Control Request Helpers ---
+
+// parseParams extracts the params map from a raw JSON message body.
+func parseParams(raw json.RawMessage) map[string]any {
+	if raw == nil {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	return m
+}
+
+// setPermissionMode delegates to the engine's permission handler if supported.
+func (s *Server) setPermissionMode(mode string) {
+	type permSetter interface {
+		SetPermissionMode(string)
+	}
+	if ps, ok := s.engine.(permSetter); ok {
+		ps.SetPermissionMode(mode)
+	}
+}
+
+// buildContextUsageEvent returns a context_usage output event with token stats.
+func (s *Server) buildContextUsageEvent() OutputEvent {
+	type usageProvider interface {
+		ContextUsage() (inputTokens, outputTokens, contextWindow, messageCount int)
+	}
+	ev := OutputEvent{
+		Type:    TypeSystem,
+		Subtype: "context_usage",
+	}
+	if up, ok := s.engine.(usageProvider); ok {
+		input, output, window, msgs := up.ContextUsage()
+		total := input + output
+		pct := 0.0
+		if window > 0 {
+			pct = float64(total) / float64(window) * 100
+		}
+		ev.InputTokens = input
+		ev.OutputTokens = output
+		ev.TotalTokens = total
+		ev.Content = fmt.Sprintf(
+			`{"context_window":%d,"percentage":%.1f,"message_count":%d}`,
+			window, pct, msgs,
+		)
+	}
+	return ev
+}
+
+// buildSettingsEvent returns the current merged config as a system event.
+func (s *Server) buildSettingsEvent() OutputEvent {
+	ev := OutputEvent{
+		Type:    TypeSystem,
+		Subtype: "settings",
+	}
+	if s.config != nil {
+		data, err := json.Marshal(s.config)
+		if err == nil {
+			ev.Content = string(data)
+		}
+	}
+	return ev
+}
+
+// applyFlagSettings merges incoming param overrides into the runtime config.
+func (s *Server) applyFlagSettings(params map[string]any) {
+	if s.config == nil {
+		return
+	}
+	if m, ok := params["model"].(string); ok && m != "" {
+		s.config.Model = m
+		s.model = m
+	}
+	if e, ok := params["effort"].(string); ok && e != "" {
+		s.config.Effort = e
+	}
+	if eng, ok := params["engine"].(string); ok && eng != "" {
+		s.config.Engine = eng
+	}
+}
+
+// MCPServerInfo describes a connected MCP server for the mcp_status event.
+type MCPServerInfo struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Tools  int    `json:"tools"`
+}
+
+// buildMCPStatusEvent returns the list of connected MCP servers.
+func (s *Server) buildMCPStatusEvent() OutputEvent {
+	ev := OutputEvent{
+		Type:    TypeSystem,
+		Subtype: "mcp_status",
+	}
+	if s.mcpManager == nil {
+		ev.Content = "[]"
+		return ev
+	}
+	allTools := s.mcpManager.GetAllTools()
+	servers := make([]MCPServerInfo, 0, len(allTools))
+	for name, tools := range allTools {
+		servers = append(servers, MCPServerInfo{
+			Name:   name,
+			Status: "connected",
+			Tools:  len(tools),
+		})
+	}
+	data, err := json.Marshal(servers)
+	if err == nil {
+		ev.Content = string(data)
+	}
+	return ev
 }
 
 // Close marks the server as closed, preventing further output.

@@ -1009,6 +1009,10 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		}
 
 		if accumulated.StopReason != anthropic.StopReasonToolUse {
+			// Fire Stop hook on natural turn completion (no more tool calls).
+			e.fireHookAsync(hooks.Stop, hooks.HookInput{
+				ToolInput: "natural_end",
+			})
 			e.history.CompressLongToolResults(2000)
 			return
 		}

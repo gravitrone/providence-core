@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -207,6 +208,39 @@ func mergeConfig(base, override *Config) {
 	if override.Compact.CircuitBreaker != 0 {
 		base.Compact.CircuitBreaker = override.Compact.CircuitBreaker
 	}
+}
+
+// ClaudeSettings represents .claude/settings.json for CC compatibility.
+type ClaudeSettings struct {
+	AllowedTools    []string          `json:"allowedTools"`
+	DisallowedTools []string          `json:"disallowedTools"`
+	Env             map[string]string `json:"env"`
+	Hooks           map[string]any    `json:"hooks"`
+}
+
+// LoadClaudeSettings reads .claude/settings.json from the project directory.
+// Returns nil with no error if the file doesn't exist.
+func LoadClaudeSettings(projectDir string) (*ClaudeSettings, error) {
+	path := filepath.Join(projectDir, ".claude", "settings.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var settings ClaudeSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return nil, fmt.Errorf("parse .claude/settings.json: %w", err)
+	}
+
+	// Apply env vars to process environment.
+	for k, v := range settings.Env {
+		os.Setenv(k, v)
+	}
+
+	return &settings, nil
 }
 
 // Save writes config to DefaultPath as TOML, creating ~/.providence/ if needed.

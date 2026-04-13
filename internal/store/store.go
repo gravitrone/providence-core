@@ -114,11 +114,19 @@ func migrate(db *sql.DB) error {
 	// Add learnings column if not present (idempotent migration).
 	_, err = db.Exec(`ALTER TABLE sessions ADD COLUMN learnings TEXT`)
 	if err != nil {
-		// SQLite returns "duplicate column name" when the column already exists; ignore it.
 		if !isDuplicateColumnErr(err) {
 			return err
 		}
 	}
+
+	// Add tags column if not present (idempotent migration).
+	_, err = db.Exec(`ALTER TABLE sessions ADD COLUMN tags TEXT`)
+	if err != nil {
+		if !isDuplicateColumnErr(err) {
+			return err
+		}
+	}
+
 	return nil
 }
 

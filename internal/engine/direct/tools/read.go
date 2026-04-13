@@ -79,6 +79,11 @@ func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult
 	// clean the path
 	path = filepath.Clean(path)
 
+	// Block device file access.
+	if strings.HasPrefix(path, "/dev/") {
+		return ToolResult{Content: "Reading device files is not supported.", IsError: true}
+	}
+
 	// clean extension for routing
 	ext := strings.ToLower(filepath.Ext(path))
 

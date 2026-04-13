@@ -88,6 +88,7 @@ func TestProvidenceExtensions(t *testing.T) {
 		TypeForkMerge,
 		TypeDashboardUpdate,
 		TypeCompactEvent,
+		TypeKeepAlive,
 	}
 
 	seen := make(map[string]bool)
@@ -96,7 +97,7 @@ func TestProvidenceExtensions(t *testing.T) {
 		assert.False(t, seen[ext], "duplicate extension type: %s", ext)
 		seen[ext] = true
 	}
-	assert.Len(t, seen, 5)
+	assert.Len(t, seen, 6)
 }
 
 func TestSubtypeConstants(t *testing.T) {
@@ -108,6 +109,7 @@ func TestSubtypeConstants(t *testing.T) {
 		SubtypeSessionStateChanged,
 		SubtypeAPIRetry,
 		SubtypeCompactBoundary,
+		SubtypeStatus,
 	}
 
 	seen := make(map[string]bool)
@@ -116,7 +118,7 @@ func TestSubtypeConstants(t *testing.T) {
 		assert.False(t, seen[s], "duplicate subtype: %s", s)
 		seen[s] = true
 	}
-	assert.Len(t, seen, 7)
+	assert.Len(t, seen, 8)
 }
 
 func TestHarnessSwitchEventJSON(t *testing.T) {

@@ -14,6 +14,7 @@ const (
 	TypeRateLimitEvent  = "rate_limit_event"
 	TypeControlRequest  = "control_request"
 	TypeControlResponse = "control_response"
+	TypeKeepAlive       = "keep_alive"
 )
 
 // --- Providence Extension Types ---
@@ -36,6 +37,7 @@ const (
 	SubtypeSessionStateChanged = "session_state_changed"
 	SubtypeAPIRetry            = "api_retry"
 	SubtypeCompactBoundary     = "compact_boundary"
+	SubtypeStatus              = "status"
 )
 
 // SystemInitEvent is sent on startup to announce session capabilities.

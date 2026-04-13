@@ -360,6 +360,10 @@ func reapplyStyles() {
 	components.ThemePrimary = lipgloss.Color(ActiveTheme.Secondary)
 	components.ThemeMuted = lipgloss.Color(ActiveTheme.Muted)
 	components.ThemeText = lipgloss.Color(ActiveTheme.Text)
+
+	// Update agent status component hex strings for color math.
+	components.AgentThemePrimaryHex = ActiveTheme.Secondary
+	components.AgentThemeMutedHex = ActiveTheme.Muted
 }
 
 // --- Per-Engine Theme Identifiers ---

@@ -412,6 +412,29 @@ func (t *TranscriptModel) recomputeSearchHits() {
 	}
 }
 
+// CursorMessageIndex returns the message index at the current scroll position.
+// In freeze mode this is the first message visible in the viewport.
+// The messages parameter is used as a length reference (for consistency with
+// the caller's message slice which may differ from the transcript's cached copy).
+func (t *TranscriptModel) CursorMessageIndex(messages []ChatMessage) int {
+	if len(messages) == 0 {
+		return -1
+	}
+	rowAccum := 0
+	for i := 0; i < len(messages); i++ {
+		h := estimatedLineCount
+		if cached, ok := t.heightCache[i]; ok {
+			h = cached
+		}
+		msgEnd := rowAccum + h
+		if msgEnd > t.scrollTop {
+			return i
+		}
+		rowAccum += h
+	}
+	return len(messages) - 1
+}
+
 // countLines returns the number of lines in a rendered string.
 // An empty string counts as 0 lines. A string with no newlines counts as 1.
 func countLines(s string) int {

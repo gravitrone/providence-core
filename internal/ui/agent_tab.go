@@ -127,18 +127,19 @@ type clipboardImageMsg struct {
 
 // ChatMessage represents a single message in the agent chat history.
 type ChatMessage struct {
-	Role        string // "user", "assistant", "system", "permission", "tool", "thinking"
+	Role        string    // "user", "assistant", "system", "permission", "tool", "thinking"
 	Content     string
-	Done        bool   // false while streaming
-	ToolName    string // for tool/permission messages
-	ToolArgs    string // brief tool input description
-	ToolStatus  string // "pending", "success", "error", "cancelled"
-	ToolBody    string // tool result body
-	ToolResult  string // summary line shown after ⎿
-	ToolPreview string // multi-line file preview content
-	ToolOutput  string // actual tool output content (file content, bash output, etc)
-	Expanded    bool   // whether this tool's result is shown expanded
-	ImageCount  int    // number of images attached to this message
+	Done        bool      // false while streaming
+	Timestamp   time.Time // when the message was created (used for elapsed time on agent tools)
+	ToolName    string    // for tool/permission messages
+	ToolArgs    string    // brief tool input description
+	ToolStatus  string    // "pending", "success", "error", "cancelled"
+	ToolBody    string    // tool result body
+	ToolResult  string    // summary line shown after ⎿
+	ToolPreview string    // multi-line file preview content
+	ToolOutput  string    // actual tool output content (file content, bash output, etc)
+	Expanded    bool      // whether this tool's result is shown expanded
+	ImageCount  int       // number of images attached to this message
 }
 
 // --- Agent Tab ---
@@ -1311,6 +1312,25 @@ func (at AgentTab) handleTranscriptKey(key string) (AgentTab, tea.Cmd) {
 		at.refreshViewport()
 		return at, nil
 
+	case "K":
+		// Kill agent: if cursor is on an Agent/Task tool message, kill the underlying agent.
+		if cursorMsg := at.cursorMessage(); cursorMsg != nil &&
+			(cursorMsg.ToolName == "Agent" || cursorMsg.ToolName == "Task") {
+			if de, ok := at.engine.(*direct.DirectEngine); ok && de.SubagentRunner() != nil {
+				// Try to find and kill agent by name from the tool args.
+				agentName := extractAgentName(cursorMsg.ToolArgs)
+				if agentName != "" {
+					if agent := de.SubagentRunner().FindByName(agentName); agent != nil {
+						_ = de.SubagentRunner().Kill(agent.ID)
+						at.addSystemMessage(fmt.Sprintf("Killed agent: %s", agentName))
+						at.messagesDirty = true
+						at.refreshViewport()
+					}
+				}
+			}
+		}
+		return at, nil
+
 	case "e":
 		// Toggle expand/collapse for all tool messages.
 		hasAny := false
@@ -1533,6 +1553,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 						ToolStatus: "success",
 						ToolBody:   randomToolFlavor(),
 						Done:       true,
+						Timestamp:  time.Now(),
 					})
 					at.persistLastMessage()
 					// Wire file touches to dashboard FILES panel.
@@ -3275,8 +3296,24 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, msgIdx int, isLatest bool)
 			body = "\n" + strings.Join(bodyLines, "\n")
 		}
 	} else {
-		// Streaming: keep old connector result line.
-		if msg.ToolStatus == "success" && msg.ToolBody != "" {
+		// Streaming state.
+		isAgentTool := msg.ToolName == "Agent" || msg.ToolName == "Task"
+		if isAgentTool {
+			// Agent tool streaming: show live progress with shimmer and elapsed.
+			connectorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(flameColor(at.flameFrame)))
+			connector := connectorStyle.Render("  \u23BF ") // ⎿
+			activity := msg.ToolBody
+			if activity == "" {
+				activity = "Running agent..."
+			}
+			activityText := renderToolShimmer(activity, at.flameFrame)
+			elapsed := ""
+			if !msg.Timestamp.IsZero() {
+				dur := time.Since(msg.Timestamp)
+				elapsed = " " + lipgloss.NewStyle().Foreground(ColorMuted).Render(components.FormatDuration(dur))
+			}
+			body = "\n" + connector + activityText + elapsed
+		} else if msg.ToolStatus == "success" && msg.ToolBody != "" {
 			flavorColor := lipgloss.Color(flameColor(at.flameFrame))
 			flavorStyle := lipgloss.NewStyle().Foreground(flavorColor).Italic(true)
 			resultPrefix := lipgloss.NewStyle().Foreground(flavorColor).Render("  \u2514 ")
@@ -3527,7 +3564,9 @@ func formatToolArgs(toolName string, input any) string {
 	}
 }
 
-// formatTaskInput renders a styled subagent card for the Task/Agent tool.
+// formatTaskInput renders a styled dispatch card for the Task/Agent tool.
+// Shows name, model, isolation mode, and first line of description in a
+// flame-bordered card.
 func formatTaskInput(input any) string {
 	raw, err := json.Marshal(input)
 	if err != nil {
@@ -3535,7 +3574,11 @@ func formatTaskInput(input any) string {
 	}
 	var ti struct {
 		Description  string `json:"description"`
+		Prompt       string `json:"prompt"`
 		SubagentType string `json:"subagent_type"`
+		Model        string `json:"model"`
+		Engine       string `json:"engine"`
+		Name         string `json:"name"`
 		RunInBG      bool   `json:"run_in_background"`
 	}
 	if err := json.Unmarshal(raw, &ti); err != nil {
@@ -3545,11 +3588,50 @@ func formatTaskInput(input any) string {
 	if agentType == "" {
 		agentType = "general-purpose"
 	}
-	icon := "\u27C1" // ⟁
-	if ti.RunInBG {
-		icon = "\u27C1 (bg)"
+
+	// Build the meta line: name [model, isolation]
+	name := ti.Name
+	if name == "" {
+		name = agentType
 	}
-	return fmt.Sprintf("\n  %s %s [%s]", icon, ti.Description, agentType)
+	model := ti.Model
+	if model == "" {
+		model = "inherit"
+	}
+	isolation := "in-process"
+	if ti.RunInBG {
+		isolation = "background"
+	}
+
+	metaStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorText)
+	mutedStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	meta := metaStyle.Render(name) + " " + mutedStyle.Render("["+model+", "+isolation+"]")
+
+	// Description: first line only, truncated.
+	desc := ti.Description
+	if desc == "" {
+		desc = ti.Prompt
+	}
+	if len(desc) > 80 {
+		desc = desc[:77] + "..."
+	}
+	// Take only the first line.
+	if idx := strings.IndexByte(desc, '\n'); idx >= 0 {
+		desc = desc[:idx]
+	}
+	descStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
+
+	// Build the card with rounded border.
+	headerStyle := lipgloss.NewStyle().
+		Foreground(ColorSecondary).
+		Bold(true)
+	content := meta + "\n" + descStyle.Render(desc)
+	cardBorder := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorSecondary).
+		Padding(0, 1)
+	card := "\n" + cardBorder.Render(headerStyle.Render("Agent Dispatched") + "\n" + content)
+	return card
 }
 
 // convertTodosToTaskInfo maps tools.TodoItem slice to dashboard.TaskInfo slice.
@@ -4669,6 +4751,33 @@ func (at *AgentTab) serializeConversationState() *subagent.ConversationState {
 		Model:        at.model,
 		Engine:       string(at.engineType),
 	}
+}
+
+// cursorMessage returns the ChatMessage at the current transcript cursor position,
+// or nil if no valid message is under the cursor.
+func (at *AgentTab) cursorMessage() *ChatMessage {
+	idx := at.transcript.CursorMessageIndex(at.messages)
+	if idx < 0 || idx >= len(at.messages) {
+		return nil
+	}
+	return &at.messages[idx]
+}
+
+// extractAgentName extracts the agent name from tool args string.
+// Looks for JSON "name" field or falls back to the subagent_type.
+func extractAgentName(args string) string {
+	// Try JSON parsing first.
+	var parsed struct {
+		Name         string `json:"name"`
+		SubagentType string `json:"subagent_type"`
+	}
+	if err := json.Unmarshal([]byte(args), &parsed); err == nil {
+		if parsed.Name != "" {
+			return parsed.Name
+		}
+		return parsed.SubagentType
+	}
+	return ""
 }
 
 // drainCompletedSubagents checks the subagent runner (if available) for any

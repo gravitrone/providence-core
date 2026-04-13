@@ -9,19 +9,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// helper: build a user message with a single tool result block.
+// toolResultMsg builds a user message with a single tool result block.
 func toolResultMsg(id string, content string, isError bool) anthropic.MessageParam {
 	return anthropic.NewUserMessage(
 		anthropic.NewToolResultBlock(id, content, isError),
 	)
 }
 
-// helper: build a plain user text message.
+// userMsg builds a plain user text message.
 func userMsg(text string) anthropic.MessageParam {
 	return anthropic.NewUserMessage(anthropic.NewTextBlock(text))
 }
 
-// helper: build a plain assistant text message.
+// assistantMsg builds a plain assistant text message.
 func assistantMsg(text string) anthropic.MessageParam {
 	return anthropic.NewAssistantMessage(anthropic.NewTextBlock(text))
 }

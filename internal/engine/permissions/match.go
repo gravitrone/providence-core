@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+// --- Safety Data ---
+
 // safetyPaths are directories and files that always require user approval,
 // even in bypass mode. Modifications to these can compromise the system.
 var safetyPaths = []string{
@@ -33,6 +35,8 @@ var readOnlyTools = map[string]bool{
 	"Glob": true,
 	"Grep": true,
 }
+
+// --- Rule Matching ---
 
 // matchesRules checks if toolName+input matches any rule in the list.
 func matchesRules(rules []Rule, toolName string, input interface{}) bool {
@@ -108,6 +112,8 @@ func extractArg(input interface{}) string {
 	return ""
 }
 
+// --- Safety Checks ---
+
 // isSafetyPath checks if the tool targets a protected path.
 func isSafetyPath(toolName string, input interface{}) bool {
 	arg := extractArg(input)
@@ -151,6 +157,8 @@ func isShellConfig(path string) bool {
 	}
 	return false
 }
+
+// --- Mode Helpers ---
 
 // isFileEditTool checks if the tool is a file modification tool.
 func isFileEditTool(toolName string) bool {

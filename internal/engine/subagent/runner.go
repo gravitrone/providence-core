@@ -61,6 +61,8 @@ type RunningAgent struct {
 	RepoRoot       string     // original repo root for worktree cleanup
 }
 
+// --- Constructors ---
+
 // NewRunner creates a Runner.
 func NewRunner() *Runner {
 	return &Runner{agents: make(map[string]*RunningAgent)}
@@ -73,6 +75,8 @@ func NewRunnerWithWorkDir(workDir string) *Runner {
 		WorkDir: workDir,
 	}
 }
+
+// --- Public API ---
 
 // Spawn creates a new subagent goroutine. For sync agents it blocks until completion.
 // For async agents (RunInBG=true) it returns immediately with the agent ID.
@@ -134,7 +138,6 @@ func (r *Runner) Spawn(ctx context.Context, input TaskInput, agentType AgentType
 		return agentID, nil
 	}
 
-	// Sync: run and wait.
 	r.runAgent(ctx, agent, input, agentType, executor)
 	return agentID, nil
 }
@@ -246,6 +249,8 @@ func (r *Runner) FindByName(name string) *RunningAgent {
 	return nil
 }
 
+// --- Internal ---
+
 func (r *Runner) runAgent(ctx context.Context, agent *RunningAgent, input TaskInput, agentType AgentType, executor Executor) {
 	defer close(agent.Done)
 	start := time.Now()
@@ -256,7 +261,6 @@ func (r *Runner) runAgent(ctx context.Context, agent *RunningAgent, input TaskIn
 	defer r.mu.Unlock()
 
 	if ctx.Err() != nil && agent.Status == "killed" {
-		// Already killed, preserve killed status.
 		if agent.Result == nil {
 			agent.Result = &TaskResult{
 				AgentID:    agent.ID,

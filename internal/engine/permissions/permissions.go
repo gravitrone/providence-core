@@ -3,6 +3,8 @@
 // ordered rule evaluation, mode-based defaults, and bypass-immune safety checks.
 package permissions
 
+// --- Modes ---
+
 // PermissionMode controls the default tool approval behavior.
 type PermissionMode string
 
@@ -19,6 +21,8 @@ const (
 	ModeDontAsk PermissionMode = "dontAsk"
 )
 
+// --- Decisions ---
+
 // Decision is the result of a permission check.
 type Decision string
 
@@ -30,6 +34,8 @@ const (
 	// Ask requires user confirmation before executing.
 	Ask Decision = "ask"
 )
+
+// --- Types ---
 
 // Rule defines a permission rule (allow/deny/ask) for a tool pattern.
 type Rule struct {

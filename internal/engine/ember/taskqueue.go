@@ -6,6 +6,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// --- Task Queue ---
+
 // TaskQueueItem is a task from .providence/tasks.yaml.
 type TaskQueueItem struct {
 	ID          string `yaml:"id"`

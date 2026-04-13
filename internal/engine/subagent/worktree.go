@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+// --- Worktree Helpers ---
+
 // slugRe strips non-alphanumeric characters for branch-safe naming.
 var slugRe = regexp.MustCompile(`[^a-zA-Z0-9-]`)
 

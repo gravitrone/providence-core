@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+// --- State ---
+
 // State tracks the ember autonomous loop state.
 type State struct {
 	Active     bool
@@ -115,6 +117,8 @@ func (s *State) Status() string {
 	return fmt.Sprintf("ember: %s | focus: %s | ticks: %d | last tick: %s",
 		stateStr, s.FocusState, s.TickCount, lastTick)
 }
+
+// --- Tick ---
 
 // GenerateTick creates the tick message content.
 func GenerateTick() string {

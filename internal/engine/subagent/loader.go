@@ -10,6 +10,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// --- Loader ---
+
 // agentSearchDirs returns the ordered list of agent directories to scan.
 // Project-level dirs come first so they override user-level definitions.
 func agentSearchDirs(projectRoot, homeDir string) []string {

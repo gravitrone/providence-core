@@ -1,5 +1,7 @@
 package subagent
 
+// --- Tool Filtering ---
+
 // AgentDisallowedTools are always blocked for subagents to prevent
 // recursion and interaction with the parent session's control flow.
 var AgentDisallowedTools = []string{
@@ -15,7 +17,6 @@ var AgentDisallowedTools = []string{
 // AgentDisallowedTools are always removed unless the agent type explicitly
 // includes them in its Tools list (non-wildcard).
 func FilterTools(allTools []string, agentType AgentType) []string {
-	// Build the base set.
 	var base []string
 	if containsWildcard(agentType.Tools) {
 		base = make([]string, len(allTools))
@@ -48,7 +49,6 @@ func FilterTools(allTools []string, agentType AgentType) []string {
 		}
 	}
 
-	// Filter.
 	result := make([]string, 0, len(base))
 	for _, t := range base {
 		if _, blocked := deny[t]; !blocked {

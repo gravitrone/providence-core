@@ -40,6 +40,8 @@ const (
 	DashboardPanelUpdate = "DashboardPanelUpdate"
 )
 
+// --- Types ---
+
 // HookConfig defines a single hook - either a shell command or HTTP endpoint.
 type HookConfig struct {
 	Command string        `toml:"command" json:"command,omitempty"`
@@ -72,9 +74,12 @@ type BlockingError struct {
 	Output  *HookOutput
 }
 
+// Error implements the error interface.
 func (e *BlockingError) Error() string {
 	return fmt.Sprintf("blocking hook error: %s", e.Message)
 }
+
+// --- Runner ---
 
 // Runner executes hooks for lifecycle events.
 type Runner struct {
@@ -140,7 +145,6 @@ func (r *Runner) RunAsync(ctx context.Context, event string, input HookInput) {
 			_, _ = r.execOne(ctx, c, input)
 		}(cfg)
 	}
-	// Don't wait - fire and forget. The goroutines will finish on their own.
 }
 
 // execOne dispatches to the appropriate executor based on config.

@@ -2,6 +2,8 @@ package compact
 
 import "github.com/anthropics/anthropic-sdk-go"
 
+// --- Microcompact ---
+
 // ToolResultCleared is the stub text that replaces pruned tool results.
 const ToolResultCleared = "[Old tool result content cleared]"
 

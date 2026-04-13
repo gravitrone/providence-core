@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+// --- Checkpoint ---
+
 // Checkpoint captures session state for crash recovery.
 type Checkpoint struct {
 	SessionID   string    `json:"session_id"`

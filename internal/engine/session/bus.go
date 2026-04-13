@@ -2,6 +2,8 @@ package session
 
 import "sync"
 
+// --- Events ---
+
 // Event types for the session event bus.
 const (
 	EventNewMessage     = "new_message"
@@ -16,6 +18,8 @@ type Event struct {
 	Type string
 	Data any
 }
+
+// --- Bus ---
 
 // Bus is a fan-out event broadcaster for background agents.
 // Subscribers receive events on buffered channels. Slow subscribers

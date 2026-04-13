@@ -23,6 +23,8 @@ const (
 	keepRecentPercent = 30
 )
 
+// --- Threshold Helpers ---
+
 // GetEffectiveContextWindow returns the usable context window after reserving
 // space for the model's output tokens.
 func GetEffectiveContextWindow(contextWindow, maxOutputTokens int) int {
@@ -41,6 +43,8 @@ func GetAutoCompactThreshold(contextWindow, maxOutputTokens int) int {
 func GetBlockingLimit(contextWindow, maxOutputTokens int) int {
 	return GetEffectiveContextWindow(contextWindow, maxOutputTokens) - ManualCompactBufferTokens
 }
+
+// --- Types ---
 
 // Phase describes the current compaction lifecycle state.
 type Phase string
@@ -76,6 +80,8 @@ type Orchestrator struct {
 	consecutiveFailures   int
 	hasAttemptedReactive  bool
 }
+
+// --- Orchestrator ---
 
 // New creates a compaction orchestrator for the given provider.
 func New(provider Provider, onPhaseChange func(Phase, error)) *Orchestrator {
@@ -241,6 +247,8 @@ func (o *Orchestrator) IsRunning() bool {
 	defer o.mu.Unlock()
 	return o.phase == PhaseRunning
 }
+
+// --- Internal ---
 
 func (o *Orchestrator) run(ctx context.Context, done chan struct{}, keepRecentTokens int) {
 	defer close(done)

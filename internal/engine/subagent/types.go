@@ -2,6 +2,8 @@ package subagent
 
 import "fmt"
 
+// --- Types ---
+
 // AgentType defines a reusable agent configuration that can be instantiated
 // as a subagent. Built-in types, custom user types, and background agents
 // all share this shape.
@@ -69,6 +71,8 @@ func (n TaskNotification) ToXML() string {
 <usage><total_tokens>%d</total_tokens><tool_uses>%d</tool_uses><duration_ms>%d</duration_ms></usage>
 </task-notification>`, n.TaskID, n.Status, n.Summary, n.Result, n.Tokens, n.ToolUses, n.Duration)
 }
+
+// --- Defaults ---
 
 // DefaultAgentType returns a general-purpose agent type for unrecognized subagent_type values.
 func DefaultAgentType() AgentType {

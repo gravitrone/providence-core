@@ -60,7 +60,6 @@ func execShellHook(ctx context.Context, cfg HookConfig, input HookInput) (*HookO
 		return nil, fmt.Errorf("hook exited with code %d: %s", exitCode, stderr.String())
 	}
 
-	// Exit 0 - parse stdout as HookOutput
 	return parseOutput(stdout.Bytes()), nil
 }
 

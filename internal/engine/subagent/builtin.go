@@ -1,5 +1,7 @@
 package subagent
 
+// --- Registry ---
+
 // BuiltinAgents is the registry of built-in agent types available out of the
 // box. Keys are the canonical names used in /fork and Task tool invocations.
 var BuiltinAgents = map[string]AgentType{
@@ -301,6 +303,8 @@ End with a summary:
 - Overall assessment: APPROVE / REQUEST CHANGES / NEEDS DISCUSSION`,
 	},
 }
+
+// --- Resolver ---
 
 // ResolveAgentType looks up an agent type by name. Custom agents take
 // priority over built-ins so projects can override default behavior.

@@ -3,10 +3,12 @@ package direct
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/uuid"
+	"github.com/gravitrone/providence-core/internal/auth"
 	"github.com/gravitrone/providence-core/internal/bridge/macos"
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/compact"
@@ -1575,11 +1578,71 @@ func (e *DirectEngine) Steer(text string) {
 	e.steered = append(e.steered, text)
 }
 
-// streamWithRetry calls the Messages API with streaming, retrying up to 3 times
-// on 429 rate limit errors with exponential backoff. ReadOnly tools are
-// pre-executed as their blocks complete during streaming (overlapped execution).
+// streamMaxRetries returns the configured max retry count from PROVIDENCE_MAX_RETRIES
+// env var, defaulting to 10.
+func streamMaxRetries() int {
+	if v := os.Getenv("PROVIDENCE_MAX_RETRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 10
+}
+
+// extractRetryDelay tries to parse a Retry-After delay from the API error response
+// headers. It checks the standard Retry-After header and the Anthropic-specific
+// anthropic-ratelimit-unified-reset header. Returns 0 if no usable value is found.
+func extractRetryDelay(err error) time.Duration {
+	var apiErr *anthropic.Error
+	if !errors.As(err, &apiErr) || apiErr.Response == nil {
+		return 0
+	}
+
+	// Try standard Retry-After header first (value in seconds).
+	if ra := apiErr.Response.Header.Get("Retry-After"); ra != "" {
+		if secs, parseErr := strconv.Atoi(ra); parseErr == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+		// Retry-After can also be an HTTP-date; parse RFC1123.
+		if t, parseErr := time.Parse(time.RFC1123, ra); parseErr == nil {
+			if d := time.Until(t); d > 0 {
+				return d
+			}
+		}
+	}
+
+	// Try Anthropic-specific reset timestamp header.
+	if reset := apiErr.Response.Header.Get("anthropic-ratelimit-unified-reset"); reset != "" {
+		if t, parseErr := time.Parse(time.RFC3339, reset); parseErr == nil {
+			if d := time.Until(t); d > 0 {
+				return d
+			}
+		}
+	}
+
+	return 0
+}
+
+// streamIdleTimeout returns the idle watchdog timeout from
+// PROVIDENCE_STREAM_IDLE_TIMEOUT_MS env var, defaulting to 90 seconds.
+func streamIdleTimeout() time.Duration {
+	if v := os.Getenv("PROVIDENCE_STREAM_IDLE_TIMEOUT_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return 90 * time.Second
+}
+
+// streamWithRetry calls the Messages API with streaming, retrying on 429 rate
+// limit errors. Uses Retry-After header delay when available, falling back to
+// exponential backoff. Max retries configurable via PROVIDENCE_MAX_RETRIES (default 10).
+// A stream idle watchdog cancels the attempt if no events arrive within the
+// idle timeout (PROVIDENCE_STREAM_IDLE_TIMEOUT_MS, default 90000ms).
+// ReadOnly tools are pre-executed as their blocks complete during streaming.
 func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.MessageNewParams) (anthropic.Message, error) {
-	const maxRetries = 3
+	maxRetries := streamMaxRetries()
+	idleTimeout := streamIdleTimeout()
 
 	// Reset pre-execution state for this streaming call.
 	e.preExecMu.Lock()
@@ -1587,13 +1650,39 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 	e.preExecMu.Unlock()
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		stream := e.client.Messages.NewStreaming(ctx, params)
+		// Create a child context so the idle watchdog can cancel just this attempt.
+		attemptCtx, attemptCancel := context.WithCancel(ctx)
+
+		stream := e.client.Messages.NewStreaming(attemptCtx, params)
+
+		// Idle watchdog: a timer that fires if no stream events arrive within
+		// the timeout. On fire, it cancels the attempt context so the stream
+		// read returns an error and streamWithRetry can retry.
+		idleTimer := time.NewTimer(idleTimeout)
+		idleTriggered := false
+		go func() {
+			select {
+			case <-idleTimer.C:
+				idleTriggered = true
+				attemptCancel()
+			case <-attemptCtx.Done():
+			}
+		}()
 
 		// Track tool_use block indices seen via ContentBlockStartEvent.
 		toolBlockIndices := make(map[int64]bool)
 
 		var accumulated anthropic.Message
 		for stream.Next() {
+			// Reset idle watchdog on each event.
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(idleTimeout)
+
 			event := stream.Current()
 			_ = accumulated.Accumulate(event)
 			if pe := translateStreamEvent(event); pe != nil {
@@ -1613,11 +1702,32 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 				}
 			}
 		}
+
+		idleTimer.Stop()
+		attemptCancel()
+
 		if err := stream.Err(); err != nil {
+			// Idle watchdog fired - treat as a transient error and retry.
+			if idleTriggered && attempt < maxRetries-1 {
+				continue
+			}
+
+			// Auth errors: attempt recovery (OAuth refresh) once, then fail.
+			if isAuthError(err) {
+				if e.handleAuthError(err) {
+					continue // recovery succeeded, retry
+				}
+				return accumulated, err
+			}
+
 			errStr := err.Error()
 			if strings.Contains(errStr, "429") || strings.Contains(errStr, "rate_limit") {
 				if attempt < maxRetries-1 {
-					delay := engine.Backoff(attempt)
+					// Prefer server-provided Retry-After delay; fall back to exponential backoff.
+					delay := extractRetryDelay(err)
+					if delay == 0 {
+						delay = engine.Backoff(attempt)
+					}
 					delaySec := int(delay.Seconds())
 					if delaySec < 1 {
 						delaySec = 1
@@ -1699,6 +1809,123 @@ func (e *DirectEngine) synthesizeErrorToolResults(accumulated anthropic.Message)
 		))
 	}
 	e.history.AddToolResults(resultBlocks)
+}
+
+// isAuthError returns true if the error indicates an authentication or
+// authorization failure (HTTP 401 or 403).
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "401") ||
+		strings.Contains(msg, "403") ||
+		strings.Contains(msg, "authentication_error") ||
+		strings.Contains(msg, "permission_error") ||
+		strings.Contains(msg, "organization_disabled")
+}
+
+// classifyAuthError returns a user-friendly message for auth errors, or empty
+// string if the error is not auth-related.
+func classifyAuthError(err error, provider string) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+
+	// 403 with organization disabled.
+	if strings.Contains(msg, "organization_disabled") || strings.Contains(msg, "organization") && strings.Contains(msg, "403") {
+		return "API access denied: your organization has been disabled. Check your Anthropic dashboard."
+	}
+
+	// 401 handling differs by provider.
+	if strings.Contains(msg, "401") || strings.Contains(msg, "authentication_error") {
+		switch provider {
+		case engine.ProviderOpenAI:
+			return "OpenAI OAuth token invalid or expired. Attempting refresh..."
+		case engine.ProviderAnthropic:
+			return "API key invalid or expired. Check ANTHROPIC_API_KEY env var."
+		case engine.ProviderOpenRouter:
+			return "OpenRouter API key invalid or expired. Check OPENROUTER_API_KEY env var."
+		default:
+			return "API authentication failed. Check your API key or credentials."
+		}
+	}
+
+	// 403 generic.
+	if strings.Contains(msg, "403") || strings.Contains(msg, "permission_error") {
+		return "API access forbidden (403). Check your API key permissions."
+	}
+
+	return ""
+}
+
+// handleAuthError attempts to recover from auth errors. For OpenAI OAuth, it
+// tries to refresh the token and rebuild the client. Returns true if recovery
+// succeeded and the caller should retry.
+func (e *DirectEngine) handleAuthError(err error) bool {
+	if !isAuthError(err) {
+		return false
+	}
+
+	msg := err.Error()
+
+	// Only attempt OAuth refresh for OpenAI 401 errors.
+	if e.codexMode && (strings.Contains(msg, "401") || strings.Contains(msg, "authentication_error")) {
+		// Check if we have saved OAuth tokens to refresh.
+		tokens, loadErr := auth.LoadOpenAITokens()
+		if loadErr != nil {
+			return false
+		}
+		if tokens.RefreshToken == "" {
+			return false
+		}
+
+		e.events <- engine.ParsedEvent{
+			Type: "system_message",
+			Data: &engine.SystemMessageEvent{
+				Type:    "system_message",
+				Content: "OpenAI token expired. Refreshing...",
+			},
+		}
+
+		refreshed, refreshErr := auth.RefreshOpenAI(tokens.RefreshToken)
+		if refreshErr != nil {
+			e.events <- engine.ParsedEvent{
+				Type: "system_message",
+				Data: &engine.SystemMessageEvent{
+					Type:    "system_message",
+					Content: fmt.Sprintf("Token refresh failed: %v. Run /auth to re-authenticate.", refreshErr),
+				},
+			}
+			return false
+		}
+
+		// Save refreshed tokens.
+		_ = auth.SaveOpenAITokens(refreshed)
+
+		e.events <- engine.ParsedEvent{
+			Type: "system_message",
+			Data: &engine.SystemMessageEvent{
+				Type:    "system_message",
+				Content: "Token refreshed successfully. Retrying...",
+			},
+		}
+		return true
+	}
+
+	// For non-OAuth providers, emit the specific error message but don't recover.
+	if authMsg := classifyAuthError(err, e.provider); authMsg != "" {
+		e.events <- engine.ParsedEvent{
+			Type: "system_message",
+			Data: &engine.SystemMessageEvent{
+				Type:    "system_message",
+				Content: authMsg,
+			},
+		}
+	}
+
+	return false
 }
 
 // isOverloadError returns true if the error indicates a model overload (HTTP 529

@@ -23,18 +23,26 @@ type ToolCallResult struct {
 // StreamingToolQueue executes tool calls with concurrency rules:
 //   - ReadOnly tools run in parallel (goroutines).
 //   - Non-ReadOnly tools run serially: wait for all in-flight, then execute.
+//   - Bash errors trigger sibling cancellation: all other concurrent tools
+//     receive context cancellation when a Bash tool returns an error.
 type StreamingToolQueue struct {
 	registry *tools.Registry
 	results  []ToolCallResult
 	mu       sync.Mutex
 	wg       sync.WaitGroup
+
+	// siblingCtx/siblingCancel: when a Bash tool errors, siblingCancel is called
+	// to cancel all other concurrently running tools in this batch.
+	siblingCtx    context.Context
+	siblingCancel context.CancelFunc
 }
 
 // NewStreamingToolQueue creates a queue backed by the given tool registry.
 func NewStreamingToolQueue(registry *tools.Registry) *StreamingToolQueue {
-	return &StreamingToolQueue{
+	q := &StreamingToolQueue{
 		registry: registry,
 	}
+	return q
 }
 
 // Submit enqueues a tool call for execution following concurrency rules.
@@ -50,11 +58,19 @@ func (q *StreamingToolQueue) Submit(ctx context.Context, call ToolCall) {
 		return
 	}
 
+	// Lazily initialize sibling cancellation context for this batch.
+	q.mu.Lock()
+	if q.siblingCtx == nil {
+		q.siblingCtx, q.siblingCancel = context.WithCancel(ctx)
+	}
+	siblingCtx := q.siblingCtx
+	q.mu.Unlock()
+
 	if tool.ReadOnly() {
 		q.wg.Add(1)
 		go func() {
 			defer q.wg.Done()
-			result := tool.Execute(ctx, call.Input)
+			result := tool.Execute(siblingCtx, call.Input)
 			q.mu.Lock()
 			q.results = append(q.results, ToolCallResult{ToolCall: call, Result: result})
 			q.mu.Unlock()
@@ -63,10 +79,20 @@ func (q *StreamingToolQueue) Submit(ctx context.Context, call ToolCall) {
 		// Wait for all in-flight read-only goroutines to finish.
 		q.wg.Wait()
 		// Execute serially (blocking).
-		result := tool.Execute(ctx, call.Input)
+		result := tool.Execute(siblingCtx, call.Input)
 		q.mu.Lock()
 		q.results = append(q.results, ToolCallResult{ToolCall: call, Result: result})
 		q.mu.Unlock()
+
+		// Bash error sibling cascade: if a Bash tool errors, cancel all
+		// other running concurrent tools in this batch.
+		if call.Name == "Bash" && result.IsError {
+			q.mu.Lock()
+			if q.siblingCancel != nil {
+				q.siblingCancel()
+			}
+			q.mu.Unlock()
+		}
 	}
 }
 

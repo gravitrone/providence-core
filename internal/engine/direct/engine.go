@@ -29,6 +29,12 @@ import (
 // automatically retry after hitting max_tokens before surfacing the error.
 const MaxOutputTokensRecoveryLimit = 3
 
+// DefaultMaxOutputTokens is the standard output token limit per API call.
+const DefaultMaxOutputTokens = 16384
+
+// EscalatedMaxOutputTokens is the higher limit tried before multi-turn recovery.
+const EscalatedMaxOutputTokens = 64000
+
 func init() {
 	engine.RegisterFactory(engine.EngineTypeDirect, func(cfg engine.EngineConfig) (engine.Engine, error) {
 		return NewDirectEngine(cfg)
@@ -72,6 +78,10 @@ type DirectEngine struct {
 	// for this turn, preventing infinite fallback loops.
 	fallbackActive bool
 
+	// outputTokensEscalated is true when we've already tried EscalatedMaxOutputTokens
+	// for this turn. Prevents re-escalation on subsequent max_tokens hits.
+	outputTokensEscalated bool
+
 	// Structured system prompt blocks (preferred over e.system).
 	blocks []engine.SystemBlock
 
@@ -112,6 +122,11 @@ type DirectEngine struct {
 
 	// File watcher for config change detection.
 	fileWatcher *filewatch.Watcher
+
+	// Pre-executed tool results from streaming-overlapped execution.
+	preExecResults map[string]tools.ToolResult
+	preExecMu      sync.Mutex
+	preExecWg      sync.WaitGroup
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -467,6 +482,7 @@ func (e *DirectEngine) Send(text string) error {
 	e.status = engine.StatusRunning
 	e.maxOutputRecoveryCount = 0
 	e.fallbackActive = false
+	e.outputTokensEscalated = false
 	// Reset context for this turn.
 	e.ctx, e.cancel = context.WithCancel(context.Background())
 	e.mu.Unlock()
@@ -994,9 +1010,39 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		toolParams := e.toolParams()
 
+		// Pre-call blocking limit check: if estimated tokens exceed the hard
+		// ceiling (effectiveWindow - 3000), skip the API call and trigger
+		// reactive compaction instead of wasting an API round-trip.
+		if e.compactor != nil {
+			currentTokens := e.history.CurrentTokens()
+			contextWindow := engine.ContextWindowFor(e.model)
+			maxOutput := engine.MaxOutputTokensFor(e.model)
+			hardBlock := compact.GetEffectiveContextWindow(contextWindow, maxOutput) - 3000
+			if currentTokens > hardBlock {
+				e.events <- engine.ParsedEvent{
+					Type: "system_message",
+					Data: &engine.SystemMessageEvent{
+						Type:    "system_message",
+						Content: fmt.Sprintf("Prompt tokens (%d) exceed hard limit (%d). Compacting before API call...", currentTokens, hardBlock),
+					},
+				}
+				if compactErr := e.compactor.TriggerReactive(ctx); compactErr == nil {
+					continue
+				}
+				e.emitError(fmt.Errorf("prompt exceeds context window and compaction failed"))
+				return
+			}
+		}
+
+		// Use escalated output token limit if a previous turn hit max_tokens.
+		maxTokens := int64(DefaultMaxOutputTokens)
+		if e.outputTokensEscalated {
+			maxTokens = int64(EscalatedMaxOutputTokens)
+		}
+
 		apiParams := anthropic.MessageNewParams{
 			Model:     anthropic.Model(e.model),
-			MaxTokens: 16384,
+			MaxTokens: maxTokens,
 			System:    e.systemBlocks(),
 			Messages:  msgs,
 			Tools:     toolParams,
@@ -1023,7 +1069,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		}
 
 		if streamErr != nil {
-			if isOverloadError(streamErr) && !e.fallbackActive {
+			if isFallbackTriggerable(streamErr) && !e.fallbackActive {
 				fallback := engine.FastForProvider(e.provider)
 				if fallback != "" && fallback != e.model {
 					// Tombstone any partial streaming content so UI can clear it.
@@ -1031,6 +1077,10 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 						Type: "tombstone",
 						Data: &engine.TombstoneEvent{Type: "tombstone", MessageIndex: -1},
 					}
+
+					// If partial content was streamed with tool_use blocks,
+					// synthesize error results so history stays consistent.
+					e.synthesizeErrorToolResults(accumulated)
 
 					previousModel := e.model
 					e.model = fallback
@@ -1044,12 +1094,15 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 						Type: "system_message",
 						Data: &engine.SystemMessageEvent{
 							Type:    "system_message",
-							Content: fmt.Sprintf("Model overloaded. Switched from %s to %s.", previousModel, fallback),
+							Content: fmt.Sprintf("Model unavailable (%s). Switched from %s to %s.", streamErr, previousModel, fallback),
 						},
 					}
 					continue
 				}
 			}
+			// Synthesize error tool_results for any orphaned tool_use blocks
+			// so the next API call doesn't 400 on unmatched pairs.
+			e.synthesizeErrorToolResults(accumulated)
 			e.emitError(streamErr)
 			return
 		}
@@ -1067,9 +1120,27 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		e.emitAssistant(accumulated)
 
-		// Max output tokens recovery: inject a recovery prompt and retry up to
-		// MaxOutputTokensRecoveryLimit times.
+		// Max output tokens recovery: first try escalating to 64k, then
+		// fall through to multi-turn resume with recovery prompts.
 		if accumulated.StopReason == anthropic.StopReasonMaxTokens {
+			// Step 1: Escalate output tokens from 16k to 64k and retry
+			// the SAME request (no recovery prompt injection).
+			if !e.outputTokensEscalated {
+				e.outputTokensEscalated = true
+				e.events <- engine.ParsedEvent{
+					Type: "system_message",
+					Data: &engine.SystemMessageEvent{
+						Type:    "system_message",
+						Content: fmt.Sprintf("Max output tokens hit at %d. Escalating to %d and retrying...", DefaultMaxOutputTokens, EscalatedMaxOutputTokens),
+					},
+				}
+				// Remove the partial assistant message from history since we're
+				// retrying the same request with a higher limit.
+				e.history.RemoveLastAssistant()
+				continue
+			}
+
+			// Step 2: Already at 64k, fall through to multi-turn recovery.
 			if e.maxOutputRecoveryCount < MaxOutputTokensRecoveryLimit {
 				e.maxOutputRecoveryCount++
 				e.history.AddUser("Output token limit hit. Resume directly - no apology, no recap. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.")
@@ -1077,24 +1148,49 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 					Type: "system_message",
 					Data: &engine.SystemMessageEvent{
 						Type:    "system_message",
-						Content: fmt.Sprintf("Max output tokens hit (%d/%d), auto-resuming.", e.maxOutputRecoveryCount, MaxOutputTokensRecoveryLimit),
+						Content: fmt.Sprintf("Max output tokens hit at %d (%d/%d), auto-resuming.", EscalatedMaxOutputTokens, e.maxOutputRecoveryCount, MaxOutputTokensRecoveryLimit),
 					},
 				}
 				continue
 			}
-			e.emitError(fmt.Errorf("max output tokens hit %d times, giving up", MaxOutputTokensRecoveryLimit))
+			e.emitError(fmt.Errorf("max output tokens hit %d times at %d, giving up", MaxOutputTokensRecoveryLimit, EscalatedMaxOutputTokens))
 			return
 		}
 
 		if accumulated.StopReason != anthropic.StopReasonToolUse {
+			// Fire Stop hook on natural turn completion (no more tool calls).
+			e.fireHookAsync(hooks.Stop, hooks.HookInput{
+				ToolInput: "natural_end",
+			})
 			e.history.CompressLongToolResults(2000)
 			return
 		}
+
+		// Wait for any pre-executed ReadOnly tools from streaming overlap to finish.
+		e.preExecWg.Wait()
 
 		toolCalls := extractToolCalls(accumulated)
 		queue := NewStreamingToolQueue(e.registry)
 		for _, tc := range toolCalls {
 			e.sessionBus.Publish(session.Event{Type: session.EventToolCallStart, Data: tc.Name})
+
+			// Check if this tool was already pre-executed during streaming.
+			e.preExecMu.Lock()
+			preResult, preExecuted := e.preExecResults[tc.ID]
+			if preExecuted {
+				delete(e.preExecResults, tc.ID)
+			}
+			e.preExecMu.Unlock()
+
+			if preExecuted {
+				queue.mu.Lock()
+				queue.results = append(queue.results, ToolCallResult{
+					ToolCall: tc,
+					Result:   preResult,
+				})
+				queue.mu.Unlock()
+				continue
+			}
 
 			// Fire PreToolUse hook.
 			if hookOut, hookErr := e.fireHook(hooks.PreToolUse, hooks.HookInput{
@@ -1392,12 +1488,21 @@ func (e *DirectEngine) Steer(text string) {
 }
 
 // streamWithRetry calls the Messages API with streaming, retrying up to 3 times
-// on 429 rate limit errors with exponential backoff.
+// on 429 rate limit errors with exponential backoff. ReadOnly tools are
+// pre-executed as their blocks complete during streaming (overlapped execution).
 func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.MessageNewParams) (anthropic.Message, error) {
 	const maxRetries = 3
 
+	// Reset pre-execution state for this streaming call.
+	e.preExecMu.Lock()
+	e.preExecResults = make(map[string]tools.ToolResult)
+	e.preExecMu.Unlock()
+
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		stream := e.client.Messages.NewStreaming(ctx, params)
+
+		// Track tool_use block indices seen via ContentBlockStartEvent.
+		toolBlockIndices := make(map[int64]bool)
 
 		var accumulated anthropic.Message
 		for stream.Next() {
@@ -1405,6 +1510,19 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 			_ = accumulated.Accumulate(event)
 			if pe := translateStreamEvent(event); pe != nil {
 				e.events <- *pe
+			}
+
+			// Detect tool_use block starts and completions for overlapped execution.
+			switch variant := event.AsAny().(type) {
+			case anthropic.ContentBlockStartEvent:
+				if variant.ContentBlock.Type == "tool_use" {
+					toolBlockIndices[variant.Index] = true
+				}
+			case anthropic.ContentBlockStopEvent:
+				if toolBlockIndices[variant.Index] {
+					// A tool_use block just completed. Check if its tool is ReadOnly.
+					e.maybePreExecuteTool(ctx, accumulated, int(variant.Index))
+				}
 			}
 		}
 		if err := stream.Err(); err != nil {
@@ -1437,6 +1555,64 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 	return anthropic.Message{}, fmt.Errorf("stream retry exhausted")
 }
 
+// maybePreExecuteTool checks if the tool_use block at the given index in the
+// accumulated message is for a ReadOnly tool. If so, it spawns a goroutine to
+// execute it immediately, storing the result in preExecResults.
+func (e *DirectEngine) maybePreExecuteTool(ctx context.Context, accumulated anthropic.Message, blockIndex int) {
+	if blockIndex >= len(accumulated.Content) {
+		return
+	}
+	block := accumulated.Content[blockIndex]
+	if block.Type != "tool_use" {
+		return
+	}
+
+	tool, ok := e.registry.Get(block.Name)
+	if !ok || !tool.ReadOnly() {
+		return
+	}
+
+	var input map[string]any
+	if len(block.Input) > 0 {
+		_ = json.Unmarshal(block.Input, &input)
+	}
+	if input == nil {
+		input = make(map[string]any)
+	}
+
+	toolID := block.ID
+	e.preExecWg.Add(1)
+	go func() {
+		defer e.preExecWg.Done()
+		result := tool.Execute(ctx, input)
+		e.preExecMu.Lock()
+		e.preExecResults[toolID] = result
+		e.preExecMu.Unlock()
+	}()
+}
+
+// synthesizeErrorToolResults checks if an accumulated (partial) response contains
+// tool_use blocks and, if so, adds matching error tool_results to history. This
+// prevents the next API call from failing on unmatched tool_use/tool_result pairs.
+func (e *DirectEngine) synthesizeErrorToolResults(accumulated anthropic.Message) {
+	toolCalls := extractToolCalls(accumulated)
+	if len(toolCalls) == 0 {
+		return
+	}
+
+	// Add the partial assistant message to history so the tool_results have
+	// a matching assistant turn.
+	e.history.AddAssistant(accumulated)
+
+	var resultBlocks []anthropic.ContentBlockParamUnion
+	for _, tc := range toolCalls {
+		resultBlocks = append(resultBlocks, anthropic.NewToolResultBlock(
+			tc.ID, "[tool execution skipped due to API error]", true,
+		))
+	}
+	e.history.AddToolResults(resultBlocks)
+}
+
 // isOverloadError returns true if the error indicates a model overload (HTTP 529
 // or "overloaded_error" in the response body).
 func isOverloadError(err error) bool {
@@ -1445,6 +1621,24 @@ func isOverloadError(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "529") || strings.Contains(msg, "overloaded")
+}
+
+// isFallbackTriggerable returns true if the error warrants a model fallback.
+// Covers overload errors plus server-side failures (500, 502, 503) that commonly
+// occur mid-stream and indicate the primary model is temporarily unavailable.
+func isFallbackTriggerable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isOverloadError(err) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "500") ||
+		strings.Contains(msg, "502") ||
+		strings.Contains(msg, "503") ||
+		strings.Contains(msg, "server_error") ||
+		strings.Contains(msg, "internal_error")
 }
 
 // fireHook runs hooks for the given event synchronously and returns the output.

@@ -18,6 +18,7 @@ type AgentType struct {
 	Background      bool     `yaml:"background"`
 	Isolation       string   `yaml:"isolation"`
 	SystemPrompt    string   `yaml:"-"`
+	WorkDir         string   `yaml:"-"` // Override working directory (set by worktree isolation)
 }
 
 // TaskInput is the input schema for the Task/Agent tool.
@@ -32,16 +33,19 @@ type TaskInput struct {
 	Name          string `json:"name,omitempty"`
 	Tools         string `json:"tools,omitempty"`
 	MergeStrategy string `json:"merge_strategy,omitempty"`
+	Isolation     string `json:"isolation,omitempty"` // "worktree", "docker", or empty (none)
 }
 
 // TaskResult is returned when an agent completes.
 type TaskResult struct {
-	AgentID     string `json:"agent_id"`
-	Status      string `json:"status"`
-	Result      string `json:"result"`
-	TotalTokens int    `json:"total_tokens"`
-	ToolUses    int    `json:"tool_uses"`
-	DurationMS  int64  `json:"duration_ms"`
+	AgentID        string `json:"agent_id"`
+	Status         string `json:"status"`
+	Result         string `json:"result"`
+	TotalTokens    int    `json:"total_tokens"`
+	ToolUses       int    `json:"tool_uses"`
+	DurationMS     int64  `json:"duration_ms"`
+	WorktreePath   string `json:"worktree_path,omitempty"`
+	WorktreeBranch string `json:"worktree_branch,omitempty"`
 }
 
 // TaskNotification is the XML-formatted notification for async agents (CC compat).

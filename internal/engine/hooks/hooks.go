@@ -35,6 +35,8 @@ const (
 	HarnessChange        = "HarnessChange"
 	ForkSpawn            = "ForkSpawn"
 	ForkMerge            = "ForkMerge"
+	WorktreeCreate       = "WorktreeCreate"
+	WorktreeRemove       = "WorktreeRemove"
 	DashboardPanelUpdate = "DashboardPanelUpdate"
 )
 

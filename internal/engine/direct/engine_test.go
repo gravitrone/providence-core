@@ -8,6 +8,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/session"
+	"github.com/gravitrone/providence-core/internal/engine/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -382,6 +383,88 @@ func TestFallbackNotTriggeredWhenAlreadyActive(t *testing.T) {
 	// Since fallbackActive is true, the engine should NOT attempt another fallback.
 	// This matches the `!e.fallbackActive` guard in the agent loop.
 	assert.True(t, e.fallbackActive, "fallback should stay active, no second fallback")
+}
+
+func TestMapModelForEngine(t *testing.T) {
+	tests := []struct {
+		model  string
+		engine string
+		want   string
+	}{
+		// Codex always maps to gpt-5.4-codex.
+		{"opus", "codex", "gpt-5.4-codex"},
+		{"sonnet", "codex_re", "gpt-5.4-codex"},
+		{"anything", "codex", "gpt-5.4-codex"},
+
+		// Claude maps aliases.
+		{"sonnet", "claude", "claude-sonnet-4-6"},
+		{"opus", "claude", "claude-opus-4-6"},
+		{"haiku", "direct", "claude-haiku-4"},
+		{"fast", "direct", "claude-haiku-4"},
+		{"claude-opus-4-6", "claude", "claude-opus-4-6"}, // pass through full names
+
+		// Unknown engine passes through.
+		{"gpt-5.4", "opencode", "gpt-5.4"},
+		{"anything", "opencode", "anything"},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s/%s", tt.model, tt.engine), func(t *testing.T) {
+			got := MapModelForEngine(tt.model, tt.engine)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestEnableBackgroundAgents(t *testing.T) {
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:   engine.EngineTypeDirect,
+		Model:  "claude-sonnet-4-20250514",
+		APIKey: "test-key-not-real",
+	})
+	require.NoError(t, err)
+
+	assert.False(t, e.bgAgentsEnabled)
+
+	// Enable with empty agent map - should not panic.
+	e.EnableBackgroundAgents(map[string]subagent.BackgroundAgentType{})
+	assert.True(t, e.bgAgentsEnabled)
+	assert.NotNil(t, e.bgCancel)
+
+	// Close should clean up the background goroutine.
+	e.Close()
+}
+
+func TestMatchesTrigger(t *testing.T) {
+	e := &DirectEngine{}
+	tests := []struct {
+		trigger   string
+		eventType string
+		want      bool
+	}{
+		{"tool_use_turn", session.EventToolCallResult, true},
+		{"tool_use_turn", session.EventNewMessage, false},
+		{"every_turn", session.EventNewMessage, true},
+		{"every_turn", session.EventToolCallResult, true},
+		{"every_turn", session.EventCompaction, false},
+		{"on_demand", session.EventToolCallResult, false},
+		{"unknown", session.EventToolCallResult, false},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s/%s", tt.trigger, tt.eventType), func(t *testing.T) {
+			assert.Equal(t, tt.want, e.matchesTrigger(tt.trigger, tt.eventType))
+		})
+	}
+}
+
+func TestNewRunnerWithWorkDir(t *testing.T) {
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:    engine.EngineTypeDirect,
+		Model:   "claude-sonnet-4-20250514",
+		APIKey:  "test-key-not-real",
+		WorkDir: "/tmp/test-repo",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/test-repo", e.subagentRunner.WorkDir)
 }
 
 func TestRestoreHistory_CodexMode(t *testing.T) {

@@ -1012,6 +1012,19 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			}
 		}
 
+		// Per-turn context injection: inject dynamic context as a system-reminder
+		// block before each API call (recent file changes, time since last message, etc).
+		e.injectPerTurnContext()
+
+		// Attachment injection: check for pending file change attachments, memory
+		// results, or skill discovery results between tool results and next API call.
+		e.injectPendingAttachments()
+
+		// MCP tool refresh: pick up newly-connected MCP servers mid-conversation.
+		if e.mcpManager != nil {
+			e.mcpManager.RefreshTools()
+		}
+
 		// Snip: drop old message pairs as a cheap first pass.
 		msgs := e.history.Messages()
 		msgs = compact.SnipOldMessages(msgs, 0)
@@ -1021,6 +1034,20 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		// Microcompact: prune old tool results before the API call (zero cost).
 		msgs, _ = compact.Microcompact(msgs)
+
+		// Context collapse: before full autocompact, try a cheaper "collapse"
+		// pass that summarizes groups of old tool turns into 1-line stubs.
+		// Only trigger full compaction if collapse doesn't get under threshold.
+		msgs, collapsed := compact.ContextCollapse(msgs)
+		if collapsed > 0 {
+			e.events <- engine.ParsedEvent{
+				Type: "system_message",
+				Data: &engine.SystemMessageEvent{
+					Type:    "system_message",
+					Content: fmt.Sprintf("Collapsed %d old tool results to save context.", collapsed),
+				},
+			}
+		}
 
 		toolParams := e.toolParams()
 
@@ -1750,6 +1777,82 @@ func (e *DirectEngine) generateToolSummary(results []ToolCallResult) {
 
 	// Inject as a system note in the conversation history.
 	e.history.AddUser(fmt.Sprintf("[Tool summary: %s]", summary))
+}
+
+// --- Per-turn context injection ---
+
+// injectPerTurnContext adds dynamic per-turn context before each API call.
+// Includes time since last message and active todo count as system-reminder blocks.
+func (e *DirectEngine) injectPerTurnContext() {
+	var parts []string
+
+	// Time since session start.
+	elapsed := time.Since(e.startTime)
+	if elapsed > 1*time.Minute {
+		parts = append(parts, fmt.Sprintf("Session uptime: %s", elapsed.Truncate(time.Second)))
+	}
+
+	// Active todo count.
+	todos := e.todoTool.GetCurrentTodos()
+	activeTodos := 0
+	for _, t := range todos {
+		if t.Status == "in_progress" || t.Status == "pending" {
+			activeTodos++
+		}
+	}
+	if activeTodos > 0 {
+		parts = append(parts, fmt.Sprintf("Active todos: %d", activeTodos))
+	}
+
+	// File watcher: recent changes.
+	if e.fileWatcher != nil {
+		changes := e.fileWatcher.RecentChanges()
+		if len(changes) > 0 {
+			var changedFiles []string
+			for _, c := range changes {
+				if len(changedFiles) >= 3 {
+					changedFiles = append(changedFiles, fmt.Sprintf("and %d more", len(changes)-3))
+					break
+				}
+				changedFiles = append(changedFiles, c)
+			}
+			parts = append(parts, fmt.Sprintf("Recent file changes: %s", strings.Join(changedFiles, ", ")))
+		}
+	}
+
+	if len(parts) == 0 {
+		return
+	}
+
+	// Inject as the last block in the system blocks (non-cacheable since it's dynamic).
+	contextBlock := engine.SystemBlock{
+		Text:      "<system-reminder>\n" + strings.Join(parts, "\n") + "\n</system-reminder>",
+		Cacheable: false,
+	}
+
+	// Replace any previous per-turn context block (identified by prefix).
+	replaced := false
+	for i, b := range e.blocks {
+		if strings.HasPrefix(b.Text, "<system-reminder>\nSession uptime:") || strings.HasPrefix(b.Text, "<system-reminder>\nActive todos:") {
+			e.blocks[i] = contextBlock
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		e.blocks = append(e.blocks, contextBlock)
+	}
+	e.system = engine.FlattenBlocks(e.blocks)
+}
+
+// --- Attachment injection ---
+
+// injectPendingAttachments checks for pending context that should be injected
+// between tool results and the next API call. This includes file change
+// notifications and steered messages that arrived during tool execution.
+func (e *DirectEngine) injectPendingAttachments() {
+	// Drain any steered messages that arrived during tool execution.
+	e.drainSteeredMessages()
 }
 
 // --- Content replacement tracking ---

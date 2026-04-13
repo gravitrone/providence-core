@@ -31,6 +31,10 @@ type Watcher struct {
 	mu       sync.Mutex
 	cancel   context.CancelFunc
 	interval time.Duration
+
+	// recentChanges tracks files that changed since last RecentChanges() call.
+	recentChanges []string
+	recentMu      sync.Mutex
 }
 
 // New creates a watcher rooted at dir, monitoring the given relative paths.
@@ -62,6 +66,16 @@ func (w *Watcher) Start() {
 	w.snapshot()
 
 	go w.poll(ctx)
+}
+
+// RecentChanges returns and clears the list of files that changed since the
+// last call. Used by per-turn context injection to inform the model of changes.
+func (w *Watcher) RecentChanges() []string {
+	w.recentMu.Lock()
+	defer w.recentMu.Unlock()
+	out := w.recentChanges
+	w.recentChanges = nil
+	return out
 }
 
 // Stop halts the polling goroutine and closes the events channel.
@@ -110,6 +124,9 @@ func (w *Watcher) check() {
 			// File doesn't exist or can't stat - check if it was just deleted.
 			if _, existed := w.mtimes[f]; existed {
 				delete(w.mtimes, f)
+				w.recentMu.Lock()
+				w.recentChanges = append(w.recentChanges, f+" (deleted)")
+				w.recentMu.Unlock()
 				select {
 				case w.events <- Event{Path: f}:
 				default:
@@ -123,6 +140,9 @@ func (w *Watcher) check() {
 		if !existed || !mtime.Equal(prev) {
 			w.mtimes[f] = mtime
 			if existed {
+				w.recentMu.Lock()
+				w.recentChanges = append(w.recentChanges, f)
+				w.recentMu.Unlock()
 				select {
 				case w.events <- Event{Path: f}:
 				default:

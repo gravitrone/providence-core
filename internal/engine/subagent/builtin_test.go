@@ -49,3 +49,28 @@ func TestResolveUnknown(t *testing.T) {
 	_, ok := ResolveAgentType("nonexistent-agent", nil)
 	assert.False(t, ok)
 }
+
+func TestAllBuiltinsHaveDescription(t *testing.T) {
+	for name, agent := range BuiltinAgents {
+		assert.NotEmpty(t, agent.Description, "builtin %q must have a description", name)
+		assert.Equal(t, name, agent.Name, "builtin key must match Name field")
+	}
+}
+
+func TestExploreTools(t *testing.T) {
+	explore, ok := BuiltinAgents["Explore"]
+	require.True(t, ok)
+	assert.ElementsMatch(t, []string{"Read", "Glob", "Grep", "Bash"}, explore.Tools)
+}
+
+func TestPlanPermissionMode(t *testing.T) {
+	plan, ok := BuiltinAgents["Plan"]
+	require.True(t, ok)
+	assert.Equal(t, "plan", plan.PermissionMode)
+}
+
+func TestVerificationBackground(t *testing.T) {
+	verification, ok := BuiltinAgents["Verification"]
+	require.True(t, ok)
+	assert.True(t, verification.Background, "Verification agent should run in background")
+}

@@ -1623,12 +1623,26 @@ func extractRetryDelay(err error) time.Duration {
 	return 0
 }
 
+// streamIdleTimeout returns the idle watchdog timeout from
+// PROVIDENCE_STREAM_IDLE_TIMEOUT_MS env var, defaulting to 90 seconds.
+func streamIdleTimeout() time.Duration {
+	if v := os.Getenv("PROVIDENCE_STREAM_IDLE_TIMEOUT_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return 90 * time.Second
+}
+
 // streamWithRetry calls the Messages API with streaming, retrying on 429 rate
 // limit errors. Uses Retry-After header delay when available, falling back to
 // exponential backoff. Max retries configurable via PROVIDENCE_MAX_RETRIES (default 10).
+// A stream idle watchdog cancels the attempt if no events arrive within the
+// idle timeout (PROVIDENCE_STREAM_IDLE_TIMEOUT_MS, default 90000ms).
 // ReadOnly tools are pre-executed as their blocks complete during streaming.
 func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.MessageNewParams) (anthropic.Message, error) {
 	maxRetries := streamMaxRetries()
+	idleTimeout := streamIdleTimeout()
 
 	// Reset pre-execution state for this streaming call.
 	e.preExecMu.Lock()
@@ -1636,13 +1650,39 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 	e.preExecMu.Unlock()
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		stream := e.client.Messages.NewStreaming(ctx, params)
+		// Create a child context so the idle watchdog can cancel just this attempt.
+		attemptCtx, attemptCancel := context.WithCancel(ctx)
+
+		stream := e.client.Messages.NewStreaming(attemptCtx, params)
+
+		// Idle watchdog: a timer that fires if no stream events arrive within
+		// the timeout. On fire, it cancels the attempt context so the stream
+		// read returns an error and streamWithRetry can retry.
+		idleTimer := time.NewTimer(idleTimeout)
+		idleTriggered := false
+		go func() {
+			select {
+			case <-idleTimer.C:
+				idleTriggered = true
+				attemptCancel()
+			case <-attemptCtx.Done():
+			}
+		}()
 
 		// Track tool_use block indices seen via ContentBlockStartEvent.
 		toolBlockIndices := make(map[int64]bool)
 
 		var accumulated anthropic.Message
 		for stream.Next() {
+			// Reset idle watchdog on each event.
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(idleTimeout)
+
 			event := stream.Current()
 			_ = accumulated.Accumulate(event)
 			if pe := translateStreamEvent(event); pe != nil {
@@ -1662,7 +1702,16 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 				}
 			}
 		}
+
+		idleTimer.Stop()
+		attemptCancel()
+
 		if err := stream.Err(); err != nil {
+			// Idle watchdog fired - treat as a transient error and retry.
+			if idleTriggered && attempt < maxRetries-1 {
+				continue
+			}
+
 			// Auth errors: attempt recovery (OAuth refresh) once, then fail.
 			if isAuthError(err) {
 				if e.handleAuthError(err) {

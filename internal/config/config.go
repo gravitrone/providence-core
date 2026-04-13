@@ -23,8 +23,24 @@ type Config struct {
 	BGAgentsEnabled  bool   `toml:"bg_agents_enabled" json:"bg_agents_enabled,omitempty"`
 	OutputStyle      string `toml:"output_style" json:"output_style,omitempty"`
 
-	Compact CompactConfig `toml:"compact" json:"compact,omitempty"`
-	Hooks   HooksConfig   `toml:"hooks" json:"hooks,omitempty"`
+	Compact     CompactConfig     `toml:"compact" json:"compact,omitempty"`
+	Hooks       HooksConfig       `toml:"hooks" json:"hooks,omitempty"`
+	Permissions PermissionsConfig `toml:"permissions" json:"permissions,omitempty"`
+}
+
+// PermissionsConfig holds permission rules from config files.
+// TOML example:
+//
+//	[permissions]
+//	mode = "default"
+//	allow = ["Read(*)", "Glob(*)", "Grep(*)"]
+//	deny = ["Bash(rm -rf *)"]
+//	ask = ["Bash(git push *)"]
+type PermissionsConfig struct {
+	Mode  string   `toml:"mode" json:"mode,omitempty"`   // default, acceptEdits, bypassPermissions, plan, dontAsk
+	Allow []string `toml:"allow" json:"allow,omitempty"`  // patterns that auto-allow
+	Deny  []string `toml:"deny" json:"deny,omitempty"`    // patterns that always deny
+	Ask   []string `toml:"ask" json:"ask,omitempty"`      // patterns that always ask
 }
 
 // HookEntry defines a single hook - either a shell command or HTTP endpoint.
@@ -280,6 +296,20 @@ func mergeConfig(base, override *Config) {
 	if override.Compact.CircuitBreaker != 0 {
 		base.Compact.CircuitBreaker = override.Compact.CircuitBreaker
 	}
+	// Permissions: merge non-empty fields.
+	if override.Permissions.Mode != "" {
+		base.Permissions.Mode = override.Permissions.Mode
+	}
+	if len(override.Permissions.Allow) > 0 {
+		base.Permissions.Allow = override.Permissions.Allow
+	}
+	if len(override.Permissions.Deny) > 0 {
+		base.Permissions.Deny = override.Permissions.Deny
+	}
+	if len(override.Permissions.Ask) > 0 {
+		base.Permissions.Ask = override.Permissions.Ask
+	}
+
 	// Hooks: override replaces entire event lists (not additive).
 	overrideHooks := override.Hooks.ToMap()
 	for event, entries := range overrideHooks {
@@ -409,6 +439,40 @@ func parseHookEntries(raw any) []HookEntry {
 	}
 
 	return nil
+}
+
+// PermissionRule is a structured permission rule parsed from config patterns.
+type PermissionRule struct {
+	Pattern  string
+	Behavior string // "allow", "deny", "ask"
+	Source   string
+}
+
+// AllowRules returns the allow patterns as structured rules.
+func (p *PermissionsConfig) AllowRules(source string) []PermissionRule {
+	rules := make([]PermissionRule, len(p.Allow))
+	for i, pattern := range p.Allow {
+		rules[i] = PermissionRule{Pattern: pattern, Behavior: "allow", Source: source}
+	}
+	return rules
+}
+
+// DenyRules returns the deny patterns as structured rules.
+func (p *PermissionsConfig) DenyRules(source string) []PermissionRule {
+	rules := make([]PermissionRule, len(p.Deny))
+	for i, pattern := range p.Deny {
+		rules[i] = PermissionRule{Pattern: pattern, Behavior: "deny", Source: source}
+	}
+	return rules
+}
+
+// AskRules returns the ask patterns as structured rules.
+func (p *PermissionsConfig) AskRules(source string) []PermissionRule {
+	rules := make([]PermissionRule, len(p.Ask))
+	for i, pattern := range p.Ask {
+		rules[i] = PermissionRule{Pattern: pattern, Behavior: "ask", Source: source}
+	}
+	return rules
 }
 
 // Save writes config to DefaultPath as TOML, creating ~/.providence/ if needed.

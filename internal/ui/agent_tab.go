@@ -1120,6 +1120,9 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		if usage, ok := ev.Data.(*engine.UsageUpdateEvent); ok {
 			at.currentTokens = usage.TotalTokens
 			at.messagesDirty = true
+			// Wire to dashboard TOKENS panel.
+			ctxWindow := engine.ContextWindowFor(at.model)
+			at.dashboard.SetTokens(usage.TotalTokens, ctxWindow)
 		}
 		return at, at.safeWaitForEvent()
 
@@ -1142,6 +1145,10 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 				}
 				at.messagesDirty = true
 				at.refreshViewport()
+				at.dashboard.SetCompact(dashboard.CompactInfo{
+					Phase:        "running",
+					TokensBefore: compaction.TokensBefore,
+				})
 			case "idle":
 				at.compacting = false
 				if compaction.TokensAfter > 0 {
@@ -1159,6 +1166,16 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 				}
 				at.messagesDirty = true
 				at.refreshViewport()
+				if at.compactPhase == "complete" {
+					at.dashboard.SetCompact(dashboard.CompactInfo{
+						Phase:        "complete",
+						TokensBefore: at.compactTokensBefore,
+						TokensAfter:  at.compactTokensAfter,
+					})
+					// Also refresh token panel after compaction.
+					ctxWindow := engine.ContextWindowFor(at.model)
+					at.dashboard.SetTokens(at.currentTokens, ctxWindow)
+				}
 			case "failed":
 				at.compacting = false
 				if compaction.Err != nil {
@@ -1172,6 +1189,10 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 				at.compactVel = 0.0
 				at.messagesDirty = true
 				at.refreshViewport()
+				at.dashboard.SetCompact(dashboard.CompactInfo{
+					Phase:  "failed",
+					ErrMsg: at.compactErrMsg,
+				})
 			}
 		}
 		return at, at.safeWaitForEvent()
@@ -1231,6 +1252,8 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 						Done:       true,
 					})
 					at.persistLastMessage()
+					// Wire file touches to dashboard FILES panel.
+					at.trackToolFile(part.Name, part.Input)
 				}
 			}
 			if fullText == "" {
@@ -1266,6 +1289,8 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 				ToolArgs:   toolArgs,
 				ToolStatus: "pending",
 			})
+			// Track file touches from permission-gated tools too.
+			at.trackToolFile(toolName, pr.Tool.Input)
 			at.refreshViewport()
 		}
 		return at, nil
@@ -1279,6 +1304,10 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 					at.messagesDirty = true
 					break
 				}
+			}
+			// Wire errors to dashboard ERRORS panel.
+			if tr.IsError {
+				at.dashboard.AddError(tr.ToolName, tr.Output)
 			}
 		}
 		return at, at.safeWaitForEvent()
@@ -1294,6 +1323,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		if re, ok := ev.Data.(*engine.ResultEvent); ok {
 			if re.IsError {
 				at.addSystemMessage(fmt.Sprintf("Error: %s", re.Result))
+				at.dashboard.AddError("session", re.Result)
 			}
 		}
 		vizCount := at.vizCount
@@ -2930,6 +2960,29 @@ func resolveModelAlias(input string) (string, bool) {
 		return engine.ResolveAlias(input), true
 	}
 	return engine.ResolveAlias(input), false
+}
+
+// trackToolFile extracts file path info from a tool_use event and updates the
+// dashboard FILES panel. Supports Read, Write, Edit, Glob, Grep, Bash tools.
+func (at *AgentTab) trackToolFile(toolName string, input any) {
+	m, ok := input.(map[string]any)
+	if !ok {
+		return
+	}
+	switch toolName {
+	case "Read":
+		if p, ok := m["file_path"].(string); ok {
+			at.dashboard.AddFile(p, "read")
+		}
+	case "Write":
+		if p, ok := m["file_path"].(string); ok {
+			at.dashboard.AddFile(p, "write")
+		}
+	case "Edit":
+		if p, ok := m["file_path"].(string); ok {
+			at.dashboard.AddFile(p, "edit")
+		}
+	}
 }
 
 func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {

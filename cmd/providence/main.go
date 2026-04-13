@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +11,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/gravitrone/providence-core/internal/config"
+	"github.com/gravitrone/providence-core/internal/engine"
+	_ "github.com/gravitrone/providence-core/internal/engine/claude"
+	_ "github.com/gravitrone/providence-core/internal/engine/direct"
 	"github.com/gravitrone/providence-core/internal/engine/plugin"
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui"
@@ -26,9 +31,13 @@ func main() {
 // engineFlag holds the --engine flag value.
 var engineFlag string
 
+// headlessFlag enables headless NDJSON mode.
+var headlessFlag bool
+
 // NewRootCommand builds the root cobra command.
 func newRootCommand() *cobra.Command {
-	cfg := config.Load()
+	cwd, _ := os.Getwd()
+	cfg := config.LoadMerged(cwd)
 
 	// Default engine from config, fallback to "claude".
 	engineDefault := "claude"
@@ -41,6 +50,16 @@ func newRootCommand() *cobra.Command {
 		Short: "The Profaned Core - autonomous AI harness",
 		Long:  "providence: autonomous AI harness - terminal, web, and beyond.",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if headlessFlag {
+				st, err := store.Open(store.DefaultDBPath())
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "warning: session db: %v\n", err)
+				}
+				if st != nil {
+					defer st.Close()
+				}
+				return runHeadless(engineFlag, cfg, st)
+			}
 			return runTUI(engineFlag, cfg)
 		},
 		SilenceUsage:  true,
@@ -48,6 +67,7 @@ func newRootCommand() *cobra.Command {
 	}
 
 	root.Flags().StringVar(&engineFlag, "engine", engineDefault, "AI engine backend (claude, direct, openai)")
+	root.Flags().BoolVar(&headlessFlag, "headless", false, "Run in headless NDJSON mode")
 
 	root.RegisterFlagCompletionFunc("engine", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return []string{"claude", "direct"}, cobra.ShellCompDirectiveNoFileComp
@@ -125,4 +145,109 @@ func isInteractiveTerminal(file *os.File) bool {
 // Init sets up environment defaults.
 func init() {
 	_ = os.Setenv("COLORTERM", "truecolor")
+}
+
+// --- Headless NDJSON Mode ---
+
+// headlessInitEvent is emitted on stdout when headless mode starts.
+type headlessInitEvent struct {
+	Type    string `json:"type"`
+	Subtype string `json:"subtype"`
+	Model   string `json:"model,omitempty"`
+	Engine  string `json:"engine,omitempty"`
+}
+
+// headlessUserMsg is the expected input format on stdin.
+type headlessUserMsg struct {
+	Type    string `json:"type"`
+	Message struct {
+		Content string `json:"content"`
+	} `json:"message"`
+}
+
+// headlessOutputEvent wraps engine events for NDJSON output.
+type headlessOutputEvent struct {
+	Type    string `json:"type"`
+	Subtype string `json:"subtype,omitempty"`
+	Content string `json:"content,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// runHeadless runs the engine in headless NDJSON mode (stdin -> engine -> stdout).
+func runHeadless(engineType string, cfg config.Config, _ *store.Store) error {
+	wd, _ := os.Getwd()
+
+	eng, err := engine.NewEngine(engine.EngineConfig{
+		Type:         engine.EngineType(engineType),
+		SystemPrompt: engine.BuildSystemPrompt(nil),
+		Model:        cfg.Model,
+		APIKey:       os.Getenv("ANTHROPIC_API_KEY"),
+		WorkDir:      wd,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create engine: %w", err)
+	}
+	defer eng.Close()
+
+	enc := json.NewEncoder(os.Stdout)
+
+	// Emit init event.
+	_ = enc.Encode(headlessInitEvent{
+		Type:    "system",
+		Subtype: "init",
+		Model:   cfg.Model,
+		Engine:  engineType,
+	})
+
+	scanner := bufio.NewScanner(os.Stdin)
+	// Allow large messages (1MB).
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		var msg headlessUserMsg
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			_ = enc.Encode(headlessOutputEvent{
+				Type:  "error",
+				Error: "invalid json: " + err.Error(),
+			})
+			continue
+		}
+
+		if msg.Type != "user" || msg.Message.Content == "" {
+			continue
+		}
+
+		if err := eng.Send(msg.Message.Content); err != nil {
+			_ = enc.Encode(headlessOutputEvent{
+				Type:  "error",
+				Error: "send failed: " + err.Error(),
+			})
+			continue
+		}
+
+		// Drain events until result.
+		for event := range eng.Events() {
+			if event.Err != nil {
+				_ = enc.Encode(headlessOutputEvent{
+					Type:  "error",
+					Error: event.Err.Error(),
+				})
+				continue
+			}
+			_ = enc.Encode(headlessOutputEvent{
+				Type:    event.Type,
+				Content: event.Raw,
+			})
+			if event.Type == "result" {
+				break
+			}
+		}
+	}
+
+	return scanner.Err()
 }

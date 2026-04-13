@@ -30,6 +30,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/customtools"
 	"github.com/gravitrone/providence-core/internal/engine/direct" // register direct factory + image types
 	"github.com/gravitrone/providence-core/internal/engine/kairos"
+	"github.com/gravitrone/providence-core/internal/engine/outputstyles"
 	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
 	"github.com/gravitrone/providence-core/internal/engine/skills"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
@@ -138,7 +139,7 @@ var slashCommands = []slashCommand{
 	{"/image", "Attach image file (png, jpg, gif, webp)"},
 	{"/theme", "Switch theme (flame, night, auto)"},
 	{"/auth", "Login to OpenAI (Codex OAuth)"},
-	{"/sessions", "List past sessions"},
+	{"/sessions", "List past sessions, or search with /sessions <query>"},
 	{"/resume", "Resume a past session"},
 	{"/compact", "Manually trigger context compaction"},
 	{"/rewind", "Rewind to a previous user message"},
@@ -926,7 +927,7 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		// Create session on first use.
 		if at.engine == nil {
 			// Images will be transferred after engine creation via handleEngineCreated.
-			return at, tea.Batch(createEngineAndSend(text, at.model, at.engineType), spinnerTick())
+			return at, tea.Batch(createEngineAndSend(text, at.model, at.engineType, at.cfg.OutputStyle), spinnerTick())
 		}
 
 		// Transfer images to engine before sending.
@@ -1971,7 +1972,7 @@ func (at *AgentTab) transferImagesToEngine() int {
 // SendCmd returns the tea.Cmd to send a message (create session or send to existing).
 func (at AgentTab) sendCmd(text string) tea.Cmd {
 	if at.engine == nil {
-		return createEngineAndSend(text, at.model, at.engineType)
+		return createEngineAndSend(text, at.model, at.engineType, at.cfg.OutputStyle)
 	}
 	if err := at.engine.Send(text); err != nil {
 		return nil
@@ -3236,6 +3237,31 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			at.refreshViewport()
 			return true, nil
 		}
+		// Search mode: /sessions <query>
+		if args != "" {
+			results, err := at.store.SearchMessages(args, 10)
+			if err != nil {
+				at.addSystemMessage("Search error: " + err.Error())
+				at.refreshViewport()
+				return true, nil
+			}
+			if len(results) == 0 {
+				at.addSystemMessage("No results for '" + args + "'")
+				at.refreshViewport()
+				return true, nil
+			}
+			var lines []string
+			for _, r := range results {
+				sid := r.SessionID
+				if len(sid) > 8 {
+					sid = sid[:8]
+				}
+				lines = append(lines, fmt.Sprintf("[%s] %s: %s", sid, r.Role, truncate(r.Snippet, 60)))
+			}
+			at.addSystemMessage("Search results for '" + args + "':\n" + strings.Join(lines, "\n"))
+			at.refreshViewport()
+			return true, nil
+		}
 		cwd, _ := os.Getwd()
 		sessions, err := at.store.ListSessions(cwd, 10)
 		if err != nil {
@@ -3368,7 +3394,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		at.refreshViewport()
 		// Spin up a fresh engine and rehydrate its history so the model
 		// actually remembers this conversation on the next turn.
-		return true, createEngineAndRestore(restored, at.model, at.engineType)
+		return true, createEngineAndRestore(restored, at.model, at.engineType, at.cfg.OutputStyle)
 
 	case "/compact":
 		if at.engine == nil {
@@ -3781,8 +3807,29 @@ func isOpenRouterModel(model string) bool {
 	return spec != nil && spec.Provider == "openrouter"
 }
 
+// buildSystemPromptWithStyle builds the system prompt and prepends the active
+// output style if one is configured and found on disk.
+func buildSystemPromptWithStyle(outputStyleName string) string {
+	base := engine.BuildSystemPrompt(nil)
+	if outputStyleName == "" {
+		return base
+	}
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+	styles, err := outputstyles.LoadOutputStyles(cwd, home)
+	if err != nil || len(styles) == 0 {
+		return base
+	}
+	for _, s := range styles {
+		if s.Name == outputStyleName && s.Prompt != "" {
+			return s.Prompt + "\n\n" + base
+		}
+	}
+	return base
+}
+
 // createEngineAndSend spawns a new engine session and sends the first prompt.
-func createEngineAndSend(prompt, model string, engineType engine.EngineType) tea.Cmd {
+func createEngineAndSend(prompt, model string, engineType engine.EngineType, outputStyle string) tea.Cmd {
 	return func() tea.Msg {
 		// Allowed tools differ by engine type.
 		var allowedTools []string
@@ -3795,7 +3842,7 @@ func createEngineAndSend(prompt, model string, engineType engine.EngineType) tea
 
 		cfg := engine.EngineConfig{
 			Type:         engineType,
-			SystemPrompt: engine.BuildSystemPrompt(nil),
+			SystemPrompt: buildSystemPromptWithStyle(outputStyle),
 			AllowedTools: allowedTools,
 			Model:        model,
 			APIKey:       os.Getenv("ANTHROPIC_API_KEY"),
@@ -3833,7 +3880,7 @@ func createEngineAndSend(prompt, model string, engineType engine.EngineType) tea
 // populates its history with the supplied restored messages. The engine is
 // left idle and ready for the next Send. Used by /resume so the model
 // actually remembers the prior conversation.
-func createEngineAndRestore(restored []engine.RestoredMessage, model string, engineType engine.EngineType) tea.Cmd {
+func createEngineAndRestore(restored []engine.RestoredMessage, model string, engineType engine.EngineType, outputStyle string) tea.Cmd {
 	return func() tea.Msg {
 		var allowedTools []string
 		if engineType == engine.EngineTypeClaude {
@@ -3844,7 +3891,7 @@ func createEngineAndRestore(restored []engine.RestoredMessage, model string, eng
 
 		cfg := engine.EngineConfig{
 			Type:         engineType,
-			SystemPrompt: engine.BuildSystemPrompt(nil),
+			SystemPrompt: buildSystemPromptWithStyle(outputStyle),
 			AllowedTools: allowedTools,
 			Model:        model,
 			APIKey:       os.Getenv("ANTHROPIC_API_KEY"),

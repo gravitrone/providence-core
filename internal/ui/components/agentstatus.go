@@ -116,7 +116,6 @@ func (m AgentStatusModel) renderAgentLine(agent AgentStatusInfo) string {
 	elapsedStyle := lipgloss.NewStyle().Foreground(ThemeMuted)
 	elapsedStr := elapsedStyle.Render(elapsed)
 
-	// Calculate padding between name+model and elapsed.
 	contentWidth := m.Width - 4
 	if contentWidth < 20 {
 		contentWidth = 20
@@ -154,7 +153,6 @@ func (m AgentStatusModel) renderActivityLine(agent AgentStatusInfo) string {
 		activity = activity[:maxLen-3] + "..."
 	}
 
-	// Apply shimmer animation for running agents.
 	if agent.Status == AgentRunning {
 		activityText := m.renderShimmer(activity)
 		return indent + connector + " " + activityText

@@ -69,8 +69,7 @@ func (t *TranscriptModel) SetMessages(msgs []ChatMessage) {
 // and auto-scrolls if sticky.
 func (t *TranscriptModel) AddMessage(msg ChatMessage) {
 	t.messages = append(t.messages, msg)
-	// Don't pre-render; View() renders on demand. But update contentHeight
-	// optimistically so sticky scroll works.
+	// Height updated optimistically so sticky scroll works before first render.
 	if t.sticky {
 		t.scrollToEnd()
 	}
@@ -259,8 +258,7 @@ func (t *TranscriptModel) View(renderFn func(idx int) string) string {
 		t.scrollToEnd()
 	}
 
-	// For any message without a cached height, assign the estimate so scroll
-	// math stays accurate before we render them on scroll.
+	// Assign estimated heights to messages not yet rendered so scroll math stays accurate.
 	for i := range t.messages {
 		if _, ok := t.heightCache[i]; !ok {
 			t.heightCache[i] = estimatedLineCount
@@ -268,12 +266,10 @@ func (t *TranscriptModel) View(renderFn func(idx int) string) string {
 	}
 	t.recomputeContentHeight()
 
-	// If sticky, ensure we're at the bottom.
 	if t.sticky {
 		t.scrollToEnd()
 	}
 
-	// Find visible messages based on scrollTop and viewportH.
 	var visible []string
 	rowAccum := 0
 	for i := range t.messages {
@@ -281,10 +277,8 @@ func (t *TranscriptModel) View(renderFn func(idx int) string) string {
 		msgStart := rowAccum
 		msgEnd := rowAccum + h
 
-		// Message is visible if it overlaps the viewport window.
 		vpEnd := t.scrollTop + t.viewportH
 		if msgEnd > t.scrollTop && msgStart < vpEnd {
-			// Render on demand if not yet cached.
 			if _, ok := t.renderedCache[i]; !ok {
 				rendered := renderFn(i)
 				t.renderedCache[i] = rendered
@@ -310,7 +304,6 @@ func (t *TranscriptModel) VisibleCount(renderFn func(idx int) string) int {
 		return 0
 	}
 
-	// Render and cache all heights for accurate counting.
 	for i := range t.messages {
 		if _, ok := t.heightCache[i]; !ok {
 			rendered := renderFn(i)
@@ -387,7 +380,6 @@ func (t *TranscriptModel) scrollToMessage(i int) {
 			rowAccum += h
 		}
 	}
-	// Put the target message near the top of the viewport.
 	t.scrollTop = rowAccum
 	t.clampScroll()
 	t.sticky = false

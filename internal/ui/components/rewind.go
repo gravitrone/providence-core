@@ -92,7 +92,6 @@ func (m RewindModel) HandleKey(key string) (RewindModel, *RewindMsg, bool) {
 	case "j", "down":
 		if m.selected < len(m.messages)-1 {
 			m.selected++
-			// Scroll window down if needed.
 			if m.selected >= m.offset+m.visible {
 				m.offset = m.selected - m.visible + 1
 			}
@@ -102,7 +101,6 @@ func (m RewindModel) HandleKey(key string) (RewindModel, *RewindMsg, bool) {
 	case "k", "up":
 		if m.selected > 0 {
 			m.selected--
-			// Scroll window up if needed.
 			if m.selected < m.offset {
 				m.offset = m.selected
 			}

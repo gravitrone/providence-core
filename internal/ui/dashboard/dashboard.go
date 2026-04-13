@@ -30,12 +30,12 @@ func UpdateThemeColors(primary, secondary, muted, text string) {
 
 // AgentInfo describes an active/completed subagent.
 type AgentInfo struct {
-	Name         string
-	Model        string
-	Status       string // "running", "completed", "failed", "killed", "background"
-	Elapsed      string // e.g. "12s"
-	LastActivity string // last tool/action performed
-	ParentName   string // empty = top-level agent
+	Name          string
+	Model         string
+	Status        string // "running", "completed", "failed", "killed", "background"
+	Elapsed       string // e.g. "12s"
+	LastActivity  string // last tool/action performed
+	ParentName    string // empty = top-level agent
 	ResultPreview string // first few lines of result for expandable preview
 }
 
@@ -131,7 +131,6 @@ func (d DashboardModel) View() string {
 	}
 
 	var sections []string
-	// Reserve 2 lines for top/bottom border.
 	remainingH := d.Height - 2
 	if remainingH < 1 {
 		return ""
@@ -149,7 +148,6 @@ func (d DashboardModel) View() string {
 			continue
 		}
 
-		// Inner width: total minus 2 for border chars.
 		innerW := d.Width - 2
 		if innerW < 4 {
 			innerW = 4
@@ -174,7 +172,7 @@ func (d DashboardModel) View() string {
 		}
 
 		bodyLines := strings.Split(body, "\n")
-		available := remainingH - 1 // -1 for the header line
+		available := remainingH - 1 // subtract header line
 		if available <= 0 {
 			sections = append(sections, header)
 			break
@@ -192,7 +190,7 @@ func (d DashboardModel) View() string {
 	border := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("#3a2518")).
-		Width(d.Width - 2). // -2 because lipgloss adds border chars
+		Width(d.Width-2). // lipgloss adds 2 border chars
 		Height(d.Height - 2)
 
 	return border.Render(content)
@@ -223,7 +221,6 @@ func (d DashboardModel) renderPanelHeader(p Panel, focused bool) string {
 		titleStyle = titleStyle.Foreground(lipgloss.Color("#FFD700"))
 	}
 
-	// Collapse indicator.
 	arrow := "▾"
 	if p.Collapsed {
 		arrow = "▸"
@@ -329,7 +326,6 @@ func (d *DashboardModel) SetFiles(files []FileInfo) {
 	snapshot := make([]FileInfo, len(files))
 	copy(snapshot, files)
 	p.Render = func(w int) string {
-		// Show most recent files, limit to 8 visible.
 		start := 0
 		if len(snapshot) > 8 {
 			start = len(snapshot) - 8
@@ -431,7 +427,6 @@ func renderAgentTree(agents []AgentInfo, width int) string {
 
 		elapsedStr := mutedStyle.Render(a.Elapsed)
 
-		// Name + model on left, elapsed on right.
 		leftPart := indent + icon + " " + nameStyle.Render(truncatePath(a.Name, width-20)) + " " + modelStr
 		leftWidth := lipgloss.Width(leftPart)
 		rightWidth := lipgloss.Width(elapsedStr)
@@ -441,7 +436,6 @@ func renderAgentTree(agents []AgentInfo, width int) string {
 		}
 		lines = append(lines, leftPart+strings.Repeat(" ", gap)+elapsedStr)
 
-		// Activity sub-line with connector.
 		if a.LastActivity != "" {
 			connector := mutedStyle.Render("\u23BF") // ⎿
 			activity := a.LastActivity
@@ -455,7 +449,6 @@ func renderAgentTree(agents []AgentInfo, width int) string {
 			lines = append(lines, indent+"  "+connector+" "+activityStyle.Render(activity))
 		}
 
-		// Result preview (up to 3 lines) if available.
 		if a.ResultPreview != "" {
 			previewLines := strings.SplitN(a.ResultPreview, "\n", 4)
 			for i, pl := range previewLines {
@@ -490,9 +483,8 @@ func agentStatusIcon(status string) string {
 	}
 }
 
-// AddFile appends a single file touch event.
+// AddFile appends a single file touch event (no-op if path+action already recorded).
 func (d *DashboardModel) AddFile(path, action string) {
-	// Deduplicate: if same path+action exists, skip.
 	for _, f := range d.Files {
 		if f.Path == path && f.Action == action {
 			return
@@ -822,7 +814,7 @@ func (d *DashboardModel) RenderHooksTab(width, height int) string {
 	return d.emptyTab(width, height, "No hooks configured")
 }
 
-// --- Default Panels (stubs - real renderers come in Phase 6 W2) ---
+// --- Default Panels ---
 
 func defaultPanels() []Panel {
 	return []Panel{

@@ -87,12 +87,13 @@ type TreeNode struct {
 	Children []*TreeNode `json:"children,omitempty"`
 }
 
-// vizTitleStyle - note: uses dynamic color in RenderVisualization, this is just a base.
+// vizTitleStyle is the base title style; color is overridden dynamically in RenderVisualization.
 var vizTitleStyle = lipgloss.NewStyle().
 	Bold(true).
 	Underline(true).
 	MarginBottom(1)
 
+// ProcessVizBlocks replaces all providence-viz fenced blocks in content with rendered output.
 func ProcessVizBlocks(content string, width int, frame int) string {
 	return vizBlockRe.ReplaceAllStringFunc(content, func(match string) string {
 		subs := vizBlockRe.FindStringSubmatch(match)
@@ -107,6 +108,8 @@ func ProcessVizBlocks(content string, width int, frame int) string {
 	})
 }
 
+// ExtractAndRenderVizBlocks replaces providence-viz blocks with placeholder tokens and
+// returns the modified content and a map from placeholder -> rendered block.
 func ExtractAndRenderVizBlocks(content string, width int, frame int) (string, map[string]string) {
 	vizMap := make(map[string]string)
 	idx := 0
@@ -169,6 +172,7 @@ func recomputeVizGradients() {
 	}
 }
 
+// RenderVisualization parses a JSON viz block and dispatches to the appropriate renderer.
 func RenderVisualization(vizJSON string, width int, frame int) string {
 	var v VizData
 	if err := json.Unmarshal([]byte(vizJSON), &v); err != nil {

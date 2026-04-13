@@ -69,8 +69,7 @@ var ActiveTheme = FlameTheme
 // currentThemeName tracks the name of the active theme for display.
 var currentThemeName = "flame"
 
-// --- Theme Color Vars (reassigned on theme switch) ---
-// These are color.Color values used by lipgloss styles and gradients.
+// --- Theme Color Vars ---
 
 var (
 	ColorPrimary    color.Color
@@ -88,7 +87,7 @@ var (
 	ColorFrozen     color.Color
 )
 
-// --- Reusable Styles (reassigned on theme switch) ---
+// --- Reusable Styles ---
 
 var (
 	BannerStyle       lipgloss.Style
@@ -123,7 +122,7 @@ var (
 	ThinkingStyle     lipgloss.Style
 	InputPrefixStyle  lipgloss.Style
 
-	// Tool result display styles (crush-adapted, flame-themed)
+	// Tool result display styles.
 	ToolIconPendingStyle lipgloss.Style
 	ToolIconSuccessStyle lipgloss.Style
 	ToolIconErrorStyle   lipgloss.Style
@@ -133,7 +132,7 @@ var (
 	ToolErrorMsgStyle    lipgloss.Style
 	ToolTruncationStyle  lipgloss.Style
 
-	// Button styles for permission dialog
+	// Button styles for permission dialog.
 	ButtonFocusStyle lipgloss.Style
 	ButtonBlurStyle  lipgloss.Style
 )
@@ -158,7 +157,6 @@ func ApplyTheme(name string) {
 		currentThemeName = "flame"
 	}
 
-	// Reassign all color vars from active theme.
 	ColorPrimary = c(ActiveTheme.Primary)
 	ColorSecondary = c(ActiveTheme.Secondary)
 	ColorAccent = c(ActiveTheme.Accent)
@@ -173,16 +171,12 @@ func ApplyTheme(name string) {
 	ColorGlow = c(ActiveTheme.Glow)
 	ColorFrozen = c(ActiveTheme.Frozen)
 
-	// Reassign all styles.
 	reapplyStyles()
-
-	// Recompute all precomputed gradients.
 	recomputeFlameGradients()
 	recomputeVizGradients()
 	recomputeBannerGradient()
 	recomputeSpinnerColors()
 
-	// Update dashboard table colors to match active theme.
 	dashboard.UpdateThemeColors(
 		ActiveTheme.Primary,
 		ActiveTheme.Secondary,
@@ -318,7 +312,7 @@ func reapplyStyles() {
 		Foreground(ColorPrimary).
 		Bold(true)
 
-	// Tool result display styles (crush-adapted, flame-themed)
+	// Tool result display styles.
 	ToolIconPendingStyle = lipgloss.NewStyle().Foreground(ColorMuted)
 	ToolIconSuccessStyle = lipgloss.NewStyle().Foreground(c("#50C878"))
 	ToolIconErrorStyle   = lipgloss.NewStyle().Foreground(c("#e05050"))
@@ -333,7 +327,7 @@ func reapplyStyles() {
 	ToolErrorMsgStyle   = lipgloss.NewStyle().Foreground(ColorMuted)
 	ToolTruncationStyle = lipgloss.NewStyle().Foreground(ColorMuted).Background(ToolContentBgColor)
 
-	// Button styles for permission dialog
+	// Button styles for permission dialog.
 	ButtonFocusStyle = lipgloss.NewStyle().
 		Foreground(c("#ffffff")).
 		Background(ColorSecondary).
@@ -343,7 +337,7 @@ func reapplyStyles() {
 		Background(c("#1a1210")).
 		Padding(0, 2)
 
-	// Update component styles (separate package, can't access theme directly).
+	// Update component package styles (separate package, no direct theme access).
 	components.HintDescStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#d0c8c0"))
 	components.KeyCapStyle = lipgloss.NewStyle().
 		Foreground(ColorBackground).
@@ -356,12 +350,9 @@ func reapplyStyles() {
 		Padding(0, 1).
 		MarginRight(1)
 
-	// Update text input / spinner theme colors in components.
 	components.ThemePrimary = lipgloss.Color(ActiveTheme.Secondary)
 	components.ThemeMuted = lipgloss.Color(ActiveTheme.Muted)
 	components.ThemeText = lipgloss.Color(ActiveTheme.Text)
-
-	// Update agent status component hex strings for color math.
 	components.AgentThemePrimaryHex = ActiveTheme.Secondary
 	components.AgentThemeMutedHex = ActiveTheme.Muted
 }

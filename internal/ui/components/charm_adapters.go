@@ -1,18 +1,18 @@
 package components
 
 import (
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/table"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
-	"charm.land/bubbles/v2/key"
 	"charm.land/lipgloss/v2"
 )
 
-// Providence theme colors (flame).
+// Providence theme colors (flame). ThemePrimary, ThemeMuted, ThemeText are exported
+// so the parent theme system can update them on theme switch.
 var (
-	// Exported so the theme system can update them.
 	ThemePrimary = lipgloss.Color("#D77757")
 	ThemeMuted   = lipgloss.Color("#6b5040")
 	ThemeText    = lipgloss.Color("#e0d0c0")

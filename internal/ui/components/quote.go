@@ -129,11 +129,9 @@ func (q QuoteModel) View(width int) string {
 func FormatQuoteBlock(msg QuoteMessage) string {
 	var sb strings.Builder
 
-	// Header line.
 	ago := formatTimeAgo(msg.Time)
 	fmt.Fprintf(&sb, "> [quoting %s message from %s]\n", msg.Role, ago)
 
-	// Content (truncated).
 	content := truncateQuote(msg.Content)
 	for _, line := range strings.Split(content, "\n") {
 		sb.WriteString("> " + strings.TrimRight(line, " \t") + "\n")
@@ -143,16 +141,14 @@ func FormatQuoteBlock(msg QuoteMessage) string {
 	return sb.String()
 }
 
-// truncateQuote truncates content to maxQuoteLen, adding "..." if truncated.
+// truncateQuote truncates s to maxQuoteLen, breaking at the last space if possible.
 func truncateQuote(s string) string {
-	// Take first N chars, break at last space if possible.
 	s = strings.TrimSpace(s)
 	if len(s) <= maxQuoteLen {
 		return `"` + s + `"`
 	}
 
 	truncated := s[:maxQuoteLen]
-	// Try to break at last space.
 	if idx := strings.LastIndex(truncated, " "); idx > maxQuoteLen/2 {
 		truncated = truncated[:idx]
 	}

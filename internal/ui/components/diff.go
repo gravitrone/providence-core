@@ -70,7 +70,6 @@ func ComputeDiffLines(oldContent, newContent string) []DiffLine {
 	oldLines := splitLines(oldContent)
 	newLines := splitLines(newContent)
 
-	// Simple LCS-based diff.
 	lcs := lcsTable(oldLines, newLines)
 	return buildDiffFromLCS(oldLines, newLines, lcs)
 }
@@ -86,7 +85,6 @@ func RenderDiff(oldContent, newContent, filename string, width int, theme DiffTh
 		return ""
 	}
 
-	// Styles.
 	addStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(theme.AdditionFg)).
 		Background(lipgloss.Color(theme.AdditionBg))
@@ -101,7 +99,6 @@ func RenderDiff(oldContent, newContent, filename string, width int, theme DiffTh
 
 	var b strings.Builder
 
-	// File header.
 	if filename != "" {
 		headerStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color(theme.HunkFg)).
@@ -218,8 +215,8 @@ func renderLineNum(idx, total int, theme DiffTheme) string {
 	return style.Render(fmt.Sprintf("%4d ", idx+1))
 }
 
-// lerpHexSimple does a simple linear interpolation between two hex colors.
-// Both colors must be 7-char hex (#RRGGBB). Falls back to low on parse error.
+// lerpHexSimple linearly interpolates between two hex colors (#RRGGBB).
+// Falls back to low on parse error.
 func lerpHexSimple(low, high string, t float64) string {
 	r1, g1, b1, ok1 := parseHex(low)
 	r2, g2, b2, ok2 := parseHex(high)
@@ -268,7 +265,6 @@ func splitLines(s string) []string {
 		return nil
 	}
 	lines := strings.Split(s, "\n")
-	// Trim trailing empty line from final newline.
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
@@ -303,7 +299,7 @@ func buildDiffFromLCS(oldLines, newLines []string, dp [][]int) []DiffLine {
 	i := len(oldLines)
 	j := len(newLines)
 
-	// Build in reverse, then flip.
+	// Build in reverse order, then flip.
 	var rev []DiffLine
 	oldNum := i
 	newNum := j
@@ -339,7 +335,6 @@ func buildDiffFromLCS(oldLines, newLines []string, dp [][]int) []DiffLine {
 		}
 	}
 
-	// Reverse to get correct order.
 	for k := len(rev) - 1; k >= 0; k-- {
 		result = append(result, rev[k])
 	}

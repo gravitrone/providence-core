@@ -10,7 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// SpinnerFrames cycles through pulse block patterns at 120ms per frame.
+// spinnerFrames cycles through pulse block patterns at 120ms per frame.
 var spinnerFrames = []rune{'\u2588', '\u2593', '\u2592', '\u2591', '\u2592', '\u2593'}
 
 // flameColors is the gradient for spinner color cycling.

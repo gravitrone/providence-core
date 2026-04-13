@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -193,7 +194,7 @@ var slashCommands = []slashCommand{
 	{"/agents", "List built-in agent types"},
 	{"/permissions", "Show current permission mode"},
 	{"/hooks", "Show hook configuration info"},
-	{"/diff", "Show git diff --stat"},
+	{"/diff", "Show files changed this session (--git for git diff)"},
 	{"/plan", "Toggle plan mode (read-only tools)"},
 	{"/branch", "Fork conversation into a new session"},
 	{"/branches", "Show git branches"},
@@ -424,8 +425,18 @@ type AgentTab struct {
 	// Turn tracking: counts user turns for status bar display.
 	turnCount int
 
+	// Per-turn file diff tracking: populated from Edit/Write tool results.
+	turnDiffs []TurnDiff
+
 	// Error message expansion: per-message-index toggle for long error messages.
 	errorExpanded map[int]bool
+}
+
+// TurnDiff records a file modification that happened during a conversation turn.
+type TurnDiff struct {
+	Turn     int
+	FilePath string
+	ToolName string // "Edit" or "Write"
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -4307,7 +4318,7 @@ func resolveModelAlias(input string) (string, bool) {
 }
 
 // trackToolFile extracts file path info from a tool_use event and updates the
-// dashboard FILES panel. Supports Read, Write, Edit, Glob, Grep, Bash tools.
+// dashboard FILES panel and per-turn diff tracking. Supports Read, Write, Edit.
 func (at *AgentTab) trackToolFile(toolName string, input any) {
 	m, ok := input.(map[string]any)
 	if !ok {
@@ -4321,10 +4332,20 @@ func (at *AgentTab) trackToolFile(toolName string, input any) {
 	case "Write":
 		if p, ok := m["file_path"].(string); ok {
 			at.dashboard.AddFile(p, "write")
+			at.turnDiffs = append(at.turnDiffs, TurnDiff{
+				Turn:     at.turnCount,
+				FilePath: p,
+				ToolName: "Write",
+			})
 		}
 	case "Edit":
 		if p, ok := m["file_path"].(string); ok {
 			at.dashboard.AddFile(p, "edit")
+			at.turnDiffs = append(at.turnDiffs, TurnDiff{
+				Turn:     at.turnCount,
+				FilePath: p,
+				ToolName: "Edit",
+			})
 		}
 	}
 }
@@ -5009,13 +5030,44 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		return true, nil
 
 	case "/diff":
-		out, err := exec.Command("git", "diff", "--stat").Output()
-		if err != nil {
-			at.addSystemMessage("No git changes")
-		} else if len(strings.TrimSpace(string(out))) == 0 {
-			at.addSystemMessage("Working tree clean")
+		if strings.TrimSpace(args) == "--git" {
+			// Legacy behavior: actual git diff --stat.
+			out, err := exec.Command("git", "diff", "--stat").Output()
+			if err != nil {
+				at.addSystemMessage("No git changes")
+			} else if len(strings.TrimSpace(string(out))) == 0 {
+				at.addSystemMessage("Working tree clean")
+			} else {
+				at.addSystemMessage(string(out))
+			}
 		} else {
-			at.addSystemMessage(string(out))
+			// Per-turn file tracking for this session.
+			if len(at.turnDiffs) == 0 {
+				at.addSystemMessage("No files changed this session.\nUse /diff --git for git diff --stat.")
+			} else {
+				// Group diffs by turn.
+				turnMap := make(map[int][]TurnDiff)
+				for _, d := range at.turnDiffs {
+					turnMap[d.Turn] = append(turnMap[d.Turn], d)
+				}
+				// Collect and sort turn numbers.
+				turns := make([]int, 0, len(turnMap))
+				for t := range turnMap {
+					turns = append(turns, t)
+				}
+				sort.Ints(turns)
+				var b strings.Builder
+				b.WriteString("Files changed this session:\n\n")
+				for _, t := range turns {
+					diffs := turnMap[t]
+					for _, d := range diffs {
+						b.WriteString(fmt.Sprintf("  Turn %d: %s %s\n", d.Turn, strings.ToLower(d.ToolName), d.FilePath))
+					}
+				}
+				b.WriteString(fmt.Sprintf("\n%d file operations across %d turns", len(at.turnDiffs), len(turns)))
+				b.WriteString("\nUse /diff --git for git diff --stat")
+				at.addSystemMessage(b.String())
+			}
 		}
 		at.refreshViewport()
 		return true, nil

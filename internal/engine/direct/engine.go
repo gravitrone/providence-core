@@ -149,6 +149,14 @@ type DirectEngine struct {
 	tokenBudget    int
 	tokensConsumed int
 	budgetMu       sync.Mutex
+
+	// Stuck loop detection: track recent tool calls to detect repeated patterns.
+	loopHistory   [5]string // ring buffer of "toolName:argsHash" keys
+	loopIdx       int       // next write index into loopHistory
+	loopFillCount int       // how many entries have been written (max 5)
+
+	// Caffeinate: prevent macOS sleep while the engine is active.
+	caffeinator *engine.Caffeinator
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -283,6 +291,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		startTime:           time.Now(),
 		hooksRunner:         hooksRunner,
 		contentReplacements: make(map[string]string),
+		caffeinator:         engine.NewCaffeinator(5 * time.Minute),
 	}
 
 	taskTool := tools.NewTaskTool(e.subagentRunner, e.subagentExecutor)
@@ -676,6 +685,9 @@ func (e *DirectEngine) Close() {
 		if e.subagentRunner != nil {
 			e.subagentRunner.Close()
 		}
+		if e.caffeinator != nil {
+			e.caffeinator.Stop()
+		}
 	})
 
 	// Step 2: Close MCP servers (3s timeout).
@@ -742,6 +754,34 @@ func (e *DirectEngine) GetCurrentTodos() []engine.TodoItem {
 		}
 	}
 	return out
+}
+
+// QuickQuery performs a single-turn, tool-free API call using the engine's
+// client and model. Intended for lightweight side queries like /btw.
+func (e *DirectEngine) QuickQuery(ctx context.Context, systemPrompt, userMessage string) (string, error) {
+	if e.codexMode || e.openrouterMode {
+		return "", fmt.Errorf("quick query not supported on codex/openrouter engines")
+	}
+	resp, err := e.client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.Model(e.model),
+		MaxTokens: 1024,
+		System: []anthropic.TextBlockParam{
+			{Text: systemPrompt},
+		},
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(userMessage)),
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("quick query failed: %w", err)
+	}
+	var sb strings.Builder
+	for _, block := range resp.Content {
+		if block.Type == "text" {
+			sb.WriteString(block.Text)
+		}
+	}
+	return sb.String(), nil
 }
 
 // MCPInstructions returns concatenated MCP server instructions, or empty string
@@ -1251,6 +1291,9 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			Tools:     toolParams,
 		}
 
+		// Keep macOS awake during active streaming.
+		e.caffeinator.Start()
+
 		accumulated, streamErr := e.streamWithRetry(ctx, apiParams)
 
 		// 413 prompt-too-long reactive compaction.
@@ -1420,6 +1463,44 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		e.preExecWg.Wait()
 
 		toolCalls := extractToolCalls(accumulated)
+
+		// Stuck loop detection: track tool calls in a ring buffer.
+		// If 3+ consecutive entries are identical, inject a nudge.
+		if len(toolCalls) == 1 {
+			inputJSON, _ := json.Marshal(toolCalls[0].Input)
+			key := toolCalls[0].Name + ":" + string(inputJSON)
+			e.loopHistory[e.loopIdx%5] = key
+			e.loopIdx++
+			if e.loopFillCount < 5 {
+				e.loopFillCount++
+			}
+			if e.loopFillCount >= 3 {
+				consecutive := 0
+				for i := 1; i <= e.loopFillCount; i++ {
+					idx := ((e.loopIdx - i) % 5 + 5) % 5
+					if e.loopHistory[idx] == key {
+						consecutive++
+					} else {
+						break
+					}
+				}
+				if consecutive >= 3 {
+					e.history.AddUser("You appear to be in a loop. Try a different approach.")
+					e.events <- engine.ParsedEvent{
+						Type: "system_message",
+						Data: &engine.SystemMessageEvent{
+							Type:    "system_message",
+							Content: "Loop detected: same tool+args called 3 times consecutively. Injected nudge.",
+						},
+					}
+				}
+			}
+		} else if len(toolCalls) > 1 {
+			// Multiple different tools in one turn breaks any loop pattern.
+			e.loopFillCount = 0
+			e.loopIdx = 0
+		}
+
 		queue := NewStreamingToolQueue(e.registry)
 		for _, tc := range toolCalls {
 			e.sessionBus.Publish(session.Event{Type: session.EventToolCallStart, Data: tc.Name})

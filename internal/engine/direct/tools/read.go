@@ -34,7 +34,7 @@ type ReadTool struct {
 	fileState *FileState
 
 	cacheMu   sync.Mutex
-	readCache map[string]string // path -> content sha256 hex
+	readCache map[string]string // "path:offset:limit" -> content sha256 hex
 }
 
 // NewReadTool creates a ReadTool backed by the given FileState tracker.
@@ -179,14 +179,16 @@ func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult
 	content := b.String()
 
 	// File-unchanged-since-last-read detection.
+	// Cache key includes offset+limit so different ranges are tracked independently.
+	cacheKey := fmt.Sprintf("%s:%d:%d", path, offset, limit)
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 	r.cacheMu.Lock()
-	if cached, ok := r.readCache[path]; ok && cached == hash {
+	if cached, ok := r.readCache[cacheKey]; ok && cached == hash {
 		r.cacheMu.Unlock()
 		r.fileState.MarkRead(path)
-		return ToolResult{Content: "[file unchanged since last read]"}
+		return ToolResult{Content: "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current - refer to that instead of re-reading."}
 	}
-	r.readCache[path] = hash
+	r.readCache[cacheKey] = hash
 	r.cacheMu.Unlock()
 
 	r.fileState.MarkRead(path)

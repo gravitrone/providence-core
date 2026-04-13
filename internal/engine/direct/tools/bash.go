@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -223,15 +224,23 @@ func (b *BashTool) runForeground(ctx context.Context, command string, timeout ti
 
 	output := buf.String()
 	truncated := false
+	truncatedLines := 0
 	if len(output) > maxOutputLen {
-		output = output[:maxOutputLen]
+		kept := output[:maxOutputLen]
+		dropped := output[maxOutputLen:]
+		truncatedLines = strings.Count(dropped, "\n")
+		// Count a trailing partial line that has no newline.
+		if len(dropped) > 0 && dropped[len(dropped)-1] != '\n' {
+			truncatedLines++
+		}
+		output = kept
 		truncated = true
 	}
 
 	if ctx.Err() == context.DeadlineExceeded {
 		msg := fmt.Sprintf("Command timed out after %s\n\n%s", timeout, output)
 		if truncated {
-			msg += "\n\n[output truncated]"
+			msg += fmt.Sprintf("\n\n... [%d lines truncated] ...", truncatedLines)
 		}
 		return ToolResult{Content: msg, IsError: true}
 	}
@@ -247,7 +256,7 @@ func (b *BashTool) runForeground(ctx context.Context, command string, timeout ti
 
 	result := output
 	if truncated {
-		result += "\n\n[output truncated]"
+		result += fmt.Sprintf("\n\n... [%d lines truncated] ...", truncatedLines)
 	}
 	result += "\n\nExit code: " + strconv.Itoa(exitCode)
 

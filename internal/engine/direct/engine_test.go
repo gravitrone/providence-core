@@ -467,6 +467,160 @@ func TestNewRunnerWithWorkDir(t *testing.T) {
 	assert.Equal(t, "/tmp/test-repo", e.subagentRunner.WorkDir)
 }
 
+func TestTokenEscalation_16kTo64k(t *testing.T) {
+	e := &DirectEngine{
+		events:   make(chan engine.ParsedEvent, 16),
+		history:  NewConversationHistory(),
+		model:    "claude-sonnet-4-6",
+		provider: engine.ProviderAnthropic,
+	}
+
+	// Initially not escalated.
+	assert.False(t, e.outputTokensEscalated)
+
+	// After first max_tokens hit, escalation should activate.
+	e.outputTokensEscalated = true
+	assert.True(t, e.outputTokensEscalated)
+
+	// The escalated limit should be 64000.
+	assert.Equal(t, 64000, EscalatedMaxOutputTokens)
+	assert.Equal(t, 16384, DefaultMaxOutputTokens)
+}
+
+func TestTokenEscalationResetOnSend(t *testing.T) {
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:   engine.EngineTypeDirect,
+		Model:  "claude-sonnet-4-20250514",
+		APIKey: "test-key-not-real",
+	})
+	require.NoError(t, err)
+
+	// Simulate prior turn escalation state.
+	e.outputTokensEscalated = true
+	e.maxOutputRecoveryCount = 2
+	e.fallbackActive = true
+
+	// Send resets these fields. Replicate the reset logic from Send().
+	e.mu.Lock()
+	e.status = engine.StatusRunning
+	e.maxOutputRecoveryCount = 0
+	e.fallbackActive = false
+	e.outputTokensEscalated = false
+	e.mu.Unlock()
+
+	assert.False(t, e.outputTokensEscalated)
+	assert.Equal(t, 0, e.maxOutputRecoveryCount)
+	assert.False(t, e.fallbackActive)
+}
+
+func TestSynthesizeErrorToolResults_NoToolCalls(t *testing.T) {
+	e := &DirectEngine{
+		events:  make(chan engine.ParsedEvent, 16),
+		history: NewConversationHistory(),
+	}
+
+	// Empty message with no tool_use blocks - should be a no-op.
+	msg := anthropic.Message{
+		Content: []anthropic.ContentBlockUnion{
+			{Type: "text", Text: "hello"},
+		},
+	}
+	e.synthesizeErrorToolResults(msg)
+
+	// History should remain empty since no tool_use blocks were found.
+	msgs := e.history.Messages()
+	assert.Empty(t, msgs)
+}
+
+func TestSynthesizeErrorToolResults_WithToolCalls(t *testing.T) {
+	e := &DirectEngine{
+		events:  make(chan engine.ParsedEvent, 16),
+		history: NewConversationHistory(),
+	}
+
+	// Build a message with tool_use blocks. Role must be "assistant" for ToParam().
+	msg := anthropic.Message{
+		Role: "assistant",
+		Content: []anthropic.ContentBlockUnion{
+			{Type: "text", Text: "let me run some tools"},
+			{Type: "tool_use", ID: "tu_123", Name: "Bash", Input: []byte(`{"command":"ls"}`)},
+			{Type: "tool_use", ID: "tu_456", Name: "Read", Input: []byte(`{"file_path":"/tmp/test"}`)},
+		},
+	}
+
+	e.synthesizeErrorToolResults(msg)
+
+	// History should have: 1 assistant message + 1 user message with tool results.
+	msgs := e.history.Messages()
+	require.Len(t, msgs, 2)
+
+	// User message should contain 2 tool result blocks with error content.
+	assert.Equal(t, anthropic.MessageParamRoleUser, msgs[1].Role)
+	require.Len(t, msgs[1].Content, 2)
+	for _, block := range msgs[1].Content {
+		require.NotNil(t, block.OfToolResult)
+		assert.Contains(t, block.OfToolResult.Content[0].OfText.Text, "skipped due to API error")
+	}
+}
+
+func TestTokenBudgetTracking(t *testing.T) {
+	e := &DirectEngine{
+		events:  make(chan engine.ParsedEvent, 16),
+		history: NewConversationHistory(),
+	}
+
+	// No budget set - deduct should never return exhausted.
+	assert.False(t, e.deductBudget(1000, 500))
+	assert.Equal(t, -1, e.BudgetRemaining())
+
+	// Set a budget of 10000 tokens.
+	e.SetTokenBudget(10000)
+	assert.Equal(t, 10000, e.BudgetRemaining())
+
+	// Deduct some tokens - not exhausted yet.
+	assert.False(t, e.deductBudget(3000, 1000))
+	assert.Equal(t, 6000, e.BudgetRemaining())
+
+	// Deduct past the 80% warning threshold.
+	assert.False(t, e.deductBudget(3000, 1000))
+	assert.Equal(t, 2000, e.BudgetRemaining())
+
+	// Drain the warning event.
+	ev := <-e.events
+	assert.Equal(t, "system_message", ev.Type)
+	sm, ok := ev.Data.(*engine.SystemMessageEvent)
+	require.True(t, ok)
+	assert.Contains(t, sm.Content, "budget warning")
+
+	// Exhaust the budget.
+	assert.True(t, e.deductBudget(1500, 1500))
+	assert.Equal(t, 0, e.BudgetRemaining())
+}
+
+func TestIsFallbackTriggerable(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"overload 529", fmt.Errorf("529 overloaded"), true},
+		{"server 500", fmt.Errorf("500 internal server error"), true},
+		{"server 502", fmt.Errorf("502 bad gateway"), true},
+		{"server 503", fmt.Errorf("503 service unavailable"), true},
+		{"server_error string", fmt.Errorf("server_error: something broke"), true},
+		{"internal_error string", fmt.Errorf("internal_error: crash"), true},
+		{"rate_limit_error", fmt.Errorf("rate_limit_error"), false},
+		{"generic error", fmt.Errorf("connection refused"), false},
+		{"404 not found", fmt.Errorf("404 not found"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isFallbackTriggerable(tt.err))
+		})
+	}
+}
+
 func TestRestoreHistory_CodexMode(t *testing.T) {
 	e, err := NewDirectEngine(engine.EngineConfig{
 		Type:     engine.EngineTypeDirect,

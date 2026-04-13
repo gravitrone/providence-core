@@ -81,3 +81,52 @@ func TestBudgetTruncatesMultiple(t *testing.T) {
 	// At least 3 should be truncated (3*30k = 90k saved, bringing 150k under 60k).
 	assert.GreaterOrEqual(t, truncated, 3)
 }
+
+func TestBudgetSingleHugeResult(t *testing.T) {
+	// One result that is way over the budget by itself.
+	huge := strings.Repeat("z", 200000)
+	msgs := []anthropic.MessageParam{
+		makeToolResultMessage("tool1", huge),
+	}
+	result := EnforceToolResultBudget(msgs, 1000)
+	assert.Len(t, result, 1)
+
+	tr := result[0].Content[0].OfToolResult
+	// Should be truncated to stub since 200k > 1k budget.
+	assert.Equal(t, BudgetTruncatedStub, tr.Content[0].OfText.Text)
+}
+
+func TestBudgetMixedToolAndNonToolMessages(t *testing.T) {
+	// Non-tool messages should pass through unchanged even when budget is tight.
+	bigContent := strings.Repeat("x", 60000)
+	msgs := []anthropic.MessageParam{
+		anthropic.NewUserMessage(anthropic.NewTextBlock("hello")),
+		makeToolResultMessage("tool1", bigContent),
+		anthropic.NewAssistantMessage(anthropic.NewTextBlock("reply")),
+		makeToolResultMessage("tool2", bigContent),
+	}
+	result := EnforceToolResultBudget(msgs, 50000)
+	assert.Len(t, result, 4)
+
+	// Non-tool messages should be intact.
+	assert.Equal(t, "hello", result[0].Content[0].OfText.Text)
+	assert.Equal(t, "reply", result[2].Content[0].OfText.Text)
+
+	// At least the oldest tool result should be truncated.
+	tr0 := result[1].Content[0].OfToolResult
+	assert.Equal(t, BudgetTruncatedStub, tr0.Content[0].OfText.Text)
+}
+
+func TestBudgetAlreadyStubsSkipped(t *testing.T) {
+	// Results that are already stubs (small) should not be re-truncated.
+	msgs := []anthropic.MessageParam{
+		makeToolResultMessage("tool1", BudgetTruncatedStub),
+		makeToolResultMessage("tool2", strings.Repeat("y", 80000)),
+	}
+	result := EnforceToolResultBudget(msgs, 50000)
+	assert.Len(t, result, 2)
+
+	// The already-stub message should remain unchanged.
+	tr0 := result[0].Content[0].OfToolResult
+	assert.Equal(t, BudgetTruncatedStub, tr0.Content[0].OfText.Text)
+}

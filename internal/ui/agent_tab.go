@@ -2610,18 +2610,16 @@ func (at AgentTab) renderMessages() string {
 			b.WriteString("\n")
 		}
 
+		var rendered string
 		switch msg.Role {
 		case "user":
-			b.WriteString(at.renderUserMessage(msg, contentW, i == lastUserIdx))
+			rendered = at.renderUserMessage(msg, contentW, i == lastUserIdx)
 		case "assistant":
-			rendered := at.renderAssistantMessage(msg)
-			if rendered != "" {
-				b.WriteString(rendered)
-			}
+			rendered = at.renderAssistantMessage(msg)
 		case "system":
-			b.WriteString(at.renderSystemMessage(msg))
+			rendered = at.renderSystemMessage(msg)
 		case "permission":
-			b.WriteString(at.renderPermissionMessage(msg, contentW))
+			rendered = at.renderPermissionMessage(msg, contentW)
 		case "tool":
 			if g, ok := batchStart[i]; ok && !at.toolsExpanded[i] {
 				// Collect messages for this batch by indices.
@@ -2629,12 +2627,19 @@ func (at AgentTab) renderMessages() string {
 				for bi, idx := range g.indices {
 					batchMsgs[bi] = at.messages[idx]
 				}
-				b.WriteString(at.renderBatchToolHeader(g.name, g.count, batchMsgs))
+				rendered = at.renderBatchToolHeader(g.name, g.count, batchMsgs)
 			} else {
-				b.WriteString(at.renderToolMessage(msg, i, i == lastToolIdx))
+				rendered = at.renderToolMessage(msg, i, i == lastToolIdx)
 			}
 		case "thinking":
-			b.WriteString(at.renderThinkingMessage(msg))
+			rendered = at.renderThinkingMessage(msg)
+		}
+		// In freeze mode with an active search query, highlight matches.
+		if rendered != "" && at.focus == FocusTranscript && at.transcript.searchQuery != "" {
+			rendered = highlightSearchMatches(rendered, at.transcript.searchQuery)
+		}
+		if rendered != "" {
+			b.WriteString(rendered)
 		}
 	}
 
@@ -3486,13 +3491,20 @@ func verbToPast(verb string) string {
 }
 
 func truncate(s string, max int) string {
-	if len(s) > max {
-		return s[:max-3] + "..."
+	if lipgloss.Width(s) > max {
+		// Trim rune-by-rune until display width fits.
+		runes := []rune(s)
+		for len(runes) > 0 && lipgloss.Width(string(runes)) > max-3 {
+			runes = runes[:len(runes)-1]
+		}
+		return string(runes) + "..."
 	}
 	return s
 }
 
 // WordWrap wraps text at the given width on word boundaries.
+// Uses lipgloss.Width for display-width measurement so ANSI escape codes
+// and wide Unicode characters (CJK, emoji) don't inflate line lengths.
 func wordWrap(text string, width int) string {
 	if width <= 0 {
 		return text
@@ -3508,7 +3520,7 @@ func wordWrap(text string, width int) string {
 		}
 		lineLen := 0
 		for i, word := range words {
-			wLen := len(word)
+			wLen := lipgloss.Width(word)
 			if i > 0 && lineLen+1+wLen > width {
 				result.WriteString("\n")
 				lineLen = 0
@@ -3521,6 +3533,38 @@ func wordWrap(text string, width int) string {
 		}
 	}
 	return result.String()
+}
+
+// highlightSearchMatches wraps all case-insensitive occurrences of query in
+// the rendered string with bold+underline styling for freeze-mode search.
+// It operates on the plain-text portions of each line to avoid corrupting
+// ANSI escape sequences mid-sequence.
+func highlightSearchMatches(rendered, query string) string {
+	if query == "" {
+		return rendered
+	}
+	hl := lipgloss.NewStyle().Bold(true).Underline(true)
+	lower := strings.ToLower(query)
+	var out strings.Builder
+	for i, line := range strings.Split(rendered, "\n") {
+		if i > 0 {
+			out.WriteByte('\n')
+		}
+		lowerLine := strings.ToLower(line)
+		pos := 0
+		for {
+			idx := strings.Index(lowerLine[pos:], lower)
+			if idx < 0 {
+				out.WriteString(line[pos:])
+				break
+			}
+			abs := pos + idx
+			out.WriteString(line[pos:abs])
+			out.WriteString(hl.Render(line[abs : abs+len(lower)]))
+			pos = abs + len(lower)
+		}
+	}
+	return out.String()
 }
 
 // --- Slash Commands ---
@@ -3883,11 +3927,16 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			at.engine = nil
 		}
 		// Populate UI messages from loaded session and build the restored
-		// engine history in parallel. Each stored row maps 1:1 into the
-		// restore payload so direct engines can synthesize prior tool output
-		// back into model-visible context.
+		// engine history. Tool rows are paired with synthetic tool_call IDs so
+		// engines that support proper tool_use/tool_result blocks (direct,
+		// openrouter) can reconstruct the correct message structure instead of
+		// falling back to flat text synthesis.
 		at.messages = nil
 		restored := make([]engine.RestoredMessage, 0, len(msgs))
+		// pendingToolID tracks the synthetic call ID generated for the most
+		// recent tool-bearing assistant turn so the following tool result can
+		// reference the same ID.
+		pendingToolIDs := make(map[string]string) // toolName -> callID
 		for _, m := range msgs {
 			at.messages = append(at.messages, ChatMessage{
 				Role:       m.Role,
@@ -3905,9 +3954,25 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				Role:    m.Role,
 				Content: m.Content,
 			}
-			if m.Role == "tool" {
+			switch m.Role {
+			case "assistant":
+				// If this assistant turn included a tool invocation, register a
+				// synthetic call ID so the subsequent tool result can reference it.
+				if m.ToolName != "" {
+					callID := fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
+					pendingToolIDs[m.ToolName] = callID
+				}
+			case "tool":
+				// Pair this result with the most recently registered call ID for
+				// its tool name. Fall back to a fresh synthetic ID if none exists.
+				callID, ok := pendingToolIDs[m.ToolName]
+				if !ok || callID == "" {
+					callID = fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
+				}
+				delete(pendingToolIDs, m.ToolName)
 				restoredMessage.ToolName = m.ToolName
 				restoredMessage.ToolInput = m.ToolArgs
+				restoredMessage.ToolCallID = callID
 				restoredMessage.Content = m.ToolOutput
 			}
 			restored = append(restored, restoredMessage)

@@ -39,6 +39,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 	"github.com/gravitrone/providence-core/internal/ui/dashboard"
+	"github.com/gravitrone/providence-core/internal/ui/picker"
 	"github.com/gravitrone/providence-core/internal/ui/tree"
 )
 
@@ -160,7 +161,7 @@ var slashCommands = []slashCommand{
 	{"/hooks", "Show hook configuration info"},
 	{"/diff", "Show git diff --stat"},
 	{"/branch", "Show git branches"},
-	{"/share", "Export session (coming soon)"},
+	{"/share", "Export session as JSONL"},
 	{"/review", "Spawn code review agent"},
 	{"/fork", "Fork N background agents from current context"},
 	{"/help", "Show available commands"},
@@ -315,6 +316,15 @@ type AgentTab struct {
 	discoveredSkills []skills.SkillDefinition
 	customAgents     map[string]subagent.AgentType
 	customTools      []customtools.CustomTool
+
+	// File picker (@-mention autocomplete).
+	filePicker picker.FilePickerModel
+
+	// Keybinding overrides from ~/.providence/keybindings.json.
+	keybindings *KeybindingsConfig
+
+	// Auto-title: generate session title from first user message.
+	autoTitleGenerated bool
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -346,15 +356,22 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 
 	model := cfg.Model
 
-	// First-run onboarding: show welcome message if .providence/ doesn't exist yet.
+	// First-run onboarding: show welcome message and create .providence/ dir.
 	var initialMessages []ChatMessage
 	home, _ := os.UserHomeDir()
 	if IsFirstRun(home) {
 		initialMessages = append(initialMessages, ChatMessage{
-			Role:    "system",
-			Content: WelcomeMessage(),
-			Done:    true,
+			Role: "system",
+			Content: "Welcome to Providence! The Profaned Core awaits.\n\n" +
+				"Quick start:\n" +
+				"  /model  - switch models\n" +
+				"  /engine - switch engines\n" +
+				"  /help   - see all commands\n" +
+				"  /theme  - change theme\n\n" +
+				"Type a message to begin.",
+			Done: true,
 		})
+		os.MkdirAll(filepath.Join(home, ".providence"), 0755)
 	}
 
 	// Discover skills, custom agents, and custom tools at startup.
@@ -362,6 +379,12 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 	discoveredSkills, _ := skills.LoadSkills(cwd, home)
 	customAgents, _ := subagent.LoadCustomAgents(cwd, home)
 	customTools, _ := customtools.LoadCustomTools(cwd, home)
+
+	// Load keybinding overrides.
+	keybindings, _ := LoadKeybindings(home)
+
+	// Initialize file picker for @-mention autocomplete.
+	fp := picker.NewFilePickerModel(cwd, 80)
 
 	return AgentTab{
 		input:            ti,
@@ -383,12 +406,14 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		discoveredSkills: discoveredSkills,
 		customAgents:     customAgents,
 		customTools:      customTools,
+		filePicker:       fp,
+		keybindings:      keybindings,
 	}
 }
 
 // Init implements TabModel.
 func (at AgentTab) Init() tea.Cmd {
-	return flameTick()
+	return tea.Batch(flameTick(), at.filePicker.Init())
 }
 
 // Resize updates the tab dimensions and recreates the glamour renderer.
@@ -426,6 +451,11 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		at.Resize(msg.Width, msg.Height)
 		return at, nil
+
+	case picker.FilesLoadedMsg, picker.FilesRefreshMsg:
+		var cmd tea.Cmd
+		at.filePicker, cmd = at.filePicker.Update(msg)
+		return at, cmd
 
 	case tea.KeyPressMsg:
 		return at.handleKey(msg)
@@ -729,6 +759,27 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		return at, nil
 	}
 
+	// File picker (@-mention) takes priority when active.
+	if at.filePicker.Active() {
+		switch key {
+		case "up", "down", "esc":
+			at.filePicker.HandleKey(key)
+			at.refreshViewport()
+			return at, nil
+		case "tab", "enter":
+			accepted, replacement := at.filePicker.HandleKey(key)
+			if accepted {
+				// Replace @query with the selected file path.
+				inputText := at.input.Value()
+				start := at.filePicker.TokenStart()
+				at.input.SetValue(inputText[:start] + replacement)
+				at.input.CursorEnd()
+			}
+			at.refreshViewport()
+			return at, nil
+		}
+	}
+
 	// Slash table navigation takes priority when the table is visible.
 	// The user is clearly browsing commands at that point, so up/down
 	// should move within the table instead of scrolling the viewport
@@ -937,6 +988,8 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			cwd, _ := os.Getwd()
 			at.store.CreateSession(at.sessionID, cwd, string(at.engineType), at.model)
 		}
+		// Auto-title the session from the first user message.
+		at.generateAutoTitle()
 		imgCount := len(at.pendingImages)
 		at.messages = append(at.messages, ChatMessage{
 			Role:       "user",
@@ -995,6 +1048,8 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		// Not in queue - forward to input.
 		var cmd tea.Cmd
 		at.input, cmd = at.input.Update(msg)
+		// Re-check file picker after backspace changes input.
+		at.filePicker.HandleInput(at.input.Value())
 		return at, cmd
 
 	case "ctrl+i":
@@ -1080,6 +1135,8 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 	default:
 		var cmd tea.Cmd
 		at.input, cmd = at.input.Update(msg)
+		// After input changes, check for @ trigger to activate file picker.
+		at.filePicker.HandleInput(at.input.Value())
 		return at, cmd
 	}
 }
@@ -1704,6 +1761,14 @@ func (at AgentTab) renderChatPane(paneWidth, height int) string {
 		}
 	}
 
+	// File picker popup, padded.
+	pickerSection := ""
+	if pv := at.filePicker.View(contentW); pv != "" {
+		for _, line := range strings.Split(pv, "\n") {
+			pickerSection += leftPad + line + "\n"
+		}
+	}
+
 	// Notification toasts, padded.
 	notifSection := ""
 	if nv := at.notifications.View(contentW); nv != "" {
@@ -1715,7 +1780,7 @@ func (at AgentTab) renderChatPane(paneWidth, height int) string {
 	// Input, padded.
 	inputLine := leftPad + at.input.View()
 
-	return "\n" + vpPadded.String() + "\n" + divider + "\n" + previewSection + notifSection + inputLine
+	return "\n" + vpPadded.String() + "\n" + divider + "\n" + previewSection + pickerSection + notifSection + inputLine
 }
 
 // matchingSlashCommands returns the slash commands whose names start with
@@ -2063,6 +2128,40 @@ func (at AgentTab) sendCmd(text string) tea.Cmd {
 		return nil
 	}
 	return tea.Batch(at.safeWaitForEvent(), spinnerTick())
+}
+
+// generateAutoTitle generates a session title from the first user message.
+// Runs once per session, in a goroutine, using simple truncation.
+func (at *AgentTab) generateAutoTitle() {
+	if at.sessionID == "" || at.autoTitleGenerated {
+		return
+	}
+	at.autoTitleGenerated = true
+
+	firstUser := ""
+	for _, msg := range at.messages {
+		if msg.Role == "user" {
+			firstUser = msg.Content
+			break
+		}
+	}
+	if firstUser == "" {
+		return
+	}
+
+	go func() {
+		title := strings.ReplaceAll(firstUser, "\n", " ")
+		title = strings.TrimSpace(title)
+		if len(title) > 80 {
+			title = title[:80]
+			if idx := strings.LastIndex(title, " "); idx > 40 {
+				title = title[:idx]
+			}
+		}
+		if at.store != nil {
+			at.store.UpdateSessionTitle(at.sessionID, title)
+		}
+	}()
 }
 
 func (at *AgentTab) addMessage(role, content string, done bool) {
@@ -3857,7 +3956,34 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		return true, nil
 
 	case "/share":
-		at.addSystemMessage("Export: /share is not yet implemented. Use /sessions to browse.")
+		if at.store == nil || at.sessionID == "" {
+			at.addSystemMessage("No active session to share.")
+			at.refreshViewport()
+			return true, nil
+		}
+		msgs, err := at.store.GetMessages(at.sessionID)
+		if err != nil {
+			at.addSystemMessage("Error: " + err.Error())
+			at.refreshViewport()
+			return true, nil
+		}
+		exportID := at.sessionID
+		if len(exportID) > 8 {
+			exportID = exportID[:8]
+		}
+		exportPath := fmt.Sprintf("/tmp/providence-session-%s.jsonl", exportID)
+		f, err := os.Create(exportPath)
+		if err != nil {
+			at.addSystemMessage("Error: " + err.Error())
+			at.refreshViewport()
+			return true, nil
+		}
+		enc := json.NewEncoder(f)
+		for _, m := range msgs {
+			enc.Encode(m)
+		}
+		f.Close()
+		at.addSystemMessage("Session exported to: " + exportPath)
 		at.refreshViewport()
 		return true, nil
 

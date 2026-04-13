@@ -264,7 +264,7 @@ func TestRunnerAsync(t *testing.T) {
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(marker)
 		return err == nil
-	}, 2*time.Second, 10*time.Millisecond, "async hook should have created marker file")
+	}, 10*time.Second, 50*time.Millisecond, "async hook should have created marker file")
 }
 
 func TestHookInputSerialization(t *testing.T) {

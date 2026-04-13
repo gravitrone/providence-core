@@ -969,6 +969,9 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 					continue
 				}
 			}
+			// Synthesize error tool_results for any orphaned tool_use blocks
+			// so the next API call doesn't 400 on unmatched pairs.
+			e.synthesizeErrorToolResults(accumulated)
 			e.emitError(streamErr)
 			return
 		}
@@ -1416,6 +1419,28 @@ func (e *DirectEngine) maybePreExecuteTool(ctx context.Context, accumulated anth
 		e.preExecResults[toolID] = result
 		e.preExecMu.Unlock()
 	}()
+}
+
+// synthesizeErrorToolResults checks if an accumulated (partial) response contains
+// tool_use blocks and, if so, adds matching error tool_results to history. This
+// prevents the next API call from failing on unmatched tool_use/tool_result pairs.
+func (e *DirectEngine) synthesizeErrorToolResults(accumulated anthropic.Message) {
+	toolCalls := extractToolCalls(accumulated)
+	if len(toolCalls) == 0 {
+		return
+	}
+
+	// Add the partial assistant message to history so the tool_results have
+	// a matching assistant turn.
+	e.history.AddAssistant(accumulated)
+
+	var resultBlocks []anthropic.ContentBlockParamUnion
+	for _, tc := range toolCalls {
+		resultBlocks = append(resultBlocks, anthropic.NewToolResultBlock(
+			tc.ID, "[tool execution skipped due to API error]", true,
+		))
+	}
+	e.history.AddToolResults(resultBlocks)
 }
 
 // isOverloadError returns true if the error indicates a model overload (HTTP 529

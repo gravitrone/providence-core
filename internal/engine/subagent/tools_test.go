@@ -7,7 +7,7 @@ import (
 )
 
 func TestFilterToolsAll(t *testing.T) {
-	allTools := []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep", "Task", "AskUserQuestion"}
+	allTools := []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep", "Agent", "AskUserQuestion"}
 
 	agent := AgentType{
 		Tools: []string{"*"},
@@ -18,7 +18,7 @@ func TestFilterToolsAll(t *testing.T) {
 	assert.Contains(t, result, "Read")
 	assert.Contains(t, result, "Write")
 	assert.Contains(t, result, "Bash")
-	assert.NotContains(t, result, "Task", "Task should be removed by default disallowed list")
+	assert.NotContains(t, result, "Agent", "Agent should be removed by default disallowed list")
 	assert.NotContains(t, result, "AskUserQuestion", "AskUserQuestion should be removed")
 }
 
@@ -35,7 +35,7 @@ func TestFilterToolsSpecific(t *testing.T) {
 }
 
 func TestFilterToolsDisallowed(t *testing.T) {
-	allTools := []string{"Read", "Write", "Task", "Bash", "EnterPlanMode", "ExitPlanMode"}
+	allTools := []string{"Read", "Write", "Agent", "Bash", "EnterPlanMode", "ExitPlanMode"}
 
 	agent := AgentType{
 		Tools: []string{"*"},
@@ -43,7 +43,7 @@ func TestFilterToolsDisallowed(t *testing.T) {
 
 	result := FilterTools(allTools, agent)
 
-	assert.NotContains(t, result, "Task")
+	assert.NotContains(t, result, "Agent")
 	assert.NotContains(t, result, "EnterPlanMode")
 	assert.NotContains(t, result, "ExitPlanMode")
 	assert.Contains(t, result, "Read")
@@ -66,15 +66,15 @@ func TestFilterToolsCustomDisallowed(t *testing.T) {
 }
 
 func TestFilterToolsExplicitOverridesDeny(t *testing.T) {
-	allTools := []string{"Read", "Task", "Bash"}
+	allTools := []string{"Read", "Agent", "Bash"}
 
-	// Agent explicitly requests Task - should be allowed since non-wildcard.
+	// Agent explicitly requests Agent - should be allowed since non-wildcard.
 	agent := AgentType{
-		Tools: []string{"Read", "Task"},
+		Tools: []string{"Read", "Agent"},
 	}
 
 	result := FilterTools(allTools, agent)
 
-	assert.Contains(t, result, "Task", "explicit tool list should override global deny")
+	assert.Contains(t, result, "Agent", "explicit tool list should override global deny")
 	assert.Contains(t, result, "Read")
 }

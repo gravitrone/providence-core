@@ -215,8 +215,30 @@ func loadFromJSON(path string) Config {
 	return c
 }
 
+// managedSettingsPath returns the macOS enterprise managed-settings path.
+// On other platforms, returns an empty string (feature disabled).
+func managedSettingsPath() string {
+	return "/Library/Application Support/Providence/managed-settings.toml"
+}
+
+// loadManagedSettings attempts to load enterprise managed settings from the
+// well-known system path. Returns empty Config if file doesn't exist or
+// platform doesn't support it. This is a stub - enterprise enforcement logic
+// is not implemented.
+func loadManagedSettings() Config {
+	path := managedSettingsPath()
+	if path == "" {
+		return Config{}
+	}
+	if _, err := os.Stat(path); err != nil {
+		return Config{} // not present, not an error
+	}
+	return LoadFromTOML(path)
+}
+
 // LoadMerged loads config with 5-level merge: user global -> project -> local -> (flags + policy at runtime).
 // projectRoot is the working directory or project root where .providence/ may live.
+// Enterprise managed-settings.toml (if present) is applied last as highest priority.
 func LoadMerged(projectRoot string) Config {
 	home, _ := os.UserHomeDir()
 
@@ -235,7 +257,11 @@ func LoadMerged(projectRoot string) Config {
 	claudeCfg := LoadFromTOML(filepath.Join(projectRoot, ".claude", "config.toml"))
 	mergeConfig(&cfg, &claudeCfg)
 
-	// Level 5: CLI flags + policy handled at runtime by caller
+	// Level 5 (highest priority): enterprise managed settings - overrides everything.
+	managedCfg := loadManagedSettings()
+	mergeConfig(&cfg, &managedCfg)
+
+	// CLI flags handled at runtime by caller.
 	_ = home
 	return cfg
 }

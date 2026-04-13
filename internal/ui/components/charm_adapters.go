@@ -3,8 +3,10 @@ package components
 import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/table"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
+	"charm.land/bubbles/v2/key"
 	"charm.land/lipgloss/v2"
 )
 
@@ -45,6 +47,47 @@ func ReapplyInputStyles(ti *textinput.Model) {
 	styles.Blurred.Text = lipgloss.NewStyle().Foreground(ThemeMuted)
 	styles.Cursor.Color = ThemePrimary
 	ti.SetStyles(styles)
+}
+
+// NewProvidenceTextArea returns a textarea.Model styled to match the providence theme.
+// It is configured for 3-line multiline input with enter = submit (handled by caller)
+// and shift+enter = newline.
+func NewProvidenceTextArea(placeholder string) textarea.Model {
+	ta := textarea.New()
+	ta.Placeholder = placeholder
+	ta.ShowLineNumbers = false
+	ta.SetHeight(3)
+	ta.Prompt = "❯ "
+
+	// Remap InsertNewline from enter to shift+enter so enter can be handled
+	// by the caller as "submit".
+	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter"), key.WithHelp("shift+enter", "newline"))
+
+	styles := textarea.DefaultDarkStyles()
+	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(ThemeMuted)
+	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(ThemePrimary)
+	styles.Focused.Text = lipgloss.NewStyle().Foreground(ThemeText)
+	styles.Focused.CursorLine = lipgloss.NewStyle()
+	styles.Blurred.Placeholder = lipgloss.NewStyle().Foreground(ThemeMuted)
+	styles.Blurred.Text = lipgloss.NewStyle().Foreground(ThemeMuted)
+	styles.Cursor.Color = ThemePrimary
+	ta.SetStyles(styles)
+
+	ta.Focus()
+	return ta
+}
+
+// ReapplyTextAreaStyles updates an existing textarea with current theme colors.
+func ReapplyTextAreaStyles(ta *textarea.Model) {
+	styles := textarea.DefaultDarkStyles()
+	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(ThemeMuted)
+	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(ThemePrimary)
+	styles.Focused.Text = lipgloss.NewStyle().Foreground(ThemeText)
+	styles.Focused.CursorLine = lipgloss.NewStyle()
+	styles.Blurred.Placeholder = lipgloss.NewStyle().Foreground(ThemeMuted)
+	styles.Blurred.Text = lipgloss.NewStyle().Foreground(ThemeMuted)
+	styles.Cursor.Color = ThemePrimary
+	ta.SetStyles(styles)
 }
 
 // NewProvidenceSpinner returns a spinner.Model styled to match the providence theme.

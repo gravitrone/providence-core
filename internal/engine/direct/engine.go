@@ -161,6 +161,11 @@ type DirectEngine struct {
 	teamName    string // team this engine belongs to (empty = no team)
 	teamAgentID string // this agent's name within the team
 
+	// Coordinator mode: when true, only coordinator-safe tools are exposed.
+	// The leader gets Agent, SendMessage, TaskStop (Kill), TeamCreate,
+	// TeamDelete, TodoWrite, and brief. Workers get all tools.
+	coordinatorMode bool
+
 	// Caffeinate: prevent macOS sleep while the engine is active.
 	caffeinator *engine.Caffeinator
 }
@@ -494,6 +499,21 @@ func (e *DirectEngine) TeamInfo() (string, string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.teamName, e.teamAgentID
+}
+
+// SetCoordinatorMode enables or disables coordinator mode.
+// When active, only orchestration tools are exposed to the model.
+func (e *DirectEngine) SetCoordinatorMode(on bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.coordinatorMode = on
+}
+
+// IsCoordinatorMode returns whether the engine is in coordinator mode.
+func (e *DirectEngine) IsCoordinatorMode() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.coordinatorMode
 }
 
 // SetUnattendedRetry enables or disables unattended retry mode.
@@ -1791,9 +1811,37 @@ func (e *DirectEngine) emitError(err error) {
 	}
 }
 
+// coordinatorToolSet defines which tools are available in coordinator mode.
+// The leader only gets orchestration tools - all actual work goes through agents.
+var coordinatorToolSet = map[string]bool{
+	"Agent":       true,
+	"SendMessage": true,
+	"TeamCreate":  true,
+	"TeamDelete":  true,
+	"TodoWrite":   true,
+	"Brief":       true,
+	"Read":        true,
+	"AskUser":     true,
+}
+
+// filteredTools returns the tool list, optionally filtered for coordinator mode.
+func (e *DirectEngine) filteredTools() []tools.Tool {
+	allTools := e.registry.All()
+	if !e.coordinatorMode {
+		return allTools
+	}
+	filtered := make([]tools.Tool, 0, len(coordinatorToolSet))
+	for _, t := range allTools {
+		if coordinatorToolSet[t.Name()] {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
 // toolParams converts the registry into Anthropic SDK tool params.
 func (e *DirectEngine) toolParams() []anthropic.ToolUnionParam {
-	allTools := e.registry.All()
+	allTools := e.filteredTools()
 	if len(allTools) == 0 {
 		return nil
 	}

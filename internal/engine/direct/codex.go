@@ -84,9 +84,8 @@ type codexDone struct {
 	} `json:"response"`
 }
 
-// buildCodexTools converts the tool registry to Codex tool format.
-func buildCodexTools(registry *tools.Registry) []codexTool {
-	allTools := registry.All()
+// buildCodexTools converts the tool list to Codex tool format.
+func buildCodexTools(allTools []tools.Tool) []codexTool {
 	out := make([]codexTool, 0, len(allTools))
 	for _, t := range allTools {
 		schema := t.InputSchema()
@@ -204,7 +203,7 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 			Instructions: e.system,
 			Input:        buildCodexMessages(e.codexHistory),
 			ToolChoice:   "auto",
-			Tools:        buildCodexTools(e.registry),
+			Tools:        buildCodexTools(e.filteredTools()),
 		}
 
 		bodyBytes, err := json.Marshal(reqBody)

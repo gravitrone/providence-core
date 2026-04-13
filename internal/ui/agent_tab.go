@@ -4794,9 +4794,15 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			// Toggle ember mode.
 			if at.ember.ShouldTick() || at.ember.Active {
 				at.ember.Deactivate()
+				if de, ok := at.engine.(*direct.DirectEngine); ok {
+					de.SetUnattendedRetry(false)
+				}
 				at.addSystemMessage("Ember autonomous mode deactivated")
 			} else {
 				at.ember.Activate()
+				if de, ok := at.engine.(*direct.DirectEngine); ok {
+					de.SetUnattendedRetry(true)
+				}
 				at.addSystemMessage("Ember autonomous mode activated - ticks will fire after each turn")
 			}
 		} else {

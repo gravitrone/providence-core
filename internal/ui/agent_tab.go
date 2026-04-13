@@ -1801,16 +1801,16 @@ func (at AgentTab) View(width, height int) string {
 
 	// Nebula layout: Banner + Subtitle + Underline above tabs when few messages.
 	// Once messages fill the viewport, collapse to just tabs.
-	contentW := chatContentWidth(width)
 	showBanner := len(at.messages) <= 2 // show banner on initial/near-empty state
 
 	var header string
 	headerLines := 2 // tab bar + underline always
 	if showBanner {
 		// RenderBannerAnimated already includes subtitle + underline.
+		// Center on full terminal width so banner aligns with tabs.
 		bannerBlock := centerBlockUniform(
 			RenderBannerAnimated(at.flameFrame, at.streaming),
-			contentW,
+			width,
 		)
 		bannerH := lipgloss.Height(bannerBlock)
 		headerLines += bannerH + 1

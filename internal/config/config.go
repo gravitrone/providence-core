@@ -193,12 +193,42 @@ func LoadFrom(path string) Config {
 	return LoadFromTOML(path)
 }
 
+// expandEnvVars replaces ${VAR} and $VAR patterns in s with environment values.
+func expandEnvVars(s string) string {
+	return os.ExpandEnv(s)
+}
+
+// expandConfigEnvVars applies env var expansion to all string fields in a Config.
+func expandConfigEnvVars(c *Config) {
+	c.Engine = expandEnvVars(c.Engine)
+	c.Model = expandEnvVars(c.Model)
+	c.Theme = expandEnvVars(c.Theme)
+	c.Effort = expandEnvVars(c.Effort)
+	c.OpenRouterAPIKey = expandEnvVars(c.OpenRouterAPIKey)
+	c.OutputStyle = expandEnvVars(c.OutputStyle)
+	c.Compact.Mode = expandEnvVars(c.Compact.Mode)
+	c.Compact.Trigger = expandEnvVars(c.Compact.Trigger)
+	c.Compact.FastTierModel = expandEnvVars(c.Compact.FastTierModel)
+	c.Permissions.Mode = expandEnvVars(c.Permissions.Mode)
+	for i := range c.Permissions.Allow {
+		c.Permissions.Allow[i] = expandEnvVars(c.Permissions.Allow[i])
+	}
+	for i := range c.Permissions.Deny {
+		c.Permissions.Deny[i] = expandEnvVars(c.Permissions.Deny[i])
+	}
+	for i := range c.Permissions.Ask {
+		c.Permissions.Ask[i] = expandEnvVars(c.Permissions.Ask[i])
+	}
+}
+
 // LoadFromTOML reads config from a TOML file. Returns empty Config on any error.
+// Environment variables (${VAR} or $VAR) in string fields are expanded after loading.
 func LoadFromTOML(path string) Config {
 	var c Config
 	if _, err := toml.DecodeFile(path, &c); err != nil {
 		return Config{}
 	}
+	expandConfigEnvVars(&c)
 	return c
 }
 

@@ -220,20 +220,50 @@ func (t *TranscriptModel) SearchCurrentIdx() int {
 	return t.searchIdx
 }
 
+// estimatedLineCount is the default height used for messages not yet rendered.
+// It keeps scroll math reasonable before actual heights are known.
+const estimatedLineCount = 3
+
 // View renders only the messages visible within the current viewport.
 // The renderFn callback renders a single message by index. This keeps
 // the TranscriptModel decoupled from the actual rendering logic in AgentTab.
+//
+// On first call (or when sticky), only the tail of messages that fit within
+// the viewport are pre-rendered. Older messages get an estimated height and
+// are rendered lazily as the user scrolls up.
 func (t *TranscriptModel) View(renderFn func(idx int) string) string {
 	if len(t.messages) == 0 {
 		return ""
 	}
 
-	// Ensure all heights are cached (render on demand).
-	for i := range t.messages {
-		if _, ok := t.heightCache[i]; !ok {
+	// On first load (sticky, no heights cached yet) pre-render only the
+	// messages that are likely to be visible instead of all of them.
+	if t.sticky && len(t.heightCache) == 0 && t.viewportH > 0 {
+		// Assign estimated heights to all messages first so scroll math works.
+		for i := range t.messages {
+			t.heightCache[i] = estimatedLineCount
+		}
+		t.recomputeContentHeight()
+		t.scrollToEnd()
+
+		// Render backwards from the last message until we've covered the viewport.
+		covered := 0
+		for i := len(t.messages) - 1; i >= 0 && covered < t.viewportH+estimatedLineCount*2; i-- {
 			rendered := renderFn(i)
 			t.renderedCache[i] = rendered
-			t.heightCache[i] = countLines(rendered)
+			h := countLines(rendered)
+			t.heightCache[i] = h
+			covered += h
+		}
+		t.recomputeContentHeight()
+		t.scrollToEnd()
+	}
+
+	// For any message without a cached height, assign the estimate so scroll
+	// math stays accurate before we render them on scroll.
+	for i := range t.messages {
+		if _, ok := t.heightCache[i]; !ok {
+			t.heightCache[i] = estimatedLineCount
 		}
 	}
 	t.recomputeContentHeight()
@@ -254,11 +284,15 @@ func (t *TranscriptModel) View(renderFn func(idx int) string) string {
 		// Message is visible if it overlaps the viewport window.
 		vpEnd := t.scrollTop + t.viewportH
 		if msgEnd > t.scrollTop && msgStart < vpEnd {
-			// Ensure we have a cached render.
+			// Render on demand if not yet cached.
 			if _, ok := t.renderedCache[i]; !ok {
 				rendered := renderFn(i)
 				t.renderedCache[i] = rendered
-				t.heightCache[i] = countLines(rendered)
+				newH := countLines(rendered)
+				if newH != h {
+					t.heightCache[i] = newH
+					t.recomputeContentHeight()
+				}
 			}
 			visible = append(visible, t.renderedCache[i])
 		}
@@ -276,7 +310,7 @@ func (t *TranscriptModel) VisibleCount(renderFn func(idx int) string) int {
 		return 0
 	}
 
-	// Ensure all heights are cached.
+	// Render and cache all heights for accurate counting.
 	for i := range t.messages {
 		if _, ok := t.heightCache[i]; !ok {
 			rendered := renderFn(i)

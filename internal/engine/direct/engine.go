@@ -156,6 +156,11 @@ type DirectEngine struct {
 	loopIdx       int       // next write index into loopHistory
 	loopFillCount int       // how many entries have been written (max 5)
 
+	// Team membership: when set, inbox is polled for teammate messages.
+	teamStore   *teams.Store
+	teamName    string // team this engine belongs to (empty = no team)
+	teamAgentID string // this agent's name within the team
+
 	// Caffeinate: prevent macOS sleep while the engine is active.
 	caffeinator *engine.Caffeinator
 }
@@ -463,6 +468,32 @@ func (e *DirectEngine) SessionBus() *session.Bus {
 // SetRegistry replaces the tool registry (for use before first Send).
 func (e *DirectEngine) SetRegistry(r *tools.Registry) {
 	e.registry = r
+}
+
+// JoinTeam assigns this engine to a team for inbox polling.
+// Pass the team name and the agent's identifier within the team.
+func (e *DirectEngine) JoinTeam(store *teams.Store, teamName, agentID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.teamStore = store
+	e.teamName = teamName
+	e.teamAgentID = agentID
+}
+
+// LeaveTeam removes team membership from this engine.
+func (e *DirectEngine) LeaveTeam() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.teamStore = nil
+	e.teamName = ""
+	e.teamAgentID = ""
+}
+
+// TeamInfo returns the current team name and agent ID, or empty strings.
+func (e *DirectEngine) TeamInfo() (string, string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.teamName, e.teamAgentID
 }
 
 // SetUnattendedRetry enables or disables unattended retry mode.
@@ -2442,6 +2473,18 @@ func (e *DirectEngine) injectPerTurnContext() {
 				changedFiles = append(changedFiles, c)
 			}
 			parts = append(parts, fmt.Sprintf("Recent file changes: %s", strings.Join(changedFiles, ", ")))
+		}
+	}
+
+	// Team inbox polling: check for unread teammate messages.
+	if e.teamStore != nil && e.teamName != "" && e.teamAgentID != "" {
+		mailbox := teams.NewMailbox(e.teamStore)
+		unread, err := mailbox.ReadUnread(e.teamName, e.teamAgentID)
+		if err == nil && len(unread) > 0 {
+			for _, msg := range unread {
+				parts = append(parts, fmt.Sprintf("<teammate-message from=%q>%s</teammate-message>", msg.From, msg.Text))
+			}
+			_ = mailbox.MarkRead(e.teamName, e.teamAgentID)
 		}
 	}
 

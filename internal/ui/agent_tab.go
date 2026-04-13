@@ -187,7 +187,8 @@ var slashCommands = []slashCommand{
 	{"/permissions", "Show current permission mode"},
 	{"/hooks", "Show hook configuration info"},
 	{"/diff", "Show git diff --stat"},
-	{"/branch", "Show git branches"},
+	{"/branch", "Fork conversation into a new session"},
+	{"/branches", "Show git branches"},
 	{"/share", "Export session as JSONL"},
 	{"/tag", "Tag current session (usage: /tag <name>)"},
 	{"/review", "Spawn code review agent"},
@@ -4922,6 +4923,49 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		return true, nil
 
 	case "/branch":
+		// Conversation branching: fork the current session into a new one.
+		if at.store == nil {
+			at.addSystemMessage("Session store not available for branching")
+			at.refreshViewport()
+			return true, nil
+		}
+		if at.sessionID == "" || len(at.messages) == 0 {
+			at.addSystemMessage("No active session to branch")
+			at.refreshViewport()
+			return true, nil
+		}
+		// Create new session.
+		newID := uuid.New().String()
+		cwd, _ := os.Getwd()
+		if err := at.store.CreateSession(newID, cwd, string(at.engineType), at.model); err != nil {
+			at.addSystemMessage("Branch failed: " + err.Error())
+			at.refreshViewport()
+			return true, nil
+		}
+		// Derive title from original.
+		origTitle := ""
+		if sess, err := at.store.GetSession(at.sessionID); err == nil && sess != nil {
+			origTitle = sess.Title
+		}
+		if origTitle == "" {
+			origTitle = at.sessionID[:8]
+		}
+		branchTitle := "Branch of: " + origTitle
+		at.store.UpdateSessionTitle(newID, branchTitle)
+		// Copy all messages into the new session.
+		for _, m := range at.messages {
+			if m.Role == "system" {
+				continue
+			}
+			at.store.AddMessage(newID, m.Role, m.Content, m.ToolName, m.ToolArgs, m.ToolStatus, m.ToolBody, m.ToolOutput, m.ImageCount, m.Done)
+		}
+		// Switch to the new session.
+		at.sessionID = newID
+		at.addSystemMessage("Branched conversation. Original session preserved.\nNew session: " + branchTitle)
+		at.refreshViewport()
+		return true, nil
+
+	case "/branches":
 		out, _ := exec.Command("git", "branch", "-v").Output()
 		at.addSystemMessage(string(out))
 		at.refreshViewport()

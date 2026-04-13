@@ -90,6 +90,11 @@ type DirectEngine struct {
 	// Session event bus for background agents and plugin subscribers.
 	sessionBus *session.Bus
 
+	// Background agent support.
+	bgAgentsEnabled  bool
+	backgroundAgents map[string]subagent.BackgroundAgentType
+	bgCancel         context.CancelFunc
+
 	// store is optional; when set, session learnings are persisted on Close.
 	store     storeIface
 	startTime time.Time
@@ -203,7 +208,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		codexMode:        isCodex,
 		openrouterMode:   isOpenRouter,
 		openrouterAPIKey: openrouterKey,
-		subagentRunner:   subagent.NewRunner(),
+		subagentRunner:   subagent.NewRunnerWithWorkDir(cfg.WorkDir),
 		apiKey:           cfg.APIKey,
 		sessionBus:       session.NewBus(),
 		todoTool:         todoTool,
@@ -282,6 +287,67 @@ func (e *DirectEngine) SessionBus() *session.Bus {
 // SetRegistry replaces the tool registry (for use before first Send).
 func (e *DirectEngine) SetRegistry(r *tools.Registry) {
 	e.registry = r
+}
+
+// EnableBackgroundAgents activates background agent processing. When enabled,
+// the engine subscribes to SessionBus events and fires matching background
+// agents automatically. Call before the first Send.
+func (e *DirectEngine) EnableBackgroundAgents(agents map[string]subagent.BackgroundAgentType) {
+	e.bgAgentsEnabled = true
+	e.backgroundAgents = agents
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	e.bgCancel = bgCancel
+	go e.runBackgroundAgents(bgCtx)
+}
+
+// runBackgroundAgents subscribes to SessionBus and fires matching background
+// agents when their trigger events occur.
+func (e *DirectEngine) runBackgroundAgents(ctx context.Context) {
+	ch := e.sessionBus.Subscribe(32)
+	defer e.sessionBus.Unsubscribe(ch)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-ch:
+			if !ok {
+				return
+			}
+			for _, bg := range e.backgroundAgents {
+				if e.matchesTrigger(bg.TriggerOn, evt.Type) {
+					go e.fireBackgroundAgent(ctx, bg, evt)
+				}
+			}
+		}
+	}
+}
+
+// matchesTrigger checks if a session event type matches a background agent's trigger.
+func (e *DirectEngine) matchesTrigger(trigger, eventType string) bool {
+	switch trigger {
+	case "tool_use_turn":
+		return eventType == session.EventToolCallResult
+	case "every_turn":
+		return eventType == session.EventNewMessage || eventType == session.EventToolCallResult
+	case "on_demand":
+		return false // only fired manually
+	default:
+		return false
+	}
+}
+
+// fireBackgroundAgent spawns a background agent in response to a session event.
+func (e *DirectEngine) fireBackgroundAgent(ctx context.Context, bg subagent.BackgroundAgentType, evt session.Event) {
+	prompt := fmt.Sprintf("Session event: %s\nData: %v", evt.Type, evt.Data)
+	input := subagent.TaskInput{
+		Description:  bg.Name + " (background)",
+		Prompt:       prompt,
+		SubagentType: bg.Name,
+		RunInBG:      true,
+		Name:         bg.Name,
+	}
+	_, _ = e.subagentRunner.Spawn(ctx, input, bg.AgentType, e.subagentExecutor)
 }
 
 // SetPendingImages stores images to include with the next user message.
@@ -388,6 +454,9 @@ func (e *DirectEngine) SetStore(st storeIface) {
 // If a store is wired, mechanical session learnings are persisted before closing.
 func (e *DirectEngine) Close() {
 	e.Interrupt()
+	if e.bgCancel != nil {
+		e.bgCancel()
+	}
 	if e.store != nil {
 		e.saveSessionLearnings(e.store, e.startTime)
 	}
@@ -505,8 +574,33 @@ func formatRestoredToolMessage(message engine.RestoredMessage) string {
 	return fmt.Sprintf("[Tool: %s -> %s]", toolName, message.Content)
 }
 
-// subagentExecutor creates a child DirectEngine and runs a single-turn conversation,
+// MapModelForEngine maps a requested model name to the correct model string
+// for a target engine. Codex only supports one model, Claude maps aliases,
+// and direct/opencode pass through.
+func MapModelForEngine(requestedModel, targetEngine string) string {
+	switch engine.EngineType(targetEngine) {
+	case "codex", "codex_re":
+		return "gpt-5.4-codex"
+	case engine.EngineTypeClaude, engine.EngineTypeDirect:
+		switch requestedModel {
+		case "sonnet":
+			return "claude-sonnet-4-6"
+		case "opus":
+			return "claude-opus-4-6"
+		case "haiku", "fast":
+			return "claude-haiku-4"
+		default:
+			return requestedModel
+		}
+	default:
+		return requestedModel
+	}
+}
+
+// subagentExecutor creates a child engine and runs a single-turn conversation,
 // returning the assistant's text output. Used as the subagent.Executor callback.
+// Supports cross-engine spawning: if agentType.Engine is set and differs from
+// "direct", a child engine of the requested type is created via the factory.
 func (e *DirectEngine) subagentExecutor(ctx context.Context, prompt string, agentType subagent.AgentType) (string, error) {
 	systemPrompt := agentType.SystemPrompt + "\n\n" + subagent.AntiRecursionPrompt
 
@@ -515,12 +609,24 @@ func (e *DirectEngine) subagentExecutor(ctx context.Context, prompt string, agen
 		model = e.model
 	}
 
+	// Resolve working directory (worktree may override).
+	workDir := e.workDir
+	if agentType.WorkDir != "" {
+		workDir = agentType.WorkDir
+	}
+
+	// Cross-engine path: spawn a different engine type.
+	agentEngine := agentType.Engine
+	if agentEngine != "" && agentEngine != "inherit" && agentEngine != string(engine.EngineTypeDirect) {
+		return e.crossEngineExecutor(ctx, prompt, systemPrompt, agentType, model, workDir)
+	}
+
 	cfg := engine.EngineConfig{
 		Type:             engine.EngineTypeDirect,
 		SystemPrompt:     systemPrompt,
 		Model:            model,
 		APIKey:           e.apiKey,
-		WorkDir:          e.workDir,
+		WorkDir:          workDir,
 		Provider:         e.provider,
 		OpenRouterAPIKey: e.openrouterAPIKey,
 	}
@@ -535,13 +641,10 @@ func (e *DirectEngine) subagentExecutor(ctx context.Context, prompt string, agen
 	if agentType.PermissionMode != "" && agentType.PermissionMode != "inherit" {
 		switch agentType.PermissionMode {
 		case "plan":
-			// In plan mode, restrict to read-only tools by removing write/execute tools.
 			sub.permissions.SetMode("plan")
 		case "auto":
-			// Auto-approve all tool permissions.
 			sub.permissions.SetMode("auto")
 		case "deny":
-			// Deny all tool permissions.
 			sub.permissions.SetMode("deny")
 		}
 	}
@@ -550,17 +653,48 @@ func (e *DirectEngine) subagentExecutor(ctx context.Context, prompt string, agen
 		return "", fmt.Errorf("sub-engine send: %w", err)
 	}
 
-	// maxTurns enforcement: cap the number of agentic turns.
+	return e.drainEngineEvents(ctx, sub, agentType.MaxTurns)
+}
+
+// crossEngineExecutor creates a non-direct engine of the requested type and
+// collects its output. Used when an agent specifies engine != "direct".
+func (e *DirectEngine) crossEngineExecutor(ctx context.Context, prompt, systemPrompt string, agentType subagent.AgentType, model, workDir string) (string, error) {
+	engineType := engine.EngineType(agentType.Engine)
+	mappedModel := MapModelForEngine(model, agentType.Engine)
+
+	cfg := engine.EngineConfig{
+		Type:         engineType,
+		SystemPrompt: systemPrompt,
+		Model:        mappedModel,
+		APIKey:       e.apiKey,
+		WorkDir:      workDir,
+	}
+
+	childEngine, err := engine.NewEngine(cfg)
+	if err != nil {
+		return "", fmt.Errorf("create cross-engine %s: %w", engineType, err)
+	}
+	defer childEngine.Close()
+
+	if err := childEngine.Send(prompt); err != nil {
+		return "", fmt.Errorf("cross-engine send: %w", err)
+	}
+
+	return e.drainEngineEvents(ctx, childEngine, agentType.MaxTurns)
+}
+
+// drainEngineEvents reads events from a child engine until completion,
+// collecting text output and enforcing maxTurns.
+func (e *DirectEngine) drainEngineEvents(ctx context.Context, child engine.Engine, maxTurns int) (string, error) {
 	turnCount := 0
-	maxTurns := agentType.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 100 // safety cap
 	}
 
 	var result strings.Builder
-	for ev := range sub.Events() {
+	for ev := range child.Events() {
 		if ctx.Err() != nil {
-			sub.Interrupt()
+			child.Interrupt()
 			return "", ctx.Err()
 		}
 		switch ev.Type {
@@ -578,7 +712,7 @@ func (e *DirectEngine) subagentExecutor(ctx context.Context, prompt string, agen
 			}
 			turnCount++
 			if turnCount >= maxTurns {
-				sub.Interrupt()
+				child.Interrupt()
 				result.WriteString("\n[max turns reached]")
 				return result.String(), nil
 			}
@@ -598,12 +732,18 @@ func (e *DirectEngine) subagentContextExecutor(ctx context.Context, prompt strin
 		model = e.model
 	}
 
+	// Resolve working directory (worktree may override).
+	workDir := e.workDir
+	if agentType.WorkDir != "" {
+		workDir = agentType.WorkDir
+	}
+
 	cfg := engine.EngineConfig{
 		Type:             engine.EngineTypeDirect,
 		SystemPrompt:     systemPrompt,
 		Model:            model,
 		APIKey:           e.apiKey,
-		WorkDir:          e.workDir,
+		WorkDir:          workDir,
 		Provider:         e.provider,
 		OpenRouterAPIKey: e.openrouterAPIKey,
 	}

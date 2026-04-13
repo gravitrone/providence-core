@@ -67,6 +67,11 @@ func (t *TaskTool) InputSchema() map[string]any {
 				"enum":        []string{"auto", "manual", "vote"},
 				"description": "How to merge results from /fork agents",
 			},
+			"isolation": map[string]any{
+				"type":        "string",
+				"enum":        []string{"worktree", "docker", "none"},
+				"description": "Isolation mode: worktree (git worktree), docker (container), or none (default)",
+			},
 		},
 		"required": []string{"description", "prompt"},
 	}
@@ -90,6 +95,7 @@ func (t *TaskTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		Name:          paramString(input, "name", ""),
 		Tools:         paramString(input, "tools", ""),
 		MergeStrategy: paramString(input, "merge_strategy", ""),
+		Isolation:     paramString(input, "isolation", ""),
 	}
 
 	// Resolve agent type.

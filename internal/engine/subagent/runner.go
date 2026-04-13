@@ -33,28 +33,44 @@ type PortableMessage struct {
 	Content string `json:"content"`
 }
 
+// WorktreeCallback is fired after worktree lifecycle events.
+type WorktreeCallback func(event string, path string, branch string)
+
 // Runner manages subagent goroutines.
 type Runner struct {
-	agents map[string]*RunningAgent
-	mu     sync.RWMutex
+	agents            map[string]*RunningAgent
+	mu                sync.RWMutex
+	WorkDir           string             // Current working directory (repo root for worktrees)
+	WorktreeCallbacks []WorktreeCallback // Called on worktree create/remove
 }
 
 // RunningAgent tracks the state of an in-flight subagent.
 type RunningAgent struct {
-	ID        string
-	Name      string
-	Type      string
-	Status    string // running, completed, failed, killed
-	StartedAt time.Time
-	Cancel    context.CancelFunc
-	Result    *TaskResult
-	Done      chan struct{}
-	Inbox     chan string // messages from SendMessage tool
+	ID             string
+	Name           string
+	Type           string
+	Status         string // running, completed, failed, killed
+	StartedAt      time.Time
+	Cancel         context.CancelFunc
+	Result         *TaskResult
+	Done           chan struct{}
+	Inbox          chan string // messages from SendMessage tool
+	WorktreePath   string     // set when isolation=worktree
+	WorktreeBranch string     // set when isolation=worktree
+	RepoRoot       string     // original repo root for worktree cleanup
 }
 
 // NewRunner creates a Runner.
 func NewRunner() *Runner {
 	return &Runner{agents: make(map[string]*RunningAgent)}
+}
+
+// NewRunnerWithWorkDir creates a Runner with a working directory set for worktree support.
+func NewRunnerWithWorkDir(workDir string) *Runner {
+	return &Runner{
+		agents:  make(map[string]*RunningAgent),
+		WorkDir: workDir,
+	}
 }
 
 // Spawn creates a new subagent goroutine. For sync agents it blocks until completion.
@@ -72,6 +88,38 @@ func (r *Runner) Spawn(ctx context.Context, input TaskInput, agentType AgentType
 		Cancel:    cancel,
 		Done:      make(chan struct{}),
 		Inbox:     make(chan string, 16),
+	}
+
+	// Worktree isolation: create a git worktree for the agent.
+	isolation := input.Isolation
+	if isolation == "" {
+		isolation = agentType.Isolation
+	}
+	if isolation == "worktree" && r.WorkDir != "" {
+		slug := Slugify(input.Name)
+		if slug == "agent" && input.SubagentType != "" {
+			slug = Slugify(input.SubagentType)
+		}
+		wtPath, wtBranch, err := CreateWorktree(r.WorkDir, slug)
+		if err != nil {
+			cancel()
+			return "", fmt.Errorf("create worktree: %w", err)
+		}
+		agent.WorktreePath = wtPath
+		agent.WorktreeBranch = wtBranch
+		agent.RepoRoot = r.WorkDir
+
+		// Override agent's working directory to the worktree.
+		agentType.WorkDir = wtPath
+
+		// Prepend worktree notice to agent prompt.
+		notice := BuildWorktreeNotice(r.WorkDir, wtPath)
+		input.Prompt = notice + "\n\n" + input.Prompt
+
+		// Fire worktree create callback.
+		for _, cb := range r.WorktreeCallbacks {
+			cb("create", wtPath, wtBranch)
+		}
 	}
 
 	r.mu.Lock()
@@ -210,6 +258,7 @@ func (r *Runner) runAgent(ctx context.Context, agent *RunningAgent, input TaskIn
 				DurationMS: time.Since(start).Milliseconds(),
 			}
 		}
+		r.cleanupWorktree(agent)
 		return
 	}
 
@@ -229,6 +278,36 @@ func (r *Runner) runAgent(ctx context.Context, agent *RunningAgent, input TaskIn
 			Result:     result,
 			DurationMS: time.Since(start).Milliseconds(),
 		}
+	}
+
+	// Handle worktree cleanup on completion.
+	r.cleanupWorktree(agent)
+}
+
+// cleanupWorktree checks for changes in the agent's worktree and handles cleanup.
+// If changes exist, the worktree path and branch are included in the result for
+// the coordinator to handle. If no changes, the worktree is auto-removed.
+// Must be called with r.mu held.
+func (r *Runner) cleanupWorktree(agent *RunningAgent) {
+	if agent.WorktreePath == "" {
+		return
+	}
+
+	if HasWorktreeChanges(agent.WorktreePath) {
+		// Changes exist - keep worktree, record in result for coordinator.
+		if agent.Result != nil {
+			agent.Result.WorktreePath = agent.WorktreePath
+			agent.Result.WorktreeBranch = agent.WorktreeBranch
+		}
+		return
+	}
+
+	// No changes - auto-remove worktree.
+	_ = RemoveWorktree(agent.RepoRoot, agent.WorktreePath, agent.WorktreeBranch)
+
+	// Fire worktree remove callback.
+	for _, cb := range r.WorktreeCallbacks {
+		cb("remove", agent.WorktreePath, agent.WorktreeBranch)
 	}
 }
 

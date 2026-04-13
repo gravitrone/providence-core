@@ -32,8 +32,8 @@ func TestAgentTabView(t *testing.T) {
 func TestAgentTabViewContainsInputArea(t *testing.T) {
 	at := NewAgentTab("", config.Config{}, nil)
 	out := at.View(120, 40)
-	// The view should contain the ❯ prompt
-	assert.Contains(t, out, "⟩", "view should contain the input prompt indicator")
+	// The view should contain the ❯ prompt from the textarea.
+	assert.Contains(t, out, "❯", "view should contain the input prompt indicator")
 }
 
 func TestAgentTabFocusedWhenIdle(t *testing.T) {
@@ -319,24 +319,16 @@ func TestQueueMultipleMessages(t *testing.T) {
 	assert.Equal(t, "third", at.queue[2].Text)
 }
 
-func TestShiftEnterAddsSteeredMessage(t *testing.T) {
+func TestShiftEnterInsertsNewline(t *testing.T) {
 	at := NewAgentTab("", config.Config{}, nil)
-	at.streaming = true
 
-	// Queue a regular message first.
-	at.input.SetValue("queued first")
-	at, _ = at.handleKey(keyPress("enter"))
-	require.Len(t, at.queue, 1)
-
-	// Shift+enter should add as steered.
-	at.input.SetValue("urgent steer")
+	// Type some text then shift+enter should insert a newline (handled by textarea).
+	at.input.SetValue("line one")
 	at, _ = at.handleKey(keyPress("shift+enter"))
 
-	require.Len(t, at.queue, 2)
-	assert.Equal(t, "queued first", at.queue[0].Text)
-	assert.False(t, at.queue[0].Steered)
-	assert.Equal(t, "urgent steer", at.queue[1].Text)
-	assert.True(t, at.queue[1].Steered, "shift+enter message should be steered")
+	// The textarea should now contain a newline (multiline input).
+	val := at.input.Value()
+	assert.Contains(t, val, "\n", "shift+enter should insert a newline in textarea")
 }
 
 func TestEscExitsQueueSelection(t *testing.T) {

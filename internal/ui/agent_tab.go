@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
@@ -203,7 +203,7 @@ type QueuedMessage struct {
 // AgentTab implements the TabModel interface for the agent chat UI.
 type AgentTab struct {
 	width, height int
-	input         textinput.Model
+	input         textarea.Model
 	viewport      viewport.Model
 	messages      []ChatMessage
 	engine        engine.Engine
@@ -348,6 +348,11 @@ type AgentTab struct {
 
 	// Auto-title: generate session title from first user message.
 	autoTitleGenerated bool
+
+	// Input history: up-arrow recalls previous submissions.
+	inputHistory         []string
+	inputHistoryIdx      int
+	inputHistoryBrowsing bool
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -366,8 +371,7 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		"The Profaned Core listens...",
 		"Ignite your will...",
 	}
-	ti := components.NewProvidenceTextInput(placeholders[rand.IntN(len(placeholders))])
-	ti.Prompt = "\u27E9 "
+	ti := components.NewProvidenceTextArea(placeholders[rand.IntN(len(placeholders))])
 	ti.Focus()
 
 	vp := components.NewProvidenceViewport(80, 20)
@@ -446,7 +450,7 @@ func (at *AgentTab) Resize(width, height int) {
 	at.height = height
 
 	contentW := chatContentWidth(width)
-	inputH := 1
+	inputH := 3
 	dividerH := 1
 	vpH := height - inputH - dividerH - 1
 	if vpH < 3 {
@@ -455,6 +459,8 @@ func (at *AgentTab) Resize(width, height int) {
 
 	at.viewport.SetWidth(contentW)
 	at.viewport.SetHeight(vpH)
+	at.input.SetWidth(contentW - 4)
+	at.input.SetHeight(inputH)
 
 	// Word wrap width accounts for the "↳ " prefix (2 chars).
 	wrapW := contentW - 4
@@ -917,6 +923,18 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			// Already at top of queue, scroll viewport.
 			at.queueCursor = -1
 		}
+		// Input history: recall previous submissions when input is empty.
+		if strings.TrimSpace(at.input.Value()) == "" && len(at.inputHistory) > 0 && len(at.queue) == 0 {
+			if !at.inputHistoryBrowsing {
+				at.inputHistoryBrowsing = true
+				at.inputHistoryIdx = len(at.inputHistory) - 1
+			} else if at.inputHistoryIdx > 0 {
+				at.inputHistoryIdx--
+			}
+			at.input.SetValue(at.inputHistory[at.inputHistoryIdx])
+			at.input.CursorEnd()
+			return at, nil
+		}
 		at.follow = false
 		var cmd tea.Cmd
 		at.viewport, cmd = at.viewport.Update(msg)
@@ -933,6 +951,18 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			at.refreshViewport()
 			return at, nil
 		}
+		// Input history: navigate forward or exit history browsing.
+		if at.inputHistoryBrowsing {
+			at.inputHistoryIdx++
+			if at.inputHistoryIdx >= len(at.inputHistory) {
+				at.inputHistoryBrowsing = false
+				at.input.Reset()
+			} else {
+				at.input.SetValue(at.inputHistory[at.inputHistoryIdx])
+				at.input.CursorEnd()
+			}
+			return at, nil
+		}
 		var cmd tea.Cmd
 		at.viewport, cmd = at.viewport.Update(msg)
 		if at.viewport.AtBottom() {
@@ -940,22 +970,10 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		}
 		return at, cmd
 	case "shift+enter":
-		// Add message directly as steered (priority, sends first).
-		text := strings.TrimSpace(at.input.Value())
-		if text == "" {
-			return at, nil
-		}
-		at.input.SetValue("")
-		at.queueCursor = -1
-		if at.streaming {
-			at.queue = append(at.queue, QueuedMessage{Text: text, Steered: true})
-			at.queuedBright = 0.5
-			at.queuedVel = 0.0
-			at.refreshViewport()
-			return at, nil
-		}
-		at.prepareSend(text)
-		return at, at.sendCmd(text)
+		// Insert newline in textarea (multiline editing).
+		var cmd tea.Cmd
+		at.input, cmd = at.input.Update(msg)
+		return at, cmd
 
 	case "enter":
 		// If navigating queue, steer the selected message.
@@ -1005,6 +1023,10 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		}
 		if text == "" {
 			return at, nil
+		}
+		// Push to input history (skip slash commands).
+		if !strings.HasPrefix(text, "/") {
+			at.pushHistory(text)
 		}
 		if at.streaming {
 			// Queue the message - it will auto-send when the current turn finishes.
@@ -2179,6 +2201,24 @@ func (at AgentTab) StatusLine() string {
 // --- Internal Helpers ---
 
 // PrepareSend sets up state for sending a message. Call before sendCmd.
+const inputHistoryMax = 50
+
+// pushHistory appends a message to the input history ring buffer.
+func (at *AgentTab) pushHistory(text string) {
+	// Deduplicate: skip if same as last entry.
+	if len(at.inputHistory) > 0 && at.inputHistory[len(at.inputHistory)-1] == text {
+		at.inputHistoryIdx = len(at.inputHistory)
+		at.inputHistoryBrowsing = false
+		return
+	}
+	at.inputHistory = append(at.inputHistory, text)
+	if len(at.inputHistory) > inputHistoryMax {
+		at.inputHistory = at.inputHistory[1:]
+	}
+	at.inputHistoryIdx = len(at.inputHistory)
+	at.inputHistoryBrowsing = false
+}
+
 func (at *AgentTab) prepareSend(text string) {
 	imgCount := len(at.pendingImages)
 	at.messages = append(at.messages, ChatMessage{
@@ -3625,7 +3665,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				glamour.WithStyles(providenceGlamourStyle()),
 				glamour.WithWordWrap(chatContentWidth(at.width)-4),
 			)
-			components.ReapplyInputStyles(&at.input)
+			components.ReapplyTextAreaStyles(&at.input)
 			at.messagesDirty = true
 			at.addSystemMessage("Theme set to: " + args)
 			// Persist to config.
@@ -3642,7 +3682,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				glamour.WithStyles(providenceGlamourStyle()),
 				glamour.WithWordWrap(chatContentWidth(at.width)-4),
 			)
-			components.ReapplyInputStyles(&at.input)
+			components.ReapplyTextAreaStyles(&at.input)
 			at.messagesDirty = true
 			at.addSystemMessage("Theme set to auto (currently: " + name + ")")
 			// Persist to config (store "auto" so the resolution re-runs next launch).

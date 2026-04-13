@@ -62,6 +62,11 @@ func (t *TaskTool) InputSchema() map[string]any {
 				"type":        "string",
 				"description": "Comma-separated tool allowlist (default: inherit from agent type)",
 			},
+			"mode": map[string]any{
+				"type":        "string",
+				"enum":        []string{"default", "plan", "auto", "deny"},
+				"description": "Permission mode for the agent (default: inherit from agent type)",
+			},
 			"merge_strategy": map[string]any{
 				"type":        "string",
 				"enum":        []string{"auto", "manual", "vote"},
@@ -86,6 +91,7 @@ func (t *TaskTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		SubagentType:  paramString(input, "subagent_type", ""),
 		Model:         paramString(input, "model", ""),
 		Engine:        paramString(input, "engine", ""),
+		Mode:          paramString(input, "mode", ""),
 		RunInBG:       paramBool(input, "run_in_background", false),
 		Name:          paramString(input, "name", ""),
 		Tools:         paramString(input, "tools", ""),
@@ -95,12 +101,15 @@ func (t *TaskTool) Execute(ctx context.Context, input map[string]any) ToolResult
 	// Resolve agent type.
 	agentType := t.resolveAgentType(taskInput.SubagentType)
 
-	// Override model/engine if specified in input.
+	// Override model/engine/permission mode if specified in input.
 	if taskInput.Model != "" {
 		agentType.Model = taskInput.Model
 	}
 	if taskInput.Engine != "" {
 		agentType.Engine = taskInput.Engine
+	}
+	if taskInput.Mode != "" {
+		agentType.PermissionMode = taskInput.Mode
 	}
 
 	agentID, err := t.runner.Spawn(ctx, taskInput, agentType, t.executor)

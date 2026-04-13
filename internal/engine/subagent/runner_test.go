@@ -161,11 +161,130 @@ func TestWaitForNotFound(t *testing.T) {
 func TestAntiRecursionPrompt(t *testing.T) {
 	assert.NotEmpty(t, AntiRecursionPrompt)
 	assert.Contains(t, AntiRecursionPrompt, "Do NOT spawn sub-agents")
+	assert.Contains(t, AntiRecursionPrompt, "fork_context")
+	assert.Contains(t, AntiRecursionPrompt, "Scope:")
 }
 
 func TestStrippedAgentPrompt(t *testing.T) {
 	assert.NotEmpty(t, StrippedAgentPrompt)
 	assert.Contains(t, StrippedAgentPrompt, "Providence Core")
+}
+
+func TestKillAll(t *testing.T) {
+	r := NewRunner()
+
+	// Spawn 3 async agents.
+	for i := 0; i < 3; i++ {
+		input := TaskInput{
+			Description: fmt.Sprintf("long-%d", i),
+			Prompt:      "run",
+			RunInBG:     true,
+		}
+		_, err := r.Spawn(context.Background(), input, DefaultAgentType(), mockExecutor("", nil, 10*time.Second))
+		require.NoError(t, err)
+	}
+
+	time.Sleep(10 * time.Millisecond) // let goroutines start
+
+	// KillAll should cancel all and clear the map.
+	r.KillAll()
+
+	agents := r.List()
+	assert.Len(t, agents, 0, "map should be empty after KillAll")
+}
+
+func TestClose(t *testing.T) {
+	r := NewRunner()
+	input := TaskInput{
+		Description: "closeable",
+		Prompt:      "run",
+		RunInBG:     true,
+	}
+	_, err := r.Spawn(context.Background(), input, DefaultAgentType(), mockExecutor("", nil, 10*time.Second))
+	require.NoError(t, err)
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Close should not panic and should clear agents.
+	r.Close()
+	agents := r.List()
+	assert.Len(t, agents, 0)
+}
+
+func TestCompletedAtSet(t *testing.T) {
+	r := NewRunner()
+	input := TaskInput{Description: "quick", Prompt: "done"}
+	agentID, _ := r.Spawn(context.Background(), input, DefaultAgentType(), mockExecutor("ok", nil, 0))
+
+	agent, ok := r.Get(agentID)
+	require.True(t, ok)
+	assert.Equal(t, "completed", agent.Status)
+	assert.False(t, agent.CompletedAt.IsZero(), "CompletedAt should be set after completion")
+}
+
+func TestVerificationAgentPrompt(t *testing.T) {
+	agent, ok := BuiltinAgents["Verification"]
+	require.True(t, ok)
+	assert.Contains(t, agent.SystemPrompt, "try to break it")
+	assert.Contains(t, agent.SystemPrompt, "VERIFICATION-ONLY")
+	assert.Contains(t, agent.SystemPrompt, "VERDICT: PASS")
+	assert.Contains(t, agent.SystemPrompt, "VERDICT: FAIL")
+	assert.Contains(t, agent.SystemPrompt, "VERDICT: PARTIAL")
+	assert.Contains(t, agent.SystemPrompt, "RECOGNIZE YOUR OWN RATIONALIZATIONS")
+	assert.Contains(t, agent.SystemPrompt, "ADVERSARIAL PROBES")
+	assert.Contains(t, agent.SystemPrompt, "Command run:")
+	assert.True(t, agent.Background)
+}
+
+func TestExploreAgentPrompt(t *testing.T) {
+	agent, ok := BuiltinAgents["Explore"]
+	require.True(t, ok)
+	assert.Contains(t, agent.SystemPrompt, "READ-ONLY")
+	assert.Contains(t, agent.SystemPrompt, "STRICTLY PROHIBITED")
+	assert.Contains(t, agent.SystemPrompt, "parallel tool calls")
+	assert.Equal(t, "fast", agent.Model)
+	assert.Equal(t, 50, agent.MaxTurns)
+}
+
+func TestPlanAgentPrompt(t *testing.T) {
+	agent, ok := BuiltinAgents["Plan"]
+	require.True(t, ok)
+	assert.Contains(t, agent.SystemPrompt, "READ-ONLY")
+	assert.Contains(t, agent.SystemPrompt, "Critical Files for Implementation")
+	assert.Contains(t, agent.SystemPrompt, "Implementation Sequence")
+	assert.Contains(t, agent.SystemPrompt, "Test Strategy")
+	assert.Equal(t, "plan", agent.PermissionMode)
+	assert.Equal(t, 30, agent.MaxTurns)
+}
+
+func TestGeneralPurposeAgentPrompt(t *testing.T) {
+	agent, ok := BuiltinAgents["general-purpose"]
+	require.True(t, ok)
+	assert.Contains(t, agent.SystemPrompt, "Providence Core")
+	assert.Contains(t, agent.SystemPrompt, "Searching for code")
+	assert.Contains(t, agent.SystemPrompt, "absolute file paths")
+}
+
+func TestCodeReviewerAgentPrompt(t *testing.T) {
+	agent, ok := BuiltinAgents["Code-Reviewer"]
+	require.True(t, ok)
+	assert.Contains(t, agent.SystemPrompt, "Logic and Correctness")
+	assert.Contains(t, agent.SystemPrompt, "Security")
+	assert.Contains(t, agent.SystemPrompt, "CRITICAL:")
+	assert.Contains(t, agent.SystemPrompt, "APPROVE / REQUEST CHANGES")
+	assert.Equal(t, 20, agent.MaxTurns)
+}
+
+func TestBuiltinAgentDisallowedTools(t *testing.T) {
+	// Verification, Explore, Plan, Code-Reviewer should all disallow Agent, Edit, Write.
+	readOnlyAgents := []string{"Verification", "Explore", "Plan", "Code-Reviewer"}
+	for _, name := range readOnlyAgents {
+		agent, ok := BuiltinAgents[name]
+		require.True(t, ok, "agent %s should exist", name)
+		assert.Contains(t, agent.DisallowedTools, "Agent", "agent %s should disallow Agent", name)
+		assert.Contains(t, agent.DisallowedTools, "Edit", "agent %s should disallow Edit", name)
+		assert.Contains(t, agent.DisallowedTools, "Write", "agent %s should disallow Write", name)
+	}
 }
 
 func TestRunnerConcurrent5Agents(t *testing.T) {

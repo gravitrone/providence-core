@@ -124,4 +124,24 @@ func TestTaskToolInputSchema(t *testing.T) {
 	assert.Contains(t, props, "description")
 	assert.Contains(t, props, "prompt")
 	assert.Contains(t, props, "run_in_background")
+	assert.Contains(t, props, "mode")
+}
+
+func TestTaskToolModePassthrough(t *testing.T) {
+	runner := subagent.NewRunner()
+	var capturedType subagent.AgentType
+	executor := func(_ context.Context, _ string, at subagent.AgentType) (string, error) {
+		capturedType = at
+		return "done", nil
+	}
+	tool := NewTaskTool(runner, executor)
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"description": "plan something",
+		"prompt":      "design a feature",
+		"mode":        "plan",
+	})
+
+	require.False(t, result.IsError, result.Content)
+	assert.Equal(t, "plan", capturedType.PermissionMode)
 }

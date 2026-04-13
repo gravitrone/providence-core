@@ -388,6 +388,9 @@ func (e *DirectEngine) SetStore(st storeIface) {
 // If a store is wired, mechanical session learnings are persisted before closing.
 func (e *DirectEngine) Close() {
 	e.Interrupt()
+	if e.subagentRunner != nil {
+		e.subagentRunner.Close()
+	}
 	if e.store != nil {
 		e.saveSessionLearnings(e.store, e.startTime)
 	}

@@ -171,3 +171,66 @@ func TestNilStoreSafe(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Nil(t, msgs)
 }
+
+func TestFTS5Search(t *testing.T) {
+	s := testStore(t)
+	require.NoError(t, s.CreateSession("s1", "/tmp/project-a", "claude", "sonnet"))
+	require.NoError(t, s.CreateSession("s2", "/tmp/project-b", "direct", "opus"))
+
+	_, err := s.AddMessage("s1", "user", "providence flame dashboard", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
+	_, err = s.AddMessage("s1", "assistant", "completely unrelated reply", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
+	_, err = s.AddMessage("s2", "assistant", "providence session bus uses sqlite search", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
+
+	results, err := s.SearchMessages("providence", 10)
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+
+	sessionIDs := []string{results[0].SessionID, results[1].SessionID}
+	assert.ElementsMatch(t, []string{"s1", "s2"}, sessionIDs)
+	for _, result := range results {
+		assert.Contains(t, result.Content, "providence")
+		assert.Contains(t, result.Snippet, "<mark>providence</mark>")
+	}
+}
+
+func TestFTS5NoResults(t *testing.T) {
+	s := testStore(t)
+	require.NoError(t, s.CreateSession("s1", "/tmp/project", "claude", "sonnet"))
+	_, err := s.AddMessage("s1", "user", "embers and flames only", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
+
+	results, err := s.SearchMessages("nonexistent", 10)
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestCascadeDelete(t *testing.T) {
+	s := testStore(t)
+	require.NoError(t, s.CreateSession("s1", "/tmp/project", "claude", "sonnet"))
+	_, err := s.AddMessage("s1", "user", "searchable providence content", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
+	_, err = s.AddMessage("s1", "assistant", "another searchable providence reply", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
+
+	results, err := s.SearchMessages("providence", 10)
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+
+	require.NoError(t, s.DeleteSession("s1"))
+
+	var messageCount int
+	err = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, "s1").Scan(&messageCount)
+	require.NoError(t, err)
+	assert.Zero(t, messageCount)
+
+	msgs, err := s.GetMessages("s1")
+	require.NoError(t, err)
+	assert.Empty(t, msgs)
+
+	results, err = s.SearchMessages("providence", 10)
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}

@@ -10,6 +10,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func writeTestConfigFile(t *testing.T, path, content string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+}
+
 func TestLoadTOML(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -61,8 +67,8 @@ func TestLoadSaveRoundtrip(t *testing.T) {
 		Model:  "opus",
 		Theme:  "night",
 		Compact: CompactConfig{
-			Mode:          "both",
-			ThresholdPct:  80,
+			Mode:           "both",
+			ThresholdPct:   80,
 			CircuitBreaker: 3,
 		},
 	}
@@ -118,6 +124,119 @@ func TestDefaultValues(t *testing.T) {
 	assert.Equal(t, 80, d.Compact.ThresholdPct)
 	assert.Equal(t, 20, d.Compact.TurnCount)
 	assert.Equal(t, 3, d.Compact.CircuitBreaker)
+}
+
+func TestLoadMergedPriority(t *testing.T) {
+	homeDir := t.TempDir()
+	projectRoot := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	writeTestConfigFile(t, filepath.Join(homeDir, ".providence", "config.toml"), `engine = "claude"
+model = "user-model"
+theme = "user-theme"
+output_style = "verbose"
+auto_title_enabled = true
+
+[compact]
+mode = "both"
+trigger = "token"
+threshold_pct = 70
+turn_count = 12
+keep_recent_pct = 25
+rolling_tokens = 40000
+fast_tier_model = "haiku"
+circuit_breaker = 2
+`)
+
+	writeTestConfigFile(t, filepath.Join(projectRoot, ".providence", "config.toml"), `model = "project-model"
+theme = "project-theme"
+token_budget = 120000
+dashboard_visible = true
+tool_use_summary = true
+
+[compact]
+trigger = "pressure"
+turn_count = 18
+keep_recent_pct = 35
+`)
+
+	writeTestConfigFile(t, filepath.Join(projectRoot, ".providence", "config.local.toml"), `theme = "local-theme"
+effort = "high"
+openrouter_api_key = "local-key"
+
+[compact]
+threshold_pct = 90
+rolling_tokens = 60000
+circuit_breaker = 5
+`)
+
+	loaded := LoadMerged(projectRoot)
+
+	assert.Equal(t, "claude", loaded.Engine)
+	assert.Equal(t, "project-model", loaded.Model)
+	assert.Equal(t, "local-theme", loaded.Theme)
+	assert.Equal(t, "high", loaded.Effort)
+	assert.Equal(t, "local-key", loaded.OpenRouterAPIKey)
+	assert.Equal(t, 120000, loaded.TokenBudget)
+	assert.True(t, loaded.AutoTitleEnabled)
+	assert.True(t, loaded.ToolUseSummary)
+	assert.True(t, loaded.DashboardVisible)
+	assert.Equal(t, "verbose", loaded.OutputStyle)
+	assert.Equal(t, "both", loaded.Compact.Mode)
+	assert.Equal(t, "pressure", loaded.Compact.Trigger)
+	assert.Equal(t, 90, loaded.Compact.ThresholdPct)
+	assert.Equal(t, 18, loaded.Compact.TurnCount)
+	assert.Equal(t, 35, loaded.Compact.KeepRecentPct)
+	assert.Equal(t, 60000, loaded.Compact.RollingTokens)
+	assert.Equal(t, "haiku", loaded.Compact.FastTierModel)
+	assert.Equal(t, 5, loaded.Compact.CircuitBreaker)
+}
+
+func TestCompactConfigDefaults(t *testing.T) {
+	compact := Defaults().Compact
+
+	assert.Equal(t, "both", compact.Mode)
+	assert.Equal(t, "hybrid", compact.Trigger)
+	assert.Equal(t, 80, compact.ThresholdPct)
+	assert.Equal(t, 20, compact.TurnCount)
+	assert.Equal(t, 30, compact.KeepRecentPct)
+	assert.Equal(t, 50000, compact.RollingTokens)
+	assert.Equal(t, "haiku", compact.FastTierModel)
+	assert.Equal(t, 3, compact.CircuitBreaker)
+}
+
+func TestConfigSaveRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	original := Config{
+		Engine:           "direct",
+		Model:            "gpt-5.4",
+		Theme:            "flame",
+		Effort:           "high",
+		OpenRouterAPIKey: "openrouter-secret",
+		TokenBudget:      123456,
+		AutoTitleEnabled: true,
+		ToolUseSummary:   true,
+		DashboardVisible: true,
+		BGAgentsEnabled:  true,
+		OutputStyle:      "compact",
+		Compact: CompactConfig{
+			Mode:           "dynamic-rolling",
+			Trigger:        "pressure",
+			ThresholdPct:   88,
+			TurnCount:      9,
+			KeepRecentPct:  40,
+			RollingTokens:  64000,
+			FastTierModel:  "haiku",
+			CircuitBreaker: 7,
+		},
+	}
+
+	require.NoError(t, original.SaveTo(path))
+
+	loaded := LoadFromTOML(path)
+	assert.Equal(t, original, loaded)
 }
 
 func TestLoadMissingFile(t *testing.T) {

@@ -128,3 +128,67 @@ func TestBusConcurrentPublish(t *testing.T) {
 done:
 	assert.Equal(t, n, count)
 }
+
+func TestBusHighVolume(t *testing.T) {
+	bus := NewBus()
+	const totalEvents = 1000
+	ch := bus.Subscribe(totalEvents)
+
+	for i := 0; i < totalEvents; i++ {
+		bus.Publish(Event{Type: EventNewMessage, Data: i})
+	}
+
+	for i := 0; i < totalEvents; i++ {
+		select {
+		case ev := <-ch:
+			require.Equal(t, EventNewMessage, ev.Type)
+			require.Equal(t, i, ev.Data)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for event %d", i)
+		}
+	}
+}
+
+func TestBusConcurrentPubSub(t *testing.T) {
+	bus := NewBus()
+	const (
+		publisherCount     = 10
+		subscriberCount    = 5
+		eventsPerPublisher = 100
+	)
+
+	totalEvents := publisherCount * eventsPerPublisher
+	subscribers := make([]<-chan Event, 0, subscriberCount)
+	for i := 0; i < subscriberCount; i++ {
+		subscribers = append(subscribers, bus.Subscribe(totalEvents))
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(publisherCount)
+	for publisher := 0; publisher < publisherCount; publisher++ {
+		go func(id int) {
+			defer wg.Done()
+			start := id * eventsPerPublisher
+			for offset := 0; offset < eventsPerPublisher; offset++ {
+				bus.Publish(Event{Type: EventToolCallResult, Data: start + offset})
+			}
+		}(publisher)
+	}
+	wg.Wait()
+
+	for idx, ch := range subscribers {
+		seen := make(map[int]struct{}, totalEvents)
+		for count := 0; count < totalEvents; count++ {
+			select {
+			case ev := <-ch:
+				require.Equal(t, EventToolCallResult, ev.Type, "subscriber %d", idx)
+				value, ok := ev.Data.(int)
+				require.True(t, ok, "subscriber %d received unexpected data type", idx)
+				seen[value] = struct{}{}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("subscriber %d timed out after receiving %d events", idx, count)
+			}
+		}
+		assert.Len(t, seen, totalEvents, "subscriber %d should receive every published event", idx)
+	}
+}

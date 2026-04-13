@@ -54,16 +54,16 @@ func TestDashboardCollapse(t *testing.T) {
 	view = d.View()
 	// Title header still shows.
 	assert.Contains(t, view, "APPROVALS", "collapsed panel header should still show")
-	// The ">" collapse indicator should be used for this panel.
+	// The "▸" collapse indicator should be used for this panel.
 	lines := strings.Split(view, "\n")
 	found := false
 	for _, line := range lines {
-		if strings.Contains(line, "APPROVALS") && strings.Contains(line, ">") {
+		if strings.Contains(line, "APPROVALS") && strings.Contains(line, "▸") {
 			found = true
 			break
 		}
 	}
-	assert.True(t, found, "collapsed panel should show > indicator")
+	assert.True(t, found, "collapsed panel should show ▸ indicator")
 }
 
 func TestDashboardNavigation(t *testing.T) {

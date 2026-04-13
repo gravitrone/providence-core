@@ -183,9 +183,11 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		sessionBus:       session.NewBus(),
 	}
 
-	// Register subagent TaskTool now that the engine exists for the executor.
+	// Register subagent TaskTool and SendMessage now that the engine exists for the executor.
 	taskTool := tools.NewTaskTool(e.subagentRunner, e.subagentExecutor)
 	registry.Register(taskTool)
+	sendMsgTool := tools.NewSendMessageTool(e.subagentRunner)
+	registry.Register(sendMsgTool)
 
 	var provider compact.Provider
 	switch {
@@ -237,6 +239,12 @@ func (e *DirectEngine) SubagentRunner() *subagent.Runner {
 // from outside the engine (e.g. /fork command in the TUI).
 func (e *DirectEngine) SubagentExecutor() subagent.Executor {
 	return e.subagentExecutor
+}
+
+// SubagentContextExecutor returns a ContextExecutor that restores conversation
+// state before running the prompt. Used by /fork for full context inheritance.
+func (e *DirectEngine) SubagentContextExecutor() subagent.ContextExecutor {
+	return e.subagentContextExecutor
 }
 
 // SessionBus returns the engine's session event bus.
@@ -468,6 +476,75 @@ func (e *DirectEngine) subagentExecutor(ctx context.Context, prompt string, agen
 		return "", fmt.Errorf("create sub-engine: %w", err)
 	}
 	defer sub.Close()
+
+	if err := sub.Send(prompt); err != nil {
+		return "", fmt.Errorf("sub-engine send: %w", err)
+	}
+
+	var result strings.Builder
+	for ev := range sub.Events() {
+		if ctx.Err() != nil {
+			sub.Interrupt()
+			return "", ctx.Err()
+		}
+		switch ev.Type {
+		case "assistant":
+			if ae, ok := ev.Data.(*engine.AssistantEvent); ok {
+				for _, part := range ae.Message.Content {
+					if part.Type == "text" {
+						result.WriteString(part.Text)
+					}
+				}
+			}
+		case "result":
+			if re, ok := ev.Data.(*engine.ResultEvent); ok && re.IsError {
+				return "", fmt.Errorf("sub-engine error: %s", re.Result)
+			}
+			return result.String(), nil
+		}
+	}
+	return result.String(), nil
+}
+
+// subagentContextExecutor creates a child DirectEngine, restores conversation
+// state into it, then sends the prompt. Used by /fork for full context inheritance.
+func (e *DirectEngine) subagentContextExecutor(ctx context.Context, prompt string, agentType subagent.AgentType, state *subagent.ConversationState) (string, error) {
+	systemPrompt := agentType.SystemPrompt + "\n\n" + subagent.AntiRecursionPrompt
+
+	model := agentType.Model
+	if model == "inherit" || model == "" {
+		model = e.model
+	}
+
+	cfg := engine.EngineConfig{
+		Type:             engine.EngineTypeDirect,
+		SystemPrompt:     systemPrompt,
+		Model:            model,
+		APIKey:           e.apiKey,
+		WorkDir:          e.workDir,
+		Provider:         e.provider,
+		OpenRouterAPIKey: e.openrouterAPIKey,
+	}
+
+	sub, err := NewDirectEngine(cfg)
+	if err != nil {
+		return "", fmt.Errorf("create sub-engine: %w", err)
+	}
+	defer sub.Close()
+
+	// Restore parent conversation context into the child engine.
+	if state != nil && len(state.Messages) > 0 {
+		restored := make([]engine.RestoredMessage, 0, len(state.Messages))
+		for _, pm := range state.Messages {
+			restored = append(restored, engine.RestoredMessage{
+				Role:    pm.Role,
+				Content: pm.Content,
+			})
+		}
+		if restoreErr := sub.RestoreHistory(restored); restoreErr != nil {
+			return "", fmt.Errorf("restore context: %w", restoreErr)
+		}
+	}
 
 	if err := sub.Send(prompt); err != nil {
 		return "", fmt.Errorf("sub-engine send: %w", err)

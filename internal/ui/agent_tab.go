@@ -280,6 +280,9 @@ type AgentTab struct {
 
 	// Notification toast system.
 	notifications NotificationModel
+
+	// Track which background subagent IDs we already notified about.
+	notifiedAgents map[string]bool
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -454,6 +457,8 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 			}
 		}
 		at.notifications.Tick()
+		// Poll for completed background subagents and inject notifications.
+		at.drainCompletedSubagents()
 		at.refreshViewport()
 		return at, flameTick()
 
@@ -3419,6 +3424,53 @@ func (at AgentTab) modelDisplay() string {
 		return spec.Display
 	}
 	return at.model
+}
+
+// drainCompletedSubagents checks the subagent runner (if available) for any
+// background agents that completed since the last tick and injects a system
+// message notification for each one, plus steers the result into the engine.
+func (at *AgentTab) drainCompletedSubagents() {
+	de, ok := at.engine.(*direct.DirectEngine)
+	if !ok || de == nil {
+		return
+	}
+	runner := de.SubagentRunner()
+	if runner == nil {
+		return
+	}
+	if at.notifiedAgents == nil {
+		at.notifiedAgents = make(map[string]bool)
+	}
+	for _, agent := range runner.List() {
+		if agent.Status != "completed" && agent.Status != "failed" {
+			continue
+		}
+		if at.notifiedAgents[agent.ID] {
+			continue
+		}
+		at.notifiedAgents[agent.ID] = true
+		if agent.Result == nil {
+			continue
+		}
+		// Inject a notification into the transcript.
+		label := agent.Name
+		if label == "" {
+			label = agent.ID
+		}
+		if agent.Result.Status == "completed" {
+			summary := agent.Result.Result
+			if len(summary) > 200 {
+				summary = summary[:200] + "..."
+			}
+			at.addSystemMessage(fmt.Sprintf("Background agent %s completed: %s", label, summary))
+			// Steer the full result into the engine so the model sees it.
+			de.Steer(fmt.Sprintf("[background agent %s completed]\n%s", label, agent.Result.Result))
+		} else {
+			at.addSystemMessage(fmt.Sprintf("Background agent %s failed: %s", label, agent.Result.Result))
+			de.Steer(fmt.Sprintf("[background agent %s failed]\n%s", label, agent.Result.Result))
+		}
+		at.messagesDirty = true
+	}
 }
 
 // --- Commands ---

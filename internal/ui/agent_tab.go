@@ -2374,7 +2374,6 @@ func (at AgentTab) StatusLine() string {
 
 // --- Internal Helpers ---
 
-// PrepareSend sets up state for sending a message. Call before sendCmd.
 const inputHistoryMax = 50
 
 // pushHistory appends a message to the input history ring buffer.
@@ -2441,7 +2440,7 @@ func (at *AgentTab) transferImagesToEngine() int {
 	return 0
 }
 
-// SendCmd returns the tea.Cmd to send a message (create session or send to existing).
+// sendCmd returns the tea.Cmd to send a message (create session or send to existing).
 func (at AgentTab) sendCmd(text string) tea.Cmd {
 	if at.engine == nil {
 		return createEngineAndSend(text, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks)
@@ -2918,7 +2917,7 @@ func formatTokenCount(n int) string {
 	return fmt.Sprintf("%.1fK", f)
 }
 
-// RenderUserMessage renders a user message in a rounded border box.
+// renderUserMessage renders a user message in a rounded border box.
 // Border animates in flame colors while streaming, freezes to amber when done.
 func (at AgentTab) renderUserMessage(msg ChatMessage, contentW int, isLatest bool) string {
 	var boxStyle lipgloss.Style
@@ -2984,7 +2983,7 @@ func (at AgentTab) renderUserMessage(msg ChatMessage, contentW int, isLatest boo
 	return boxStyle.Render(imageLabels+prefix+textStyle.Render(text)) + "\n"
 }
 
-// RenderAssistantMessage renders assistant text with glamour markdown rendering.
+// renderAssistantMessage renders assistant text with glamour markdown rendering.
 // Works for both streaming and done messages. Viz blocks are extracted and rendered separately.
 func (at AgentTab) renderAssistantMessage(msg ChatMessage) string {
 	arrowStyle := lipgloss.NewStyle().Foreground(ColorSecondary)
@@ -3075,7 +3074,7 @@ func (at AgentTab) processStreamingViz(text string) string {
 	return strings.TrimRight(text[:lastOpen], "\n") + "\n"
 }
 
-// RenderSystemMessage renders a system message in italic muted with 2-char indent.
+// renderSystemMessage renders a system message in italic muted with 2-char indent.
 // Completion messages get a harmonica spring cool-down: bright gold -> frozen ember.
 func (at AgentTab) renderSystemMessage(msg ChatMessage) string {
 	// Check if this is the active completion message with spring animation.
@@ -3190,7 +3189,7 @@ func renderPermKeyValue(key, value string) string {
 	return lipgloss.JoinHorizontal(lipgloss.Left, keyStr, valueStr)
 }
 
-// RenderPermissionMessage renders a permission request box (crush-style, flame-themed).
+// renderPermissionMessage renders a permission request box (crush-style, flame-themed).
 func (at AgentTab) renderPermissionMessage(msg ChatMessage, contentW int) string {
 	dialogW := contentW - 4
 	if dialogW < 20 {
@@ -3499,7 +3498,7 @@ func (at AgentTab) renderBatchToolHeader(name string, count int, msgs []ChatMess
 	return icon + " " + headerBuf.String() + hint + argsLine + "\n"
 }
 
-// RenderThinkingMessage renders a thinking indicator.
+// renderThinkingMessage renders a thinking indicator.
 func (at AgentTab) renderThinkingMessage(msg ChatMessage) string {
 	prefix := lipgloss.NewStyle().Foreground(ColorMuted).Render("\u2234")
 	return ThinkingStyle.Render("  "+prefix+" "+msg.Content) + "\n"
@@ -3716,7 +3715,7 @@ func convertTodosToTaskInfo(items []engine.TodoItem) []dashboard.TaskInfo {
 	return out
 }
 
-// CalamityToolFlavor is the Calamity boss flavor text for tool completions.
+// calamityToolFlavor is the Calamity boss flavor text for tool completions.
 var calamityToolFlavor = []string{
 	"Providence has blessed this operation",
 	"The Profaned Flame answered",
@@ -3746,7 +3745,7 @@ func vizVerbToPast(phrase string) string {
 	return verbToPast(parts[0]) + " " + parts[1]
 }
 
-// VerbToPast converts a spinner verb to past tense.
+// verbToPast converts a spinner verb to past tense.
 func verbToPast(verb string) string {
 	// Handle -ying verbs (Purifying → Purified, Sanctifying → Sanctified).
 	if strings.HasSuffix(verb, "ying") {
@@ -3772,7 +3771,7 @@ func truncate(s string, max int) string {
 	return s
 }
 
-// WordWrap wraps text at the given width on word boundaries.
+// wordWrap wraps text at the given width on word boundaries.
 // Uses lipgloss.Width for display-width measurement so ANSI escape codes
 // and wide Unicode characters (CJK, emoji) don't inflate line lengths.
 func wordWrap(text string, width int) string {
@@ -4935,7 +4934,7 @@ func (at *AgentTab) drainCompletedSubagents() {
 
 // --- Commands ---
 
-// WaitForEvent returns a Cmd that reads the next event from the session channel.
+// waitForEvent returns a Cmd that reads the next event from the session channel.
 func waitForEvent(events <-chan engine.ParsedEvent) tea.Cmd {
 	if events == nil {
 		return nil
@@ -4949,7 +4948,7 @@ func waitForEvent(events <-chan engine.ParsedEvent) tea.Cmd {
 	}
 }
 
-// SafeWaitForEvent returns a waitForEvent cmd only if session is non-nil.
+// safeWaitForEvent returns a waitForEvent cmd only if session is non-nil.
 func (at AgentTab) safeWaitForEvent() tea.Cmd {
 	if at.engine == nil {
 		return nil
@@ -5027,7 +5026,6 @@ func buildSystemPromptWithStyle(outputStyleName string) string {
 	return engine.FlattenBlocks(blocks)
 }
 
-// createEngineAndSend spawns a new engine session and sends the first prompt.
 // configHooksToEngine converts config.HooksConfig into the engine's HooksMap format.
 func configHooksToEngine(h config.HooksConfig) map[string][]engine.HookConfigEntry {
 	raw := h.ToMap()
@@ -5047,6 +5045,7 @@ func configHooksToEngine(h config.HooksConfig) map[string][]engine.HookConfigEnt
 	return m
 }
 
+// createEngineAndSend spawns a new engine session and sends the first prompt.
 func createEngineAndSend(prompt, model string, engineType engine.EngineType, outputStyle string, hooksCfg config.HooksConfig) tea.Cmd {
 	return func() tea.Msg {
 		// Allowed tools differ by engine type.

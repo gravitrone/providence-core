@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"charm.land/lipgloss/v2"
 )
 
 // maxQuoteLen is the maximum number of characters extracted from a message for quoting.
@@ -90,6 +92,37 @@ func (q *QuoteModel) HandleKey(key string) (bool, string) {
 	}
 
 	return false, ""
+}
+
+// View renders the quote selection overlay showing the currently highlighted message.
+// Returns "" when the model is not active.
+func (q QuoteModel) View(width int) string {
+	if !q.active || len(q.messages) == 0 {
+		return ""
+	}
+	msg := q.messages[q.cursor]
+
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFA600"))
+	bodyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E8DACE"))
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6b5040"))
+
+	header := headerStyle.Render(fmt.Sprintf("  Quoting %s (%s)  [%d/%d]",
+		msg.Role, formatTimeAgo(msg.Time), q.cursor+1, len(q.messages)))
+
+	content := truncateQuote(msg.Content)
+	// Clamp content lines to fit width.
+	lines := strings.Split(content, "\n")
+	var body strings.Builder
+	for _, line := range lines {
+		if len(line) > width-4 {
+			line = line[:width-7] + "..."
+		}
+		body.WriteString("  " + bodyStyle.Render(line) + "\n")
+	}
+
+	hint := hintStyle.Render("  j/k navigate, enter select, esc cancel")
+
+	return header + "\n" + body.String() + hint
 }
 
 // FormatQuoteBlock formats a message into a quote block for the input.

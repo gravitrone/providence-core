@@ -38,9 +38,16 @@ func NewOpenCodeEngine(cfg engine.EngineConfig) (engine.Engine, error) {
 	}, nil
 }
 
-// Send sends a user message. Stub: returns an error until opencode serve is wired.
+// Send sends a user message. Emits a helpful system event when opencode serve is not running.
 func (e *OpenCodeEngine) Send(text string) error {
-	return fmt.Errorf("opencode engine not yet connected: send not available")
+	e.events <- engine.ParsedEvent{
+		Type: "system_message",
+		Data: &engine.SystemMessageEvent{
+			Type:    "system_message",
+			Content: "OpenCode engine requires `opencode serve` running locally.\nInstall: https://github.com/sst/opencode\nSwitch engine: /engine native",
+		},
+	}
+	return nil
 }
 
 // Events returns the read-only event channel.

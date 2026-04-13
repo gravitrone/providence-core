@@ -312,6 +312,9 @@ type AgentTab struct {
 	// Permission "always allow" set - tool names that the user chose to auto-approve.
 	alwaysAllowTools map[string]bool
 
+	// permissionMode is the active permission mode (default, acceptEdits, plan, bypassPermissions, dontAsk).
+	permissionMode string
+
 	// Discovered skills, custom agents, and custom tools loaded at startup.
 	discoveredSkills []skills.SkillDefinition
 	customAgents     map[string]subagent.AgentType
@@ -1769,6 +1772,16 @@ func (at AgentTab) renderChatPane(paneWidth, height int) string {
 		}
 	}
 
+	// Quote selection overlay, padded.
+	quoteSection := ""
+	if at.quoteModel.Active() {
+		if qv := at.quoteModel.View(contentW); qv != "" {
+			for _, line := range strings.Split(qv, "\n") {
+				quoteSection += leftPad + line + "\n"
+			}
+		}
+	}
+
 	// Notification toasts, padded.
 	notifSection := ""
 	if nv := at.notifications.View(contentW); nv != "" {
@@ -1780,7 +1793,7 @@ func (at AgentTab) renderChatPane(paneWidth, height int) string {
 	// Input, padded.
 	inputLine := leftPad + at.input.View()
 
-	return "\n" + vpPadded.String() + "\n" + divider + "\n" + previewSection + pickerSection + notifSection + inputLine
+	return "\n" + vpPadded.String() + "\n" + divider + "\n" + previewSection + quoteSection + pickerSection + notifSection + inputLine
 }
 
 // matchingSlashCommands returns the slash commands whose names start with
@@ -3183,9 +3196,36 @@ func formatToolArgs(toolName string, input any) string {
 		return formatTodoWriteInput(input)
 	case "AskUserQuestion":
 		return formatAskUserInput(input)
+	case "Task", "Agent":
+		return formatTaskInput(input)
 	default:
 		return formatToolInput(input)
 	}
+}
+
+// formatTaskInput renders a styled subagent card for the Task/Agent tool.
+func formatTaskInput(input any) string {
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return formatToolInput(input)
+	}
+	var ti struct {
+		Description  string `json:"description"`
+		SubagentType string `json:"subagent_type"`
+		RunInBG      bool   `json:"run_in_background"`
+	}
+	if err := json.Unmarshal(raw, &ti); err != nil {
+		return formatToolInput(input)
+	}
+	agentType := ti.SubagentType
+	if agentType == "" {
+		agentType = "general-purpose"
+	}
+	icon := "\u27C1" // ⟁
+	if ti.RunInBG {
+		icon = "\u27C1 (bg)"
+	}
+	return fmt.Sprintf("\n  %s %s [%s]", icon, ti.Description, agentType)
 }
 
 // convertTodosToTaskInfo maps tools.TodoItem slice to dashboard.TaskInfo slice.
@@ -3930,7 +3970,23 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		return true, nil
 
 	case "/permissions":
-		at.addSystemMessage("Permission mode: default\nRun /help for mode switching (shift+tab)")
+		if args == "" {
+			mode := at.permissionMode
+			if mode == "" {
+				mode = "default"
+			}
+			at.addSystemMessage(fmt.Sprintf("Permission mode: %s\n\nUsage: /permissions <mode>\nModes: default, acceptEdits, plan, bypassPermissions, dontAsk\n\nSwitch mode: shift+tab", mode))
+			at.refreshViewport()
+			return true, nil
+		}
+		validModes := map[string]bool{"default": true, "acceptEdits": true, "plan": true, "bypassPermissions": true, "dontAsk": true}
+		if !validModes[args] {
+			at.addSystemMessage("Invalid mode: " + args + "\nValid: default, acceptEdits, plan, bypassPermissions, dontAsk")
+			at.refreshViewport()
+			return true, nil
+		}
+		at.permissionMode = args
+		at.addSystemMessage("Permission mode set to: " + args)
 		at.refreshViewport()
 		return true, nil
 
@@ -3988,7 +4044,30 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		return true, nil
 
 	case "/review":
-		at.addSystemMessage("Code review: requires subagent system. Use /agents to see available types.")
+		de, ok := at.engine.(*direct.DirectEngine)
+		if !ok || de.SubagentRunner() == nil {
+			at.addSystemMessage("Code review requires native engine with subagent support")
+			at.refreshViewport()
+			return true, nil
+		}
+		reviewPrompt := "Review recent code changes in this project. Check for bugs, style issues, security problems, and adherence to AGENTS.md conventions. Report findings with file:line references."
+		if args != "" {
+			reviewPrompt = args
+		}
+		input := subagent.TaskInput{
+			Description:  "Code review",
+			Prompt:       reviewPrompt,
+			SubagentType: "Code-Reviewer",
+			RunInBG:      true,
+		}
+		agentType, _ := subagent.ResolveAgentType("Code-Reviewer", at.customAgents)
+		agentID, err := de.SubagentRunner().Spawn(context.Background(), input, agentType, de.SubagentExecutor())
+		if err != nil {
+			at.addSystemMessage("Review failed: " + err.Error())
+			at.refreshViewport()
+			return true, nil
+		}
+		at.addSystemMessage("Code review started: " + agentID)
 		at.refreshViewport()
 		return true, nil
 
@@ -4093,10 +4172,15 @@ func (at *AgentTab) drainCompletedSubagents() {
 		}
 		if agent.Result.Status == "completed" {
 			summary := agent.Result.Result
-			if len(summary) > 200 {
-				summary = summary[:200] + "..."
+			// Wrap result text to a reasonable width so it doesn't overflow the chat pane.
+			contentW := chatContentWidth(at.width)
+			if contentW > 20 {
+				summary = wordWrap(summary, contentW-4)
 			}
-			at.addSystemMessage(fmt.Sprintf("Background agent %s completed: %s", label, summary))
+			if len(summary) > 500 {
+				summary = summary[:500] + "..."
+			}
+			at.addSystemMessage(fmt.Sprintf("Background agent %s completed:\n%s", label, summary))
 			// Steer the full result into the engine so the model sees it.
 			de.Steer(fmt.Sprintf("[background agent %s completed]\n%s", label, agent.Result.Result))
 		} else {

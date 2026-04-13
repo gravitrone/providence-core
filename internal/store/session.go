@@ -71,6 +71,15 @@ func (s *Store) GetSession(id string) (*SessionRow, error) {
 	return &sr, nil
 }
 
+// SaveSessionLearnings stores a JSON learnings blob for a session.
+func (s *Store) SaveSessionLearnings(id, learningsJSON string) error {
+	if s == nil {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE sessions SET learnings = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, learningsJSON, id)
+	return err
+}
+
 // ListSessions returns recent sessions, optionally filtered by CWD.
 // If cwd is empty, returns all sessions.
 func (s *Store) ListSessions(cwd string, limit int) ([]SessionRow, error) {

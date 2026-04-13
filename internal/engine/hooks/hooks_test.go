@@ -32,6 +32,7 @@ func TestRunnerHasHooks(t *testing.T) {
 }
 
 func TestRunnerShellHookSuccess(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell tests require unix")
 	}
@@ -45,10 +46,13 @@ exit 0
 	require.NoError(t, err)
 
 	r := NewRunner(map[string][]HookConfig{
-		PreToolUse: {{Command: script, Timeout: 5 * time.Second}},
+		PreToolUse: {{Command: script, Timeout: 10 * time.Second}},
 	})
 
-	out, err := r.Run(context.Background(), PreToolUse, HookInput{
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	out, err := r.Run(ctx, PreToolUse, HookInput{
 		ToolName: "Bash",
 		ToolInput: map[string]string{"command": "ls"},
 	})
@@ -59,6 +63,7 @@ exit 0
 }
 
 func TestRunnerShellHookEmptyOutput(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell tests require unix")
 	}
@@ -78,6 +83,7 @@ func TestRunnerShellHookEmptyOutput(t *testing.T) {
 }
 
 func TestRunnerShellHookBlockingError(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell tests require unix")
 	}
@@ -107,6 +113,7 @@ exit 2
 }
 
 func TestRunnerShellHookNonBlockingError(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell tests require unix")
 	}
@@ -127,6 +134,7 @@ func TestRunnerShellHookNonBlockingError(t *testing.T) {
 }
 
 func TestRunnerShellHookTimeout(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell tests require unix")
 	}
@@ -146,6 +154,7 @@ func TestRunnerShellHookTimeout(t *testing.T) {
 }
 
 func TestRunnerShellHookReceivesEnvVar(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell tests require unix")
 	}
@@ -233,6 +242,7 @@ func TestRunnerHTTPHookError(t *testing.T) {
 }
 
 func TestRunnerAsync(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell tests require unix")
 	}

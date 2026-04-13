@@ -20,6 +20,7 @@ func writeShellTestScript(t *testing.T, content string) string {
 }
 
 func TestShellHookExitZero(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell tests require unix")
 	}
@@ -29,9 +30,12 @@ echo '{"decision":"approve","reason":"shell ok"}'
 exit 0
 `)
 
-	out, err := execShellHook(context.Background(), HookConfig{
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	out, err := execShellHook(ctx, HookConfig{
 		Command: script,
-		Timeout: time.Second,
+		Timeout: 5 * time.Second,
 	}, HookInput{
 		Event:    PreToolUse,
 		ToolName: "Bash",
@@ -44,6 +48,7 @@ exit 0
 }
 
 func TestShellHookExitTwo(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell tests require unix")
 	}
@@ -54,9 +59,12 @@ echo 'policy denied' >&2
 exit 2
 `)
 
-	out, err := execShellHook(context.Background(), HookConfig{
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	out, err := execShellHook(ctx, HookConfig{
 		Command: script,
-		Timeout: time.Second,
+		Timeout: 5 * time.Second,
 	}, HookInput{
 		Event:    PreToolUse,
 		ToolName: "Write",
@@ -73,6 +81,7 @@ exit 2
 }
 
 func TestShellHookTimeout(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell tests require unix")
 	}

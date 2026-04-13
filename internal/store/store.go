@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -106,5 +107,26 @@ func migrate(db *sql.DB) error {
 	END;
 	`
 	_, err = db.Exec(fts)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Add learnings column if not present (idempotent migration).
+	_, err = db.Exec(`ALTER TABLE sessions ADD COLUMN learnings TEXT`)
+	if err != nil {
+		// SQLite returns "duplicate column name" when the column already exists; ignore it.
+		if !isDuplicateColumnErr(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// isDuplicateColumnErr returns true when SQLite complains that a column already exists.
+func isDuplicateColumnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "column already exists")
 }

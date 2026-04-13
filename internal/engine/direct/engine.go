@@ -3,10 +3,12 @@ package direct
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1576,11 +1578,57 @@ func (e *DirectEngine) Steer(text string) {
 	e.steered = append(e.steered, text)
 }
 
-// streamWithRetry calls the Messages API with streaming, retrying up to 3 times
-// on 429 rate limit errors with exponential backoff. ReadOnly tools are
-// pre-executed as their blocks complete during streaming (overlapped execution).
+// streamMaxRetries returns the configured max retry count from PROVIDENCE_MAX_RETRIES
+// env var, defaulting to 10.
+func streamMaxRetries() int {
+	if v := os.Getenv("PROVIDENCE_MAX_RETRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 10
+}
+
+// extractRetryDelay tries to parse a Retry-After delay from the API error response
+// headers. It checks the standard Retry-After header and the Anthropic-specific
+// anthropic-ratelimit-unified-reset header. Returns 0 if no usable value is found.
+func extractRetryDelay(err error) time.Duration {
+	var apiErr *anthropic.Error
+	if !errors.As(err, &apiErr) || apiErr.Response == nil {
+		return 0
+	}
+
+	// Try standard Retry-After header first (value in seconds).
+	if ra := apiErr.Response.Header.Get("Retry-After"); ra != "" {
+		if secs, parseErr := strconv.Atoi(ra); parseErr == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+		// Retry-After can also be an HTTP-date; parse RFC1123.
+		if t, parseErr := time.Parse(time.RFC1123, ra); parseErr == nil {
+			if d := time.Until(t); d > 0 {
+				return d
+			}
+		}
+	}
+
+	// Try Anthropic-specific reset timestamp header.
+	if reset := apiErr.Response.Header.Get("anthropic-ratelimit-unified-reset"); reset != "" {
+		if t, parseErr := time.Parse(time.RFC3339, reset); parseErr == nil {
+			if d := time.Until(t); d > 0 {
+				return d
+			}
+		}
+	}
+
+	return 0
+}
+
+// streamWithRetry calls the Messages API with streaming, retrying on 429 rate
+// limit errors. Uses Retry-After header delay when available, falling back to
+// exponential backoff. Max retries configurable via PROVIDENCE_MAX_RETRIES (default 10).
+// ReadOnly tools are pre-executed as their blocks complete during streaming.
 func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.MessageNewParams) (anthropic.Message, error) {
-	const maxRetries = 3
+	maxRetries := streamMaxRetries()
 
 	// Reset pre-execution state for this streaming call.
 	e.preExecMu.Lock()
@@ -1626,7 +1674,11 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 			errStr := err.Error()
 			if strings.Contains(errStr, "429") || strings.Contains(errStr, "rate_limit") {
 				if attempt < maxRetries-1 {
-					delay := engine.Backoff(attempt)
+					// Prefer server-provided Retry-After delay; fall back to exponential backoff.
+					delay := extractRetryDelay(err)
+					if delay == 0 {
+						delay = engine.Backoff(attempt)
+					}
 					delaySec := int(delay.Seconds())
 					if delaySec < 1 {
 						delaySec = 1

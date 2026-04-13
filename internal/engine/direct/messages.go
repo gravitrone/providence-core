@@ -136,6 +136,29 @@ func (h *ConversationHistory) estimateTokensLocked() int {
 	return charCount * 4 / 3
 }
 
+// StripThinkingBlocks removes thinking and redacted thinking content blocks from
+// all assistant messages in the history. Thinking blocks are model-bound and will
+// cause 400 errors when sent to a different model during fallback.
+func (h *ConversationHistory) StripThinkingBlocks() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for i := range h.messages {
+		msg := &h.messages[i]
+		if msg.Role != "assistant" {
+			continue
+		}
+		filtered := msg.Content[:0]
+		for _, block := range msg.Content {
+			if block.OfThinking != nil || block.OfRedactedThinking != nil {
+				continue
+			}
+			filtered = append(filtered, block)
+		}
+		msg.Content = filtered
+	}
+}
+
 // --- W5 microcompact ---
 
 // CompressLongToolResults replaces oversized older tool_result blocks with a stub.

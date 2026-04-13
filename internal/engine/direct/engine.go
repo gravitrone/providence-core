@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/compact"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
+	"github.com/gravitrone/providence-core/internal/engine/filewatch"
 	"github.com/gravitrone/providence-core/internal/engine/hooks"
 	"github.com/gravitrone/providence-core/internal/engine/mcp"
 	"github.com/gravitrone/providence-core/internal/engine/session"
@@ -107,6 +109,9 @@ type DirectEngine struct {
 
 	// MCP server manager (nil when no MCP servers are configured).
 	mcpManager *mcp.Manager
+
+	// File watcher for config change detection.
+	fileWatcher *filewatch.Watcher
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -321,7 +326,30 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		}
 	})
 
+	// Start file watcher for config change detection.
+	fw := filewatch.New(cfg.WorkDir, nil)
+	fw.Start()
+	e.fileWatcher = fw
+	go e.drainFileWatchEvents()
+
 	return e, nil
+}
+
+// drainFileWatchEvents reads file change events from the watcher and emits
+// system messages so the user knows a config file changed.
+func (e *DirectEngine) drainFileWatchEvents() {
+	for evt := range e.fileWatcher.Events() {
+		select {
+		case e.events <- engine.ParsedEvent{
+			Type: "system_message",
+			Data: &engine.SystemMessageEvent{
+				Type:    "system_message",
+				Content: fmt.Sprintf("File changed: %s. Reload with /clear or continue.", evt.Path),
+			},
+		}:
+		default:
+		}
+	}
 }
 
 // SubagentRunner returns the engine's subagent runner for external polling
@@ -547,6 +575,9 @@ func (e *DirectEngine) Close() {
 	e.Interrupt()
 	if e.bgCancel != nil {
 		e.bgCancel()
+	}
+	if e.fileWatcher != nil {
+		e.fileWatcher.Stop()
 	}
 	if e.subagentRunner != nil {
 		e.subagentRunner.Close()
@@ -1005,6 +1036,10 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 					e.model = fallback
 					e.fallbackActive = true
 
+					// Strip thinking/signature blocks from history before retrying
+					// on a different model - they are model-bound and will 400.
+					e.history.StripThinkingBlocks()
+
 					e.events <- engine.ParsedEvent{
 						Type: "system_message",
 						Data: &engine.SystemMessageEvent{
@@ -1150,6 +1185,17 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		}
 		e.history.AddToolResults(resultBlocks)
 		e.history.CompressLongToolResults(2000)
+
+		// Computer use cleanup: remove temp files and restore macOS state.
+		e.cleanupComputerUse(queue.Results())
+
+		// Tool use summary: when 2+ tools ran, fire a background goroutine to
+		// generate a 30-char summary via the fast-tier model. The summary is
+		// prepended to the next turn's context so the model can skip re-reading
+		// full tool results, saving tokens.
+		if len(queue.Results()) >= 2 {
+			go e.generateToolSummary(queue.Results())
+		}
 
 		e.drainSteeredMessages()
 	}
@@ -1418,4 +1464,87 @@ func (e *DirectEngine) fireHookAsync(event string, input hooks.HookInput) {
 	}
 	input.SessionID = e.sessionID
 	e.hooksRunner.RunAsync(e.ctx, event, input)
+}
+
+// generateToolSummary uses the fast-tier model to produce a short summary of
+// what the tool batch accomplished. The summary is injected as a system note
+// so the primary model can skip re-reading verbose tool output on the next turn.
+func (e *DirectEngine) generateToolSummary(results []ToolCallResult) {
+	fastModel := engine.FastForProvider(e.provider)
+	if fastModel == "" || e.codexMode || e.openrouterMode {
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Summarize what these tool calls did in under 30 characters:\n")
+	for _, r := range results {
+		content := r.Result.Content
+		if len(content) > 200 {
+			content = content[:200] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("- %s: %s\n", r.Name, content))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := e.client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.Model(fastModel),
+		MaxTokens: 64,
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(sb.String())),
+		},
+	})
+	if err != nil {
+		return
+	}
+
+	var summary string
+	for _, block := range resp.Content {
+		if block.Type == "text" {
+			summary = block.Text
+			break
+		}
+	}
+	if summary == "" {
+		return
+	}
+
+	// Truncate to 60 chars max (model may overshoot the 30-char ask).
+	if len(summary) > 60 {
+		summary = summary[:60]
+	}
+
+	// Inject as a system note in the conversation history.
+	e.history.AddUser(fmt.Sprintf("[Tool summary: %s]", summary))
+}
+
+// computerUseToolNames lists the CU tools that may leave macOS state dirty.
+var computerUseToolNames = map[string]bool{
+	"Screenshot":   true,
+	"DesktopClick": true,
+	"DesktopType":  true,
+	"DesktopApps":  true,
+	"Clipboard":    true,
+}
+
+// cleanupComputerUse restores macOS state after computer use tools:
+// removes temp screenshot files and ensures no apps were left hidden.
+func (e *DirectEngine) cleanupComputerUse(toolResults []ToolCallResult) {
+	usedCU := false
+	for _, r := range toolResults {
+		if computerUseToolNames[r.Name] {
+			usedCU = true
+			break
+		}
+	}
+	if !usedCU {
+		return
+	}
+
+	// Clean up temp screenshot files.
+	matches, _ := filepath.Glob("/tmp/providence-screenshot-*.png")
+	for _, f := range matches {
+		os.Remove(f)
+	}
 }

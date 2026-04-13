@@ -917,6 +917,30 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		toolParams := e.toolParams()
 
+		// Pre-call blocking limit check: if estimated tokens exceed the hard
+		// ceiling (effectiveWindow - 3000), skip the API call and trigger
+		// reactive compaction instead of wasting an API round-trip.
+		if e.compactor != nil {
+			currentTokens := e.history.CurrentTokens()
+			contextWindow := engine.ContextWindowFor(e.model)
+			maxOutput := engine.MaxOutputTokensFor(e.model)
+			hardBlock := compact.GetEffectiveContextWindow(contextWindow, maxOutput) - 3000
+			if currentTokens > hardBlock {
+				e.events <- engine.ParsedEvent{
+					Type: "system_message",
+					Data: &engine.SystemMessageEvent{
+						Type:    "system_message",
+						Content: fmt.Sprintf("Prompt tokens (%d) exceed hard limit (%d). Compacting before API call...", currentTokens, hardBlock),
+					},
+				}
+				if compactErr := e.compactor.TriggerReactive(ctx); compactErr == nil {
+					continue
+				}
+				e.emitError(fmt.Errorf("prompt exceeds context window and compaction failed"))
+				return
+			}
+		}
+
 		apiParams := anthropic.MessageNewParams{
 			Model:     anthropic.Model(e.model),
 			MaxTokens: 16384,

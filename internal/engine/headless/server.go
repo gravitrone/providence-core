@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -43,13 +44,17 @@ type UserMessageBody struct {
 type OutputEvent struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype,omitempty"`
+	UUID    string `json:"uuid,omitempty"`
 
 	// System init fields.
-	SessionID string   `json:"session_id,omitempty"`
-	Tools     []string `json:"tools,omitempty"`
-	Model     string   `json:"model,omitempty"`
-	Engine    string   `json:"engine,omitempty"`
-	Version   string   `json:"version,omitempty"`
+	SessionID      string   `json:"session_id,omitempty"`
+	Tools          []string `json:"tools,omitempty"`
+	Model          string   `json:"model,omitempty"`
+	Engine         string   `json:"engine,omitempty"`
+	Version        string   `json:"version,omitempty"`
+	Cwd            string   `json:"cwd,omitempty"`
+	SlashCommands  []string `json:"slash_commands,omitempty"`
+	PermissionMode string   `json:"permission_mode,omitempty"`
 
 	// Assistant fields.
 	Message *engine.AssistantMsg `json:"message,omitempty"`
@@ -61,6 +66,8 @@ type OutputEvent struct {
 	Result       string  `json:"result,omitempty"`
 	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
 	IsError      bool    `json:"is_error,omitempty"`
+	DurationMS   int64   `json:"duration_ms,omitempty"`
+	NumTurns     int     `json:"num_turns,omitempty"`
 
 	// Tool result fields.
 	ToolCallID string `json:"tool_call_id,omitempty"`
@@ -68,9 +75,9 @@ type OutputEvent struct {
 	Output     string `json:"output,omitempty"`
 
 	// Permission request fields.
-	Tool       *engine.PermissionTool     `json:"tool,omitempty"`
-	QuestionID string                     `json:"question_id,omitempty"`
-	Options    []engine.PermissionOption  `json:"options,omitempty"`
+	Tool       *engine.PermissionTool    `json:"tool,omitempty"`
+	QuestionID string                    `json:"question_id,omitempty"`
+	Options    []engine.PermissionOption `json:"options,omitempty"`
 
 	// Generic content (system messages, errors).
 	Content string `json:"content,omitempty"`
@@ -103,6 +110,9 @@ type Server struct {
 	// Runtime state.
 	maxThinkingTokens int
 	sessionState      string // "idle", "running" - tracked for state change events
+	turnStartTime     time.Time
+	turnCount         int
+	cwd               string // working directory for init enrichment
 
 	mu     sync.Mutex
 	closed bool
@@ -140,20 +150,34 @@ func (s *Server) WithConfig(c *config.Config) {
 	s.config = c
 }
 
+// WithCwd sets the working directory reported in system/init.
+func (s *Server) WithCwd(cwd string) {
+	s.cwd = cwd
+}
+
 // Run starts the headless serve loop. It blocks until ctx is cancelled,
 // stdin reaches EOF, or a fatal error occurs.
 func (s *Server) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancelCtx = cancel
 
-	// 1. Emit system/init.
+	// 1. Emit enriched system/init.
+	cwd := s.cwd
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	initTools, slashCmds, permMode := s.gatherInitInfo()
 	s.emit(OutputEvent{
-		Type:      TypeSystem,
-		Subtype:   SubtypeInit,
-		SessionID: s.sessionID,
-		Model:     s.model,
-		Engine:    s.engineID,
-		Version:   "1.0",
+		Type:           TypeSystem,
+		Subtype:        SubtypeInit,
+		SessionID:      s.sessionID,
+		Model:          s.model,
+		Engine:         s.engineID,
+		Version:        "1.0",
+		Cwd:            cwd,
+		Tools:          initTools,
+		SlashCommands:  slashCmds,
+		PermissionMode: permMode,
 	})
 
 	// 2. Start goroutine draining engine events to stdout.
@@ -186,11 +210,16 @@ func (s *Server) Run(ctx context.Context) error {
 // --- Internal Methods ---
 
 // emit writes an OutputEvent as a single NDJSON line. Thread-safe.
+// Stamps UUID and SessionID on every event.
 func (s *Server) emit(ev OutputEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
+	}
+	ev.UUID = uuid.New().String()
+	if ev.SessionID == "" {
+		ev.SessionID = s.sessionID
 	}
 	_ = s.writer.Encode(ev)
 }
@@ -270,6 +299,8 @@ func (s *Server) handleUser(msg InputMessage) {
 		return
 	}
 
+	s.turnStartTime = time.Now()
+	s.turnCount++
 	s.transitionState("running")
 	if err := s.engine.Send(body.Content); err != nil {
 		s.emitError("send failed: " + err.Error())
@@ -444,14 +475,31 @@ func (s *Server) translateEvent(ev engine.ParsedEvent) {
 
 	case "result":
 		if re, ok := ev.Data.(*engine.ResultEvent); ok {
-			s.emit(OutputEvent{
+			var durationMS int64
+			if !s.turnStartTime.IsZero() {
+				durationMS = time.Since(s.turnStartTime).Milliseconds()
+			}
+			resultEv := OutputEvent{
 				Type:         TypeResult,
 				Subtype:      re.Subtype,
 				Result:       re.Result,
 				SessionID:    re.SessionID,
 				TotalCostUSD: re.TotalCostUSD,
 				IsError:      re.IsError,
-			})
+				DurationMS:   durationMS,
+				NumTurns:     s.turnCount,
+			}
+			// Attach final usage if the engine supports it.
+			type usageProvider interface {
+				ContextUsage() (inputTokens, outputTokens, contextWindow, messageCount int)
+			}
+			if up, ok := s.engine.(usageProvider); ok {
+				input, output, _, _ := up.ContextUsage()
+				resultEv.InputTokens = input
+				resultEv.OutputTokens = output
+				resultEv.TotalTokens = input + output
+			}
+			s.emit(resultEv)
 			s.transitionState("idle")
 		}
 
@@ -575,6 +623,36 @@ func (s *Server) keepAliveLoop(ctx context.Context) {
 			})
 		}
 	}
+}
+
+// --- Init Enrichment ---
+
+// gatherInitInfo queries the engine for tools, slash commands, and permission mode.
+func (s *Server) gatherInitInfo() (tools []string, slashCmds []string, permMode string) {
+	// Tools: ask the engine if it can list them.
+	type toolLister interface {
+		ToolNames() []string
+	}
+	if tl, ok := s.engine.(toolLister); ok {
+		tools = tl.ToolNames()
+	}
+
+	// Slash commands: ask the engine if it can list them.
+	type slashLister interface {
+		SlashCommands() []string
+	}
+	if sl, ok := s.engine.(slashLister); ok {
+		slashCmds = sl.SlashCommands()
+	}
+
+	// Permission mode from config.
+	if s.config != nil && s.config.Permissions.Mode != "" {
+		permMode = s.config.Permissions.Mode
+	} else {
+		permMode = "default"
+	}
+
+	return tools, slashCmds, permMode
 }
 
 // --- Control Request Helpers ---

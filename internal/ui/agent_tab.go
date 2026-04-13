@@ -454,7 +454,7 @@ func (at *AgentTab) Resize(width, height int) {
 	at.height = height
 
 	contentW := chatContentWidth(width)
-	inputH := 3
+	inputH := 1
 	dividerH := 1
 	vpH := height - inputH - dividerH - 1
 	if vpH < 3 {

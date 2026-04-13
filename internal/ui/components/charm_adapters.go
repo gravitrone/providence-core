@@ -50,13 +50,13 @@ func ReapplyInputStyles(ti *textinput.Model) {
 }
 
 // NewProvidenceTextArea returns a textarea.Model styled to match the providence theme.
-// It is configured for 3-line multiline input with enter = submit (handled by caller)
-// and shift+enter = newline.
+// Height starts at 1 line; grows naturally as the user types multiline content
+// via shift+enter. Enter = submit (handled by caller).
 func NewProvidenceTextArea(placeholder string) textarea.Model {
 	ta := textarea.New()
 	ta.Placeholder = placeholder
 	ta.ShowLineNumbers = false
-	ta.SetHeight(3)
+	ta.SetHeight(1)
 	ta.Prompt = "❯ "
 
 	// Remap InsertNewline from enter to shift+enter so enter can be handled

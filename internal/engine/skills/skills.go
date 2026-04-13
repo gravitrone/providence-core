@@ -71,7 +71,12 @@ func LoadSkills(projectRoot, homeDir string) ([]SkillDefinition, error) {
 	return result, nil
 }
 
-// loadSkillsFromDir reads all .md files from a directory (non-recursive).
+// loadSkillsFromDir reads skills from a directory. Two layouts are supported:
+//
+//  1. Flat: a .md file directly in dir (e.g. dir/foo.md)
+//  2. Directory: a subdirectory containing SKILL.md (e.g. dir/foo/SKILL.md)
+//     Symlinks to directories are also resolved (CC-compat: ~/.claude/skills/foo ->
+//     /some/path/foo/SKILL.md).
 func loadSkillsFromDir(dir, source string) ([]SkillDefinition, error) {
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
@@ -83,18 +88,45 @@ func loadSkillsFromDir(dir, source string) ([]SkillDefinition, error) {
 
 	var skills []SkillDefinition
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+		name := e.Name()
+
+		// Flat layout: foo.md directly in the skills dir.
+		if !e.IsDir() && strings.HasSuffix(name, ".md") {
+			path := filepath.Join(dir, name)
+			skill, err := ParseSkillFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse skill %s: %w", path, err)
+			}
+			skill.Source = source
+			if skill.Name == "" {
+				skill.Name = strings.TrimSuffix(name, ".md")
+			}
+			skills = append(skills, *skill)
 			continue
 		}
-		path := filepath.Join(dir, e.Name())
-		skill, err := ParseSkillFile(path)
+
+		// Directory layout: foo/ or symlink-to-dir, containing SKILL.md inside.
+		// Resolve symlinks so we can stat the target.
+		entryPath := filepath.Join(dir, name)
+		info, err := os.Stat(entryPath) // follows symlinks
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse skill %s: %w", path, err)
+			continue // broken symlink or permission error - skip
+		}
+		if !info.IsDir() {
+			continue
+		}
+		skillMD := filepath.Join(entryPath, "SKILL.md")
+		if _, err := os.Stat(skillMD); err != nil {
+			continue // no SKILL.md in this subdir - skip
+		}
+		skill, err := ParseSkillFile(skillMD)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse skill %s: %w", skillMD, err)
 		}
 		skill.Source = source
-		// If name wasn't set in frontmatter, derive from filename.
+		// If name not in frontmatter, derive from directory name.
 		if skill.Name == "" {
-			skill.Name = strings.TrimSuffix(e.Name(), ".md")
+			skill.Name = name
 		}
 		skills = append(skills, *skill)
 	}

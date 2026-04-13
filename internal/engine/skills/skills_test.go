@@ -98,6 +98,82 @@ Beta prompt.
 	assert.True(t, names["beta"])
 }
 
+func TestLoadSkillsFromDirLayout(t *testing.T) {
+	dir := t.TempDir()
+	skillsDir := filepath.Join(dir, ".claude", "skills")
+	require.NoError(t, os.MkdirAll(skillsDir, 0o755))
+
+	// Directory layout: skillsDir/foo/SKILL.md
+	fooDir := filepath.Join(skillsDir, "foo")
+	require.NoError(t, os.MkdirAll(fooDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(fooDir, "SKILL.md"), []byte(`---
+name: foo
+description: Foo skill
+---
+Foo prompt.
+`), 0o644))
+
+	// Directory layout without name in frontmatter - name derived from dir.
+	barDir := filepath.Join(skillsDir, "bar")
+	require.NoError(t, os.MkdirAll(barDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(barDir, "SKILL.md"), []byte(`---
+description: Bar skill
+---
+Bar prompt.
+`), 0o644))
+
+	// Subdir without SKILL.md should be ignored.
+	noSkillDir := filepath.Join(skillsDir, "no-skill")
+	require.NoError(t, os.MkdirAll(noSkillDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(noSkillDir, "README.md"), []byte("not a skill"), 0o644))
+
+	skills, err := LoadSkills(dir, t.TempDir())
+	require.NoError(t, err)
+	assert.Len(t, skills, 2)
+
+	names := map[string]string{}
+	for _, s := range skills {
+		names[s.Name] = s.Description
+	}
+	assert.Equal(t, "Foo skill", names["foo"])
+	assert.Equal(t, "Bar skill", names["bar"])
+}
+
+func TestLoadSkillsMixedLayouts(t *testing.T) {
+	dir := t.TempDir()
+	skillsDir := filepath.Join(dir, ".providence", "skills")
+	require.NoError(t, os.MkdirAll(skillsDir, 0o755))
+
+	// Flat layout.
+	require.NoError(t, os.WriteFile(filepath.Join(skillsDir, "flat.md"), []byte(`---
+name: flat
+description: Flat skill
+---
+Flat prompt.
+`), 0o644))
+
+	// Directory layout.
+	dirSkill := filepath.Join(skillsDir, "dir-skill")
+	require.NoError(t, os.MkdirAll(dirSkill, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dirSkill, "SKILL.md"), []byte(`---
+name: dir-skill
+description: Dir skill
+---
+Dir prompt.
+`), 0o644))
+
+	skills, err := LoadSkills(dir, t.TempDir())
+	require.NoError(t, err)
+	assert.Len(t, skills, 2)
+
+	names := map[string]bool{}
+	for _, s := range skills {
+		names[s.Name] = true
+	}
+	assert.True(t, names["flat"])
+	assert.True(t, names["dir-skill"])
+}
+
 func TestSkillDiscoveryOrder(t *testing.T) {
 	projectDir := t.TempDir()
 	homeDir := t.TempDir()

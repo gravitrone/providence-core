@@ -103,6 +103,12 @@ type DirectEngine struct {
 	// Hooks runner for lifecycle event hooks.
 	hooksRunner    *hooks.Runner
 	sessionStarted bool // tracks whether SessionStart hook has fired
+
+	// Pre-executed tool results from streaming-overlapped execution.
+	// ReadOnly tools start executing as their blocks complete during streaming.
+	preExecResults map[string]tools.ToolResult
+	preExecMu      sync.Mutex
+	preExecWg      sync.WaitGroup
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -1004,10 +1010,31 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			return
 		}
 
+		// Wait for any pre-executed ReadOnly tools from streaming overlap to finish.
+		e.preExecWg.Wait()
+
 		toolCalls := extractToolCalls(accumulated)
 		queue := NewStreamingToolQueue(e.registry)
 		for _, tc := range toolCalls {
 			e.sessionBus.Publish(session.Event{Type: session.EventToolCallStart, Data: tc.Name})
+
+			// Check if this tool was already pre-executed during streaming.
+			e.preExecMu.Lock()
+			preResult, preExecuted := e.preExecResults[tc.ID]
+			if preExecuted {
+				delete(e.preExecResults, tc.ID)
+			}
+			e.preExecMu.Unlock()
+
+			if preExecuted {
+				queue.mu.Lock()
+				queue.results = append(queue.results, ToolCallResult{
+					ToolCall: tc,
+					Result:   preResult,
+				})
+				queue.mu.Unlock()
+				continue
+			}
 
 			// Fire PreToolUse hook.
 			if hookOut, hookErr := e.fireHook(hooks.PreToolUse, hooks.HookInput{
@@ -1294,12 +1321,21 @@ func (e *DirectEngine) Steer(text string) {
 }
 
 // streamWithRetry calls the Messages API with streaming, retrying up to 3 times
-// on 429 rate limit errors with exponential backoff.
+// on 429 rate limit errors with exponential backoff. ReadOnly tools are
+// pre-executed as their blocks complete during streaming (overlapped execution).
 func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.MessageNewParams) (anthropic.Message, error) {
 	const maxRetries = 3
 
+	// Reset pre-execution state for this streaming call.
+	e.preExecMu.Lock()
+	e.preExecResults = make(map[string]tools.ToolResult)
+	e.preExecMu.Unlock()
+
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		stream := e.client.Messages.NewStreaming(ctx, params)
+
+		// Track tool_use block indices seen via ContentBlockStartEvent.
+		toolBlockIndices := make(map[int64]bool)
 
 		var accumulated anthropic.Message
 		for stream.Next() {
@@ -1307,6 +1343,19 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 			_ = accumulated.Accumulate(event)
 			if pe := translateStreamEvent(event); pe != nil {
 				e.events <- *pe
+			}
+
+			// Detect tool_use block starts and completions for overlapped execution.
+			switch variant := event.AsAny().(type) {
+			case anthropic.ContentBlockStartEvent:
+				if variant.ContentBlock.Type == "tool_use" {
+					toolBlockIndices[variant.Index] = true
+				}
+			case anthropic.ContentBlockStopEvent:
+				if toolBlockIndices[variant.Index] {
+					// A tool_use block just completed. Check if its tool is ReadOnly.
+					e.maybePreExecuteTool(ctx, accumulated, int(variant.Index))
+				}
 			}
 		}
 		if err := stream.Err(); err != nil {
@@ -1331,6 +1380,42 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 	}
 	// Unreachable, but satisfies the compiler.
 	return anthropic.Message{}, fmt.Errorf("stream retry exhausted")
+}
+
+// maybePreExecuteTool checks if the tool_use block at the given index in the
+// accumulated message is for a ReadOnly tool. If so, it spawns a goroutine to
+// execute it immediately, storing the result in preExecResults.
+func (e *DirectEngine) maybePreExecuteTool(ctx context.Context, accumulated anthropic.Message, blockIndex int) {
+	if blockIndex >= len(accumulated.Content) {
+		return
+	}
+	block := accumulated.Content[blockIndex]
+	if block.Type != "tool_use" {
+		return
+	}
+
+	tool, ok := e.registry.Get(block.Name)
+	if !ok || !tool.ReadOnly() {
+		return
+	}
+
+	var input map[string]any
+	if len(block.Input) > 0 {
+		_ = json.Unmarshal(block.Input, &input)
+	}
+	if input == nil {
+		input = make(map[string]any)
+	}
+
+	toolID := block.ID
+	e.preExecWg.Add(1)
+	go func() {
+		defer e.preExecWg.Done()
+		result := tool.Execute(ctx, input)
+		e.preExecMu.Lock()
+		e.preExecResults[toolID] = result
+		e.preExecMu.Unlock()
+	}()
 }
 
 // isOverloadError returns true if the error indicates a model overload (HTTP 529

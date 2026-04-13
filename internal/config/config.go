@@ -24,6 +24,78 @@ type Config struct {
 	OutputStyle      string `toml:"output_style" json:"output_style,omitempty"`
 
 	Compact CompactConfig `toml:"compact" json:"compact,omitempty"`
+	Hooks   HooksConfig   `toml:"hooks" json:"hooks,omitempty"`
+}
+
+// HookEntry defines a single hook - either a shell command or HTTP endpoint.
+type HookEntry struct {
+	Command string `toml:"command" json:"command,omitempty"`
+	URL     string `toml:"url" json:"url,omitempty"`
+	Timeout int    `toml:"timeout" json:"timeout,omitempty"` // milliseconds
+}
+
+// HooksConfig maps event names to lists of hook entries.
+// TOML example:
+//
+//	[hooks]
+//	[hooks.PreToolUse]
+//	  [[hooks.PreToolUse.hooks]]
+//	  command = "echo pre-tool"
+type HooksConfig struct {
+	PreToolUse         []HookEntry `toml:"PreToolUse" json:"PreToolUse,omitempty"`
+	PostToolUse        []HookEntry `toml:"PostToolUse" json:"PostToolUse,omitempty"`
+	PostToolUseFailure []HookEntry `toml:"PostToolUseFailure" json:"PostToolUseFailure,omitempty"`
+	Stop               []HookEntry `toml:"Stop" json:"Stop,omitempty"`
+	SessionStart       []HookEntry `toml:"SessionStart" json:"SessionStart,omitempty"`
+	SessionEnd         []HookEntry `toml:"SessionEnd" json:"SessionEnd,omitempty"`
+	PreCompact         []HookEntry `toml:"PreCompact" json:"PreCompact,omitempty"`
+	PostCompact        []HookEntry `toml:"PostCompact" json:"PostCompact,omitempty"`
+	PermissionDenied   []HookEntry `toml:"PermissionDenied" json:"PermissionDenied,omitempty"`
+	SubagentStart      []HookEntry `toml:"SubagentStart" json:"SubagentStart,omitempty"`
+	SubagentStop       []HookEntry `toml:"SubagentStop" json:"SubagentStop,omitempty"`
+	UserPromptSubmit   []HookEntry `toml:"UserPromptSubmit" json:"UserPromptSubmit,omitempty"`
+}
+
+// ToMap converts the typed HooksConfig into a map[string][]HookEntry for the Runner.
+func (h *HooksConfig) ToMap() map[string][]HookEntry {
+	m := make(map[string][]HookEntry)
+	if len(h.PreToolUse) > 0 {
+		m["PreToolUse"] = h.PreToolUse
+	}
+	if len(h.PostToolUse) > 0 {
+		m["PostToolUse"] = h.PostToolUse
+	}
+	if len(h.PostToolUseFailure) > 0 {
+		m["PostToolUseFailure"] = h.PostToolUseFailure
+	}
+	if len(h.Stop) > 0 {
+		m["Stop"] = h.Stop
+	}
+	if len(h.SessionStart) > 0 {
+		m["SessionStart"] = h.SessionStart
+	}
+	if len(h.SessionEnd) > 0 {
+		m["SessionEnd"] = h.SessionEnd
+	}
+	if len(h.PreCompact) > 0 {
+		m["PreCompact"] = h.PreCompact
+	}
+	if len(h.PostCompact) > 0 {
+		m["PostCompact"] = h.PostCompact
+	}
+	if len(h.PermissionDenied) > 0 {
+		m["PermissionDenied"] = h.PermissionDenied
+	}
+	if len(h.SubagentStart) > 0 {
+		m["SubagentStart"] = h.SubagentStart
+	}
+	if len(h.SubagentStop) > 0 {
+		m["SubagentStop"] = h.SubagentStop
+	}
+	if len(h.UserPromptSubmit) > 0 {
+		m["UserPromptSubmit"] = h.UserPromptSubmit
+	}
+	return m
 }
 
 // CompactConfig holds compaction-related settings.
@@ -208,6 +280,36 @@ func mergeConfig(base, override *Config) {
 	if override.Compact.CircuitBreaker != 0 {
 		base.Compact.CircuitBreaker = override.Compact.CircuitBreaker
 	}
+	// Hooks: override replaces entire event lists (not additive).
+	overrideHooks := override.Hooks.ToMap()
+	for event, entries := range overrideHooks {
+		switch event {
+		case "PreToolUse":
+			base.Hooks.PreToolUse = entries
+		case "PostToolUse":
+			base.Hooks.PostToolUse = entries
+		case "PostToolUseFailure":
+			base.Hooks.PostToolUseFailure = entries
+		case "Stop":
+			base.Hooks.Stop = entries
+		case "SessionStart":
+			base.Hooks.SessionStart = entries
+		case "SessionEnd":
+			base.Hooks.SessionEnd = entries
+		case "PreCompact":
+			base.Hooks.PreCompact = entries
+		case "PostCompact":
+			base.Hooks.PostCompact = entries
+		case "PermissionDenied":
+			base.Hooks.PermissionDenied = entries
+		case "SubagentStart":
+			base.Hooks.SubagentStart = entries
+		case "SubagentStop":
+			base.Hooks.SubagentStop = entries
+		case "UserPromptSubmit":
+			base.Hooks.UserPromptSubmit = entries
+		}
+	}
 }
 
 // ClaudeSettings represents .claude/settings.json for CC compatibility.
@@ -241,6 +343,72 @@ func LoadClaudeSettings(projectDir string) (*ClaudeSettings, error) {
 	}
 
 	return &settings, nil
+}
+
+// ParseHooks converts the raw .claude/settings.json hooks map into typed HooksConfig.
+// CC format: {"hooks": {"PreToolUse": [{"command": "echo hi"}]}}
+func (s *ClaudeSettings) ParseHooks() HooksConfig {
+	if len(s.Hooks) == 0 {
+		return HooksConfig{}
+	}
+
+	var cfg HooksConfig
+	for event, raw := range s.Hooks {
+		entries := parseHookEntries(raw)
+		if len(entries) == 0 {
+			continue
+		}
+		switch event {
+		case "PreToolUse":
+			cfg.PreToolUse = entries
+		case "PostToolUse":
+			cfg.PostToolUse = entries
+		case "PostToolUseFailure":
+			cfg.PostToolUseFailure = entries
+		case "Stop":
+			cfg.Stop = entries
+		case "SessionStart":
+			cfg.SessionStart = entries
+		case "SessionEnd":
+			cfg.SessionEnd = entries
+		case "PreCompact":
+			cfg.PreCompact = entries
+		case "PostCompact":
+			cfg.PostCompact = entries
+		case "PermissionDenied":
+			cfg.PermissionDenied = entries
+		case "SubagentStart":
+			cfg.SubagentStart = entries
+		case "SubagentStop":
+			cfg.SubagentStop = entries
+		case "UserPromptSubmit":
+			cfg.UserPromptSubmit = entries
+		}
+	}
+	return cfg
+}
+
+// parseHookEntries converts a raw JSON value (expected to be an array of objects)
+// into typed HookEntry slices. Handles both array and single-object forms.
+func parseHookEntries(raw any) []HookEntry {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+
+	// Try array first.
+	var entries []HookEntry
+	if err := json.Unmarshal(data, &entries); err == nil {
+		return entries
+	}
+
+	// Try single object.
+	var single HookEntry
+	if err := json.Unmarshal(data, &single); err == nil && (single.Command != "" || single.URL != "") {
+		return []HookEntry{single}
+	}
+
+	return nil
 }
 
 // Save writes config to DefaultPath as TOML, creating ~/.providence/ if needed.

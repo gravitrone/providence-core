@@ -17,6 +17,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/compact"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 	"github.com/gravitrone/providence-core/internal/engine/session"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
 )
@@ -98,6 +99,10 @@ type DirectEngine struct {
 	// store is optional; when set, session learnings are persisted on Close.
 	store     storeIface
 	startTime time.Time
+
+	// Hooks runner for lifecycle event hooks.
+	hooksRunner    *hooks.Runner
+	sessionStarted bool // tracks whether SessionStart hook has fired
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -190,6 +195,22 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		sysFlat = engine.FlattenBlocks(sysBlocks)
 	}
 
+	// Build hooks runner from config entries.
+	hooksMap := make(map[string][]hooks.HookConfig)
+	for event, entries := range cfg.HooksMap {
+		for _, entry := range entries {
+			hc := hooks.HookConfig{
+				Command: entry.Command,
+				URL:     entry.URL,
+			}
+			if entry.Timeout > 0 {
+				hc.Timeout = time.Duration(entry.Timeout) * time.Millisecond
+			}
+			hooksMap[event] = append(hooksMap[event], hc)
+		}
+	}
+	hooksRunner := hooks.NewRunner(hooksMap)
+
 	e := &DirectEngine{
 		client:           client,
 		model:            model,
@@ -213,6 +234,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		sessionBus:       session.NewBus(),
 		todoTool:         todoTool,
 		startTime:        time.Now(),
+		hooksRunner:      hooksRunner,
 	}
 
 	// Register subagent TaskTool and SendMessage now that the engine exists for the executor.
@@ -234,6 +256,10 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	e.compactor = compact.New(provider, func(phase compact.Phase, err error) {
 		if phase == compact.PhaseRunning {
 			e.sessionBus.Publish(session.Event{Type: session.EventCompaction, Data: nil})
+			// Fire PreCompact hook.
+			e.fireHookAsync(hooks.PreCompact, hooks.HookInput{
+				ToolInput: provider.CurrentTokens(),
+			})
 		}
 		event := engine.ParsedEvent{
 			Type: "compaction",
@@ -250,6 +276,13 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 			compactionEvent.TokensBefore = provider.CurrentTokens()
 		default:
 			compactionEvent.TokensAfter = provider.CurrentTokens()
+			// Fire PostCompact hook.
+			e.fireHookAsync(hooks.PostCompact, hooks.HookInput{
+				ToolInput: map[string]int{
+					"original_count": compactionEvent.TokensBefore,
+					"new_count":      provider.CurrentTokens(),
+				},
+			})
 		}
 
 		select {
@@ -347,7 +380,15 @@ func (e *DirectEngine) fireBackgroundAgent(ctx context.Context, bg subagent.Back
 		RunInBG:      true,
 		Name:         bg.Name,
 	}
-	_, _ = e.subagentRunner.Spawn(ctx, input, bg.AgentType, e.subagentExecutor)
+	if _, err := e.subagentRunner.Spawn(ctx, input, bg.AgentType, e.subagentExecutor); err != nil {
+		e.events <- engine.ParsedEvent{
+			Type: "system_message",
+			Data: &engine.SystemMessageEvent{
+				Type:    "system_message",
+				Content: fmt.Sprintf("Background agent %s spawn failed: %v", bg.Name, err),
+			},
+		}
+	}
 }
 
 // SetPendingImages stores images to include with the next user message.
@@ -387,6 +428,20 @@ func (e *DirectEngine) Send(text string) error {
 	images := e.pendingImages
 	e.pendingImages = nil
 	e.mu.Unlock()
+
+	// Fire SessionStart hook on first Send call.
+	if !e.sessionStarted {
+		e.sessionStarted = true
+		e.fireHookAsync(hooks.SessionStart, hooks.HookInput{
+			ToolName:  e.model,
+			ToolInput: map[string]string{"source": e.provider, "model": e.model},
+		})
+	}
+
+	// Fire UserPromptSubmit hook.
+	e.fireHookAsync(hooks.UserPromptSubmit, hooks.HookInput{
+		ToolInput: text,
+	})
 
 	// Publish new message event to session bus.
 	e.sessionBus.Publish(session.Event{Type: session.EventNewMessage, Data: text})
@@ -429,6 +484,11 @@ func (e *DirectEngine) RespondPermission(questionID, optionID string) error {
 // Interrupt aborts the current API call and tool executions.
 // The engine remains usable for the next Send call.
 func (e *DirectEngine) Interrupt() {
+	// Fire Stop hook before cancellation.
+	e.fireHookAsync(hooks.Stop, hooks.HookInput{
+		ToolInput: "interrupt",
+	})
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.cancel != nil {
@@ -453,6 +513,11 @@ func (e *DirectEngine) SetStore(st storeIface) {
 // Close cleanly shuts down the engine and closes the events channel.
 // If a store is wired, mechanical session learnings are persisted before closing.
 func (e *DirectEngine) Close() {
+	// Fire SessionEnd hook before teardown.
+	e.fireHookAsync(hooks.SessionEnd, hooks.HookInput{
+		ToolInput: "close",
+	})
+
 	e.Interrupt()
 	if e.bgCancel != nil {
 		e.bgCancel()
@@ -607,6 +672,23 @@ func MapModelForEngine(requestedModel, targetEngine string) string {
 // Supports cross-engine spawning: if agentType.Engine is set and differs from
 // "direct", a child engine of the requested type is created via the factory.
 func (e *DirectEngine) subagentExecutor(ctx context.Context, prompt string, agentType subagent.AgentType) (string, error) {
+	agentID := agentType.Name
+	if agentID == "" {
+		agentID = "subagent"
+	}
+
+	// Fire SubagentStart hook.
+	e.fireHookAsync(hooks.SubagentStart, hooks.HookInput{
+		ToolName:  agentID,
+		ToolInput: agentType.Name,
+	})
+	defer func() {
+		// Fire SubagentStop hook when subagent completes.
+		e.fireHookAsync(hooks.SubagentStop, hooks.HookInput{
+			ToolName: agentID,
+		})
+	}()
+
 	systemPrompt := agentType.SystemPrompt + "\n\n" + subagent.AntiRecursionPrompt
 
 	model := agentType.Model
@@ -944,6 +1026,31 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		queue := NewStreamingToolQueue(e.registry)
 		for _, tc := range toolCalls {
 			e.sessionBus.Publish(session.Event{Type: session.EventToolCallStart, Data: tc.Name})
+
+			// Fire PreToolUse hook.
+			if hookOut, hookErr := e.fireHook(hooks.PreToolUse, hooks.HookInput{
+				ToolName:  tc.Name,
+				ToolInput: tc.Input,
+			}); hookErr != nil {
+				if _, ok := hookErr.(*hooks.BlockingError); ok {
+					queue.mu.Lock()
+					queue.results = append(queue.results, ToolCallResult{
+						ToolCall: tc,
+						Result:   tools.ToolResult{Content: "blocked by PreToolUse hook: " + hookErr.Error(), IsError: true},
+					})
+					queue.mu.Unlock()
+					continue
+				}
+			} else if hookOut != nil && hookOut.SuppressOutput {
+				queue.mu.Lock()
+				queue.results = append(queue.results, ToolCallResult{
+					ToolCall: tc,
+					Result:   tools.ToolResult{Content: "suppressed by PreToolUse hook"},
+				})
+				queue.mu.Unlock()
+				continue
+			}
+
 			tool, ok := e.registry.Get(tc.Name)
 			if !ok {
 				// Unknown tool - add error result directly.
@@ -958,6 +1065,11 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			if e.permissions.NeedsPermission(tool) {
 				approved := e.permissions.RequestPermission(tc.ID, e.events, tc.Name, tc.Input)
 				if !approved {
+					// Fire PermissionDenied hook.
+					e.fireHookAsync(hooks.PermissionRequest, hooks.HookInput{
+						ToolName:  tc.Name,
+						ToolInput: "permission denied by user",
+					})
 					queue.mu.Lock()
 					queue.results = append(queue.results, ToolCallResult{
 						ToolCall: tc,
@@ -980,6 +1092,20 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		var resultBlocks []anthropic.ContentBlockParamUnion
 		for _, r := range queue.Results() {
 			e.sessionBus.Publish(session.Event{Type: session.EventToolCallResult, Data: r.Result.Content})
+
+			// Fire PostToolUse or PostToolUseFailure hook.
+			if r.Result.IsError {
+				e.fireHookAsync(hooks.PostToolUseFailure, hooks.HookInput{
+					ToolName:  r.Name,
+					ToolInput: r.Result.Content,
+				})
+			} else {
+				e.fireHookAsync(hooks.PostToolUse, hooks.HookInput{
+					ToolName:  r.Name,
+					ToolInput: r.Result.Content,
+				})
+			}
+
 			e.events <- engine.ParsedEvent{
 				Type: "tool_result",
 				Data: &engine.ToolResultEvent{
@@ -1239,4 +1365,23 @@ func isOverloadError(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "529") || strings.Contains(msg, "overloaded")
+}
+
+// fireHook runs hooks for the given event synchronously and returns the output.
+// Returns nil output if no hooks are registered or all hooks return nil.
+func (e *DirectEngine) fireHook(event string, input hooks.HookInput) (*hooks.HookOutput, error) {
+	if e.hooksRunner == nil {
+		return nil, nil
+	}
+	input.SessionID = e.sessionID
+	return e.hooksRunner.Run(e.ctx, event, input)
+}
+
+// fireHookAsync runs hooks for the given event without blocking.
+func (e *DirectEngine) fireHookAsync(event string, input hooks.HookInput) {
+	if e.hooksRunner == nil {
+		return
+	}
+	input.SessionID = e.sessionID
+	e.hooksRunner.RunAsync(e.ctx, event, input)
 }

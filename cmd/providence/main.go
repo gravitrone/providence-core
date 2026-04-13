@@ -39,9 +39,15 @@ func newRootCommand() *cobra.Command {
 	cwd, _ := os.Getwd()
 	cfg := config.LoadMerged(cwd)
 
-	// Load .claude/settings.json for CC compatibility (env vars, tool permissions).
-	if _, err := config.LoadClaudeSettings(cwd); err != nil {
+	// Load .claude/settings.json for CC compatibility (env vars, tool permissions, hooks).
+	if claudeSettings, err := config.LoadClaudeSettings(cwd); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: .claude/settings.json: %v\n", err)
+	} else if claudeSettings != nil {
+		// Merge hooks from settings.json (lower priority than TOML config).
+		settingsHooks := claudeSettings.ParseHooks()
+		if len(cfg.Hooks.ToMap()) == 0 {
+			cfg.Hooks = settingsHooks
+		}
 	}
 
 	// Default engine from config, fallback to "claude".

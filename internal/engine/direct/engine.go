@@ -140,6 +140,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		tools.NewAskUserQuestionTool(nil), // event wiring comes in Phase 5
 		tools.NewEnterPlanModeTool(planState),
 		tools.NewExitPlanModeTool(planState),
+		tools.NewSkillTool(),
 	}
 
 	// Register computer use tools on macOS only.

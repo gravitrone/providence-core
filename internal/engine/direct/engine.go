@@ -16,6 +16,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/compact"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
+	"github.com/gravitrone/providence-core/internal/engine/subagent"
 )
 
 // MaxOutputTokensRecoveryLimit is the maximum number of times the engine will
@@ -72,6 +73,10 @@ type DirectEngine struct {
 	openrouterMode    bool
 	openrouterAPIKey  string
 	openrouterHistory []openrouterHistoryEntry
+
+	// Subagent support.
+	subagentRunner *subagent.Runner
+	apiKey         string // stored for sub-engine creation
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -168,7 +173,13 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		codexMode:        isCodex,
 		openrouterMode:   isOpenRouter,
 		openrouterAPIKey: openrouterKey,
+		subagentRunner:   subagent.NewRunner(),
+		apiKey:           cfg.APIKey,
 	}
+
+	// Register subagent TaskTool now that the engine exists for the executor.
+	taskTool := tools.NewTaskTool(e.subagentRunner, e.subagentExecutor)
+	registry.Register(taskTool)
 
 	var provider compact.Provider
 	switch {
@@ -205,6 +216,12 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	})
 
 	return e, nil
+}
+
+// SubagentRunner returns the engine's subagent runner for external polling
+// (e.g. the TUI checking for completed background tasks).
+func (e *DirectEngine) SubagentRunner() *subagent.Runner {
+	return e.subagentRunner
 }
 
 // SetRegistry replaces the tool registry (for use before first Send).
@@ -401,6 +418,61 @@ func formatRestoredToolMessage(message engine.RestoredMessage) string {
 		toolName = fmt.Sprintf("%s(%s)", toolName, message.ToolInput)
 	}
 	return fmt.Sprintf("[Tool: %s -> %s]", toolName, message.Content)
+}
+
+// subagentExecutor creates a child DirectEngine and runs a single-turn conversation,
+// returning the assistant's text output. Used as the subagent.Executor callback.
+func (e *DirectEngine) subagentExecutor(ctx context.Context, prompt string, agentType subagent.AgentType) (string, error) {
+	systemPrompt := agentType.SystemPrompt + "\n\n" + subagent.AntiRecursionPrompt
+
+	model := agentType.Model
+	if model == "inherit" || model == "" {
+		model = e.model
+	}
+
+	cfg := engine.EngineConfig{
+		Type:             engine.EngineTypeDirect,
+		SystemPrompt:     systemPrompt,
+		Model:            model,
+		APIKey:           e.apiKey,
+		WorkDir:          e.workDir,
+		Provider:         e.provider,
+		OpenRouterAPIKey: e.openrouterAPIKey,
+	}
+
+	sub, err := NewDirectEngine(cfg)
+	if err != nil {
+		return "", fmt.Errorf("create sub-engine: %w", err)
+	}
+	defer sub.Close()
+
+	if err := sub.Send(prompt); err != nil {
+		return "", fmt.Errorf("sub-engine send: %w", err)
+	}
+
+	var result strings.Builder
+	for ev := range sub.Events() {
+		if ctx.Err() != nil {
+			sub.Interrupt()
+			return "", ctx.Err()
+		}
+		switch ev.Type {
+		case "assistant":
+			if ae, ok := ev.Data.(*engine.AssistantEvent); ok {
+				for _, part := range ae.Message.Content {
+					if part.Type == "text" {
+						result.WriteString(part.Text)
+					}
+				}
+			}
+		case "result":
+			if re, ok := ev.Data.(*engine.ResultEvent); ok && re.IsError {
+				return "", fmt.Errorf("sub-engine error: %s", re.Result)
+			}
+			return result.String(), nil
+		}
+	}
+	return result.String(), nil
 }
 
 // agentLoop is the core loop: call API, stream response, execute tools, repeat.

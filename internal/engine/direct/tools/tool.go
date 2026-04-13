@@ -32,6 +32,11 @@ func NewRegistry(tools ...Tool) *Registry {
 	return r
 }
 
+// Register adds a tool to the registry, overwriting any existing tool with the same name.
+func (r *Registry) Register(t Tool) {
+	r.tools[t.Name()] = t
+}
+
 // Get returns a tool by name.
 func (r *Registry) Get(name string) (Tool, bool) {
 	t, ok := r.tools[name]

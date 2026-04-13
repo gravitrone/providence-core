@@ -1704,13 +1704,7 @@ func (at AgentTab) Hints() []components.HintItem {
 			{Key: "up", Desc: "select queue"},
 		}
 	}
-	// Show ctrl+o hint when there are messages to browse.
-	if len(at.messages) > 0 {
-		return []components.HintItem{
-			{Key: "ctrl+o", Desc: "freeze scroll"},
-		}
-	}
-	// No hints in idle/streaming - status line handles it.
+	// No extra hints in idle/streaming - status line handles it.
 	return nil
 }
 
@@ -1736,7 +1730,8 @@ func cwdShort() string {
 	return "~/" + filepath.Join(parts[len(parts)-2:]...)
 }
 
-// StatusLine shows model/session/cwd as hint-bar-style bordered pills.
+// StatusLine shows all status info as a single row of bordered pills:
+// [engine] [model] [session] [ctx%] [cwd] [ctrl+o freeze]
 func (at AgentTab) StatusLine() string {
 	modelName := at.modelDisplay()
 	if modelName == "default" {
@@ -1755,9 +1750,12 @@ func (at AgentTab) StatusLine() string {
 	}
 
 	items := []components.HintItem{
+		{Key: string(at.engineType), Desc: "engine"},
 		{Key: modelName, Desc: "model"},
 		{Key: session, Desc: "session"},
 	}
+
+	// Context % pill with color.
 	if at.engine != nil {
 		ctxWindow := engine.ContextWindowFor(at.model)
 		if ctxWindow > 0 {
@@ -1776,7 +1774,16 @@ func (at AgentTab) StatusLine() string {
 			items = append(items, components.TintedHint(fmt.Sprintf("%d%%", pct), "ctx", pillColor))
 		}
 	}
-	return components.StatusBarFromItems(items, 0)
+
+	// CWD as a pill.
+	items = append(items, components.HintItem{Key: cwdShort(), Desc: "cwd"})
+
+	// Freeze hint when there are messages to browse.
+	if len(at.messages) > 0 {
+		items = append(items, components.HintItem{Key: "ctrl+o", Desc: "freeze"})
+	}
+
+	return components.StatusBarFromItems(items, at.width)
 }
 
 // --- Internal Helpers ---

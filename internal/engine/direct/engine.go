@@ -970,7 +970,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		}
 
 		if streamErr != nil {
-			if isOverloadError(streamErr) && !e.fallbackActive {
+			if isFallbackTriggerable(streamErr) && !e.fallbackActive {
 				fallback := engine.FastForProvider(e.provider)
 				if fallback != "" && fallback != e.model {
 					// Tombstone any partial streaming content so UI can clear it.
@@ -978,6 +978,10 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 						Type: "tombstone",
 						Data: &engine.TombstoneEvent{Type: "tombstone", MessageIndex: -1},
 					}
+
+					// If partial content was streamed with tool_use blocks,
+					// synthesize error results so history stays consistent.
+					e.synthesizeErrorToolResults(accumulated)
 
 					previousModel := e.model
 					e.model = fallback
@@ -987,7 +991,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 						Type: "system_message",
 						Data: &engine.SystemMessageEvent{
 							Type:    "system_message",
-							Content: fmt.Sprintf("Model overloaded. Switched from %s to %s.", previousModel, fallback),
+							Content: fmt.Sprintf("Model unavailable (%s). Switched from %s to %s.", streamErr, previousModel, fallback),
 						},
 					}
 					continue
@@ -1479,6 +1483,24 @@ func isOverloadError(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "529") || strings.Contains(msg, "overloaded")
+}
+
+// isFallbackTriggerable returns true if the error warrants a model fallback.
+// Covers overload errors plus server-side failures (500, 502, 503) that commonly
+// occur mid-stream and indicate the primary model is temporarily unavailable.
+func isFallbackTriggerable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isOverloadError(err) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "500") ||
+		strings.Contains(msg, "502") ||
+		strings.Contains(msg, "503") ||
+		strings.Contains(msg, "server_error") ||
+		strings.Contains(msg, "internal_error")
 }
 
 // fireHook runs hooks for the given event synchronously and returns the output.

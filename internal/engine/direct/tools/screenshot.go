@@ -80,7 +80,7 @@ func (t *ScreenshotTool) Execute(ctx context.Context, input map[string]any) Tool
 		return ToolResult{Content: fmt.Sprintf("screenshot failed: %v", err), IsError: true}
 	}
 
-	// Read dimensions from the captured image
+	// Read dimensions from the captured image.
 	width, height := readPNGDimensions(path)
 
 	result := map[string]any{

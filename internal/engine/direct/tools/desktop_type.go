@@ -57,7 +57,7 @@ func (t *DesktopTypeTool) Execute(ctx context.Context, input map[string]any) Too
 		return ToolResult{Content: "either text or key is required", IsError: true}
 	}
 
-	// If both provided, type text first then send key
+	// If both provided, type text first then send key.
 	if text != "" {
 		if err := t.bridge.Type(ctx, text); err != nil {
 			return ToolResult{Content: fmt.Sprintf("type failed: %v", err), IsError: true}

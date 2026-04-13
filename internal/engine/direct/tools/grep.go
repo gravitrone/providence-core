@@ -132,7 +132,7 @@ func (g *GrepTool) Execute(ctx context.Context, input map[string]any) ToolResult
 	offset := paramInt(input, "offset", 0)
 	fileType := paramString(input, "type", "")
 
-	// -C is shorthand for both -A and -B
+	// -C is shorthand for both -A and -B.
 	if contextLines > 0 {
 		if afterCtx == 0 {
 			afterCtx = contextLines
@@ -142,13 +142,13 @@ func (g *GrepTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		}
 	}
 
-	// Try ripgrep first
+	// Try ripgrep first.
 	if rgAvailable() {
 		return g.executeRg(ctx, pattern, root, mode, headLimit, fileGlob,
 			afterCtx, beforeCtx, caseInsensitive, showLineNums, multiline, offset, fileType)
 	}
 
-	// Fallback: Go regex implementation (no context lines, limited features)
+	// Fallback: Go regex implementation (no context lines, limited features).
 	return g.executeFallback(ctx, pattern, root, mode, headLimit, fileGlob,
 		caseInsensitive, offset)
 }
@@ -198,7 +198,7 @@ func (g *GrepTool) executeRg(ctx context.Context, pattern, root, mode string,
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	// rg exits 1 when no matches found - that's not an error
+	// rg exits 1 when no matches found, not an error.
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if exitErr.ExitCode() == 1 {
@@ -218,14 +218,14 @@ func (g *GrepTool) executeRg(ctx context.Context, pattern, root, mode string,
 		return ToolResult{Content: ""}
 	}
 
-	// Apply offset
+	// Apply offset.
 	if offset > 0 && offset < len(lines) {
 		lines = lines[offset:]
 	} else if offset >= len(lines) {
 		return ToolResult{Content: ""}
 	}
 
-	// Apply head_limit
+	// Apply head limit.
 	if headLimit > 0 && len(lines) > headLimit {
 		lines = lines[:headLimit]
 	}
@@ -396,12 +396,12 @@ func grepCount(re *regexp.Regexp, files []string, limit, offset int) ToolResult 
 		}
 	}
 
-	// sort by count descending
+	// Sort by count descending.
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].count > results[j].count
 	})
 
-	// Apply offset
+	// Apply offset.
 	if offset > 0 && offset < len(results) {
 		results = results[offset:]
 	} else if offset > 0 {
@@ -431,13 +431,13 @@ func matchesInFile(re *regexp.Regexp, path string) bool {
 	}
 	defer f.Close()
 
-	// quick binary check on first chunk
+	// Quick binary check on first chunk.
 	buf := make([]byte, 512)
 	n, _ := f.Read(buf)
 	if n > 0 {
 		for _, b := range buf[:n] {
 			if b == 0 {
-				return false // skip binary
+				return false // binary file, skip
 			}
 		}
 	}
@@ -460,7 +460,7 @@ func countMatchesInFile(re *regexp.Regexp, path string) int {
 	}
 	defer f.Close()
 
-	// skip binary
+	// Skip binary.
 	buf := make([]byte, 512)
 	n, _ := f.Read(buf)
 	if n > 0 {

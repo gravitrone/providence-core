@@ -6,20 +6,17 @@ import (
 	"time"
 )
 
-// SleepTool pauses the ember loop for a specified duration.
+// SleepTool pauses the agent loop for a specified duration.
 // Prefer this over Bash(sleep) - doesn't hold a shell process.
-// Cache-aware: sleeping >5min forces cache miss on next wake.
+// Cache-aware: sleeping >5 min forces cache miss on next wake.
 type SleepTool struct{}
 
-// Name returns the tool name.
 func (s SleepTool) Name() string { return "Sleep" }
-
-// Description returns a human-readable description.
 func (s SleepTool) Description() string {
 	return "Sleep for a specified duration in milliseconds. Use this instead of Bash(sleep) - it doesn't hold a shell process and can be interrupted by user input."
 }
+func (s SleepTool) ReadOnly() bool { return true }
 
-// InputSchema returns the JSON Schema for the tool input.
 func (s SleepTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -35,16 +32,12 @@ func (s SleepTool) InputSchema() map[string]any {
 	}
 }
 
-// ReadOnly returns true - sleep doesn't modify anything.
-func (s SleepTool) ReadOnly() bool { return true }
-
 // Prompt implements ToolPrompter.
 func (s SleepTool) Prompt() string {
 	return `Sleep for a specified duration. Prefer this over Bash(sleep) - it doesn't hold a shell process and can be interrupted by user input. Cache-aware: sleeping >5 minutes causes a prompt cache miss, so prefer shorter intervals.`
 }
 
-// Execute blocks for the specified duration. Cancellable via context
-// (e.g. when the user sends a message during sleep).
+// Execute blocks for the specified duration, cancellable via context.
 func (s SleepTool) Execute(ctx context.Context, input map[string]any) ToolResult {
 	ms := paramInt(input, "duration_ms", 1000)
 	if ms < 100 {

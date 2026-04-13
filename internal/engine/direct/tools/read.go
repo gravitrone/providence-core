@@ -95,7 +95,7 @@ func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		return ToolResult{Content: "file_path is required", IsError: true}
 	}
 
-	// clean the path
+	// Clean the path.
 	path = filepath.Clean(path)
 
 	// Block device file access.
@@ -103,10 +103,10 @@ func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		return ToolResult{Content: "Reading device files is not supported.", IsError: true}
 	}
 
-	// clean extension for routing
+	// Clean extension for routing.
 	ext := strings.ToLower(filepath.Ext(path))
 
-	// check if image
+	// Check if image.
 	if mime, ok := imageExts[ext]; ok {
 		return r.readImage(path, mime)
 	}
@@ -130,7 +130,7 @@ func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		return r.readNotebook(path)
 	}
 
-	// check if binary
+	// Check if binary.
 	if isBinaryFile(path) {
 		return ToolResult{Content: "binary file, cannot read", IsError: true}
 	}
@@ -146,7 +146,7 @@ func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult
 
 	var b strings.Builder
 	scanner := bufio.NewScanner(f)
-	// increase buffer for long lines
+	// Increase buffer for long lines.
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
 
 	lineNum := 0
@@ -178,7 +178,7 @@ func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult
 
 	content := b.String()
 
-	// file-unchanged-since-last-read detection
+	// File-unchanged-since-last-read detection.
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 	r.cacheMu.Lock()
 	if cached, ok := r.readCache[path]; ok && cached == hash {
@@ -303,12 +303,12 @@ func isBinaryFile(path string) bool {
 	}
 	buf = buf[:n]
 
-	// check for null bytes (strong binary indicator)
+	// Check for null bytes (strong binary indicator).
 	for _, b := range buf {
 		if b == 0 {
 			return true
 		}
 	}
-	// check if valid UTF-8
+	// Check if valid UTF-8.
 	return !utf8.Valid(buf)
 }

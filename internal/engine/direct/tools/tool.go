@@ -102,7 +102,7 @@ func DefaultToolPrompts() string {
 	return CollectToolPrompts(reg)
 }
 
-// -- type-safe param helpers --
+// --- Type-Safe Param Helpers ---
 
 func paramString(input map[string]any, key string, fallback string) string {
 	v, ok := input[key]

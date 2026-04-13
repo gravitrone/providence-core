@@ -97,7 +97,7 @@ func (g *GlobTool) Execute(ctx context.Context, input map[string]any) ToolResult
 			return nil // skip inaccessible files
 		}
 
-		// skip excluded directories
+		// Skip excluded directories.
 		if info.IsDir() {
 			if skipDirs[info.Name()] {
 				return filepath.SkipDir
@@ -111,12 +111,12 @@ func (g *GlobTool) Execute(ctx context.Context, input map[string]any) ToolResult
 			return filepath.SkipAll
 		}
 
-		// skip excluded files
+		// Skip excluded files.
 		if skipFiles[info.Name()] {
 			return nil
 		}
 
-		// match against pattern
+		// Match against pattern.
 		matched, matchErr := filepath.Match(filepath.Base(fullPattern), info.Name())
 		if matchErr != nil {
 			return fmt.Errorf("invalid glob pattern %q: %w", fullPattern, matchErr)
@@ -148,7 +148,7 @@ func (g *GlobTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		return ToolResult{Content: fmt.Sprintf("walk error: %v", err), IsError: true}
 	}
 
-	// sort by mtime descending (most recent first)
+	// Sort by mtime descending (most recent first).
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].mtime > results[j].mtime
 	})

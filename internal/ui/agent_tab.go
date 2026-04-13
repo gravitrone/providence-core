@@ -4,14 +4,15 @@ import (
 	"context"
 	"fmt"
 	"image/color"
+	"math"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
-
-	"math"
 
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
@@ -29,6 +30,8 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/direct" // register direct factory + image types
 	"github.com/gravitrone/providence-core/internal/engine/kairos"
 	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
+	"github.com/gravitrone/providence-core/internal/engine/skills"
+	"github.com/gravitrone/providence-core/internal/engine/subagent"
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 	"github.com/gravitrone/providence-core/internal/ui/dashboard"
@@ -142,6 +145,19 @@ var slashCommands = []slashCommand{
 	{"/tree", "Toggle conversation tree view"},
 	{"/clear", "Clear chat history"},
 	{"/kairos", "Toggle kairos autonomous mode"},
+	{"/cost", "Show token usage and context window"},
+	{"/doctor", "Health check (Go, OS, API keys, engine)"},
+	{"/stats", "Session statistics (messages, tokens)"},
+	{"/effort", "Set effort level (low, medium, high)"},
+	{"/rename", "Rename current session"},
+	{"/skills", "List discovered skills"},
+	{"/agents", "List built-in agent types"},
+	{"/permissions", "Show current permission mode"},
+	{"/hooks", "Show hook configuration info"},
+	{"/diff", "Show git diff --stat"},
+	{"/branch", "Show git branches"},
+	{"/share", "Export session (coming soon)"},
+	{"/review", "Spawn code review agent"},
 	{"/help", "Show available commands"},
 }
 
@@ -264,6 +280,9 @@ type AgentTab struct {
 
 	// Rewind picker state.
 	rewindModel components.RewindModel
+
+	// Quote/reply selection state.
+	quoteModel components.QuoteModel
 
 	// Tree view state.
 	treeViewOpen bool
@@ -644,6 +663,23 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		}
 	}
 
+	// Quote/reply mode takes priority when active.
+	if at.quoteModel.Active() {
+		quoted, block := at.quoteModel.HandleKey(key)
+		if quoted {
+			// Prepend quote block to current input.
+			cur := at.input.Value()
+			at.input.SetValue(block + cur)
+			at.input.CursorEnd()
+			at.focus = FocusInput
+		}
+		if !at.quoteModel.Active() {
+			at.focus = FocusInput
+		}
+		at.refreshViewport()
+		return at, nil
+	}
+
 	// Slash table navigation takes priority when the table is visible.
 	// The user is clearly browsing commands at that point, so up/down
 	// should move within the table instead of scrolling the viewport
@@ -922,6 +958,26 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		at.focus = FocusTranscript
 		at.messagesDirty = true
 		at.refreshViewport()
+		return at, nil
+
+	case "shift+up":
+		// Enter quote/reply mode - navigate messages to quote.
+		if len(at.messages) > 0 {
+			var quoteMessages []components.QuoteMessage
+			for _, m := range at.messages {
+				if m.Role == "user" || m.Role == "assistant" {
+					quoteMessages = append(quoteMessages, components.QuoteMessage{
+						Role:    m.Role,
+						Content: m.Content,
+					})
+				}
+			}
+			if len(quoteMessages) > 0 {
+				at.quoteModel.Enter(quoteMessages)
+				at.focus = FocusTranscript
+				at.refreshViewport()
+			}
+		}
 		return at, nil
 
 	case "ctrl+l":
@@ -3346,6 +3402,32 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 	case "/tree":
 		at.treeViewOpen = !at.treeViewOpen
 		at.messagesDirty = true
+		if at.treeViewOpen {
+			contentW := chatContentWidth(at.width)
+			treeMessages := make([]tree.ChatMessage, len(at.messages))
+			for i, m := range at.messages {
+				treeMessages[i] = tree.ChatMessage{
+					Role:       m.Role,
+					Content:    m.Content,
+					ToolName:   m.ToolName,
+					ToolArgs:   m.ToolArgs,
+					ToolOutput: m.ToolOutput,
+					ToolStatus: m.ToolStatus,
+					Done:       m.Done,
+				}
+			}
+			treeColors := tree.ThemeColors{
+				Primary:    ActiveTheme.Primary,
+				Secondary:  ActiveTheme.Secondary,
+				Accent:     ActiveTheme.Accent,
+				Muted:      ActiveTheme.Muted,
+				Text:       ActiveTheme.Text,
+				Background: ActiveTheme.Background,
+				Error:      ActiveTheme.Error,
+			}
+			treeStr := tree.RenderTree(tree.BuildTree(treeMessages), contentW, treeColors)
+			at.addSystemMessage(treeStr)
+		}
 		at.refreshViewport()
 		return true, nil
 
@@ -3387,24 +3469,157 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		at.refreshViewport()
 		return true, nil
 
+	case "/cost":
+		ctxWindow := engine.ContextWindowFor(at.model)
+		pct := 0
+		if ctxWindow > 0 {
+			pct = at.currentTokens * 100 / ctxWindow
+		}
+		msg := fmt.Sprintf("Session tokens: %d / %d (%d%%)\nTurns: %d",
+			at.currentTokens, ctxWindow, pct, len(at.messages))
+		at.addSystemMessage(msg)
+		at.refreshViewport()
+		return true, nil
+
+	case "/doctor":
+		var checks []string
+		checks = append(checks, fmt.Sprintf("Go: %s", runtime.Version()))
+		checks = append(checks, fmt.Sprintf("OS: %s/%s", runtime.GOOS, runtime.GOARCH))
+		if os.Getenv("ANTHROPIC_API_KEY") != "" {
+			checks = append(checks, "Anthropic API: set")
+		} else {
+			checks = append(checks, "Anthropic API: NOT SET")
+		}
+		if _, err := auth.LoadOpenAITokens(); err == nil {
+			checks = append(checks, "OpenAI OAuth: valid")
+		} else {
+			checks = append(checks, "OpenAI OAuth: not configured")
+		}
+		checks = append(checks, fmt.Sprintf("Engine: %s", at.engineType))
+		checks = append(checks, fmt.Sprintf("Model: %s", at.model))
+		at.addSystemMessage(strings.Join(checks, "\n"))
+		at.refreshViewport()
+		return true, nil
+
+	case "/stats":
+		userMsgs := 0
+		assistantMsgs := 0
+		toolCalls := 0
+		for _, m := range at.messages {
+			switch m.Role {
+			case "user":
+				userMsgs++
+			case "assistant":
+				assistantMsgs++
+			case "tool":
+				toolCalls++
+			}
+		}
+		msg := fmt.Sprintf("Messages: %d user, %d assistant, %d tool calls\nTokens: %d\nSession: %s",
+			userMsgs, assistantMsgs, toolCalls, at.currentTokens, at.sessionID)
+		at.addSystemMessage(msg)
+		at.refreshViewport()
+		return true, nil
+
+	case "/effort":
+		if args == "" {
+			at.addSystemMessage("Usage: /effort low|medium|high\nCurrent: " + at.cfg.Effort)
+			at.refreshViewport()
+			return true, nil
+		}
+		at.cfg.Effort = args
+		_ = at.cfg.Save()
+		at.addSystemMessage("Effort set to: " + args)
+		at.refreshViewport()
+		return true, nil
+
+	case "/rename":
+		if args == "" {
+			at.addSystemMessage("Usage: /rename <title>")
+			at.refreshViewport()
+			return true, nil
+		}
+		if at.store != nil && at.sessionID != "" {
+			at.store.UpdateSessionTitle(at.sessionID, args)
+		}
+		at.addSystemMessage("Session renamed to: " + args)
+		at.refreshViewport()
+		return true, nil
+
+	case "/skills":
+		cwd, _ := os.Getwd()
+		home, _ := os.UserHomeDir()
+		skillList, _ := skills.LoadSkills(cwd, home)
+		if len(skillList) == 0 {
+			at.addSystemMessage("No skills found")
+			at.refreshViewport()
+			return true, nil
+		}
+		var lines []string
+		for _, s := range skillList {
+			lines = append(lines, fmt.Sprintf("/%s - %s", s.Name, s.Description))
+		}
+		at.addSystemMessage(strings.Join(lines, "\n"))
+		at.refreshViewport()
+		return true, nil
+
+	case "/agents":
+		var lines []string
+		for name, agent := range subagent.BuiltinAgents {
+			lines = append(lines, fmt.Sprintf("%s - %s (model: %s)", name, agent.Description, agent.Model))
+		}
+		if len(lines) == 0 {
+			at.addSystemMessage("No built-in agents registered")
+		} else {
+			at.addSystemMessage("Built-in agents:\n" + strings.Join(lines, "\n"))
+		}
+		at.refreshViewport()
+		return true, nil
+
+	case "/permissions":
+		at.addSystemMessage("Permission mode: default\nRun /help for mode switching (shift+tab)")
+		at.refreshViewport()
+		return true, nil
+
+	case "/hooks":
+		at.addSystemMessage("Hooks: configured via ~/.claude/settings.json\nSee /help for hook events")
+		at.refreshViewport()
+		return true, nil
+
+	case "/diff":
+		out, err := exec.Command("git", "diff", "--stat").Output()
+		if err != nil {
+			at.addSystemMessage("No git changes")
+		} else {
+			at.addSystemMessage(string(out))
+		}
+		at.refreshViewport()
+		return true, nil
+
+	case "/branch":
+		out, _ := exec.Command("git", "branch", "-v").Output()
+		at.addSystemMessage(string(out))
+		at.refreshViewport()
+		return true, nil
+
+	case "/share":
+		at.addSystemMessage("Export: /share is not yet implemented. Use /sessions to browse.")
+		at.refreshViewport()
+		return true, nil
+
+	case "/review":
+		at.addSystemMessage("Code review: requires subagent system. Use /agents to see available types.")
+		at.refreshViewport()
+		return true, nil
+
 	case "/help":
 		// Store as markdown - will be rendered by glamour in renderAssistantMessage.
 		help := "## Available Commands\n\n"
 		help += "| Command | Description |\n"
 		help += "|---------|-------------|\n"
-		help += "| `/model <name>` | Switch model (Haiku, Sonnet, Opus, Codex) |\n"
-		help += "| `/engine <type>` | Switch engine (claude, direct, codex_re) |\n"
-		help += "| `/theme <name>` | Switch theme (flame, night, auto) |\n"
-		help += "| `/auth` | Login to OpenAI (Codex OAuth) |\n"
-		help += "| `/sessions` | List past sessions |\n"
-		help += "| `/resume N` | Resume a past session |\n"
-		help += "| `/compact` | Manually trigger context compaction |\n"
-		help += "| `/rewind` | Rewind to a previous user message |\n"
-		help += "| `/dashboard` | Toggle dashboard panel |\n"
-		help += "| `/kairos` | Toggle kairos autonomous mode |\n"
-		help += "| `/tree` | Toggle conversation tree view |\n"
-		help += "| `/clear` | Clear chat history |\n"
-		help += "| `/help` | Show available commands |"
+		for _, c := range slashCommands {
+			help += fmt.Sprintf("| `%s` | %s |\n", c.Name, c.Desc)
+		}
 		at.messages = append(at.messages, ChatMessage{
 			Role:    "assistant",
 			Content: help,

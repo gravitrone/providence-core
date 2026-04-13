@@ -43,6 +43,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/ui/dashboard"
 	"github.com/gravitrone/providence-core/internal/ui/panels"
 	"github.com/gravitrone/providence-core/internal/ui/picker"
+	"github.com/gravitrone/providence-core/internal/ui/sidebar"
 	"github.com/gravitrone/providence-core/internal/ui/tree"
 )
 
@@ -374,6 +375,9 @@ type AgentTab struct {
 	tabIndTarget float64
 	dashboard    dashboard.DashboardModel
 
+	// Left sidebar agent panel (replaces tabs in future phases).
+	agentSidebar sidebar.Sidebar
+
 	// Context portability: pending state to restore after engine switch.
 	pendingPortableState *engine.ConversationState
 
@@ -544,6 +548,7 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		tab:       tabChat,
 		tabSpring: harmonica.NewSpring(harmonica.FPS(60), 10.0, 1.0),
 		dashboard:        dashboard.New(),
+		agentSidebar:     sidebar.New(),
 		ember:            ember.New(),
 		discoveredSkills: discoveredSkills,
 		customAgents:     customAgents,
@@ -677,6 +682,11 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 		// Tab indicator spring animation.
 		at.tabIndicator, at.tabIndVel = at.tabSpring.Update(at.tabIndicator, at.tabIndVel, at.tabIndTarget)
 		at.notifications.Tick()
+		// Sync sidebar with subagent runner state and tick animations/eviction.
+		if de, ok := at.engine.(*direct.DirectEngine); ok && de.SubagentRunner() != nil {
+			at.agentSidebar.Sync(de.SubagentRunner().List())
+		}
+		at.agentSidebar.Tick()
 		// Poll for completed background subagents and inject notifications.
 		at.drainCompletedSubagents()
 		at.refreshViewport()
@@ -1059,6 +1069,19 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 	// handle keys there instead of the normal input path.
 	if at.focus == FocusTranscript {
 		return at.handleTranscriptKey(key)
+	}
+
+	// Focus-based routing: when sidebar is focused, route keys there.
+	if at.focus == FocusSidebar {
+		return at.handleSidebarKey(key)
+	}
+
+	// Left arrow: focus sidebar when agents exist and input is empty.
+	if key == "left" && strings.TrimSpace(at.input.Value()) == "" && at.agentSidebar.HasAgents() {
+		at.agentSidebar.FocusSidebar()
+		at.focus = FocusSidebar
+		at.refreshViewport()
+		return at, nil
 	}
 
 	switch key {
@@ -1675,6 +1698,52 @@ func (at AgentTab) handleTranscriptKey(key string) (AgentTab, tea.Cmd) {
 	return at, nil
 }
 
+// handleSidebarKey routes keys to the sidebar panel and processes action results.
+func (at AgentTab) handleSidebarKey(key string) (AgentTab, tea.Cmd) {
+	action := at.agentSidebar.HandleKey(key)
+
+	switch action {
+	case "unfocus":
+		at.focus = FocusInput
+		at.refreshViewport()
+		return at, nil
+
+	case "kill":
+		agentID := at.agentSidebar.SelectedAgentID()
+		if agentID != "" {
+			if de, ok := at.engine.(*direct.DirectEngine); ok && de.SubagentRunner() != nil {
+				_ = de.SubagentRunner().Kill(agentID)
+				at.addSystemMessage(fmt.Sprintf("Killed agent %s", agentID))
+				at.refreshViewport()
+			}
+		}
+		return at, nil
+
+	case "send":
+		agentID := at.agentSidebar.SelectedAgentID()
+		msg := at.agentSidebar.SendMessage()
+		if agentID != "" && msg != "" {
+			if de, ok := at.engine.(*direct.DirectEngine); ok && de.SubagentRunner() != nil {
+				if err := de.SubagentRunner().SendTo(agentID, msg); err != nil {
+					at.addSystemMessage(fmt.Sprintf("Send failed: %s", err))
+				} else {
+					at.addSystemMessage(fmt.Sprintf("Sent message to %s", agentID))
+				}
+				at.refreshViewport()
+			}
+		}
+		return at, nil
+
+	case "expand":
+		// Detail view toggled - sidebar handles its own expanded state.
+		at.refreshViewport()
+		return at, nil
+	}
+
+	at.refreshViewport()
+	return at, nil
+}
+
 func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 	ev := msg.Event
 
@@ -2263,12 +2332,49 @@ func (at AgentTab) View(width, height int) string {
 	}
 
 	// Content based on active tab.
+	contentH := height - headerLines
 	var content string
 	switch at.tab {
 	case tabChat:
-		content = at.renderChatPane(width, height-headerLines)
+		// When the sidebar has agents, render sidebar + chat side by side.
+		if at.agentSidebar.HasAgents() && at.agentSidebar.Position > 0.01 {
+			sidebarPct := 25
+			if at.agentSidebar.Expanded {
+				sidebarPct = 60
+			}
+			// Apply spring position for slide animation.
+			rawW := width * sidebarPct / 100
+			sidebarW := int(float64(rawW) * at.agentSidebar.Position)
+			if sidebarW < 12 {
+				sidebarW = 12
+			}
+			chatW := width - sidebarW - 1 // -1 for divider
+			if chatW < 20 {
+				chatW = 20
+				sidebarW = width - chatW - 1
+			}
+
+			var sidebarView string
+			if at.agentSidebar.Expanded {
+				agent := at.agentSidebar.SelectedAgent()
+				if agent != nil {
+					sidebarView = sidebar.RenderDetail(*agent, sidebarW, contentH,
+						at.agentSidebar.DetailScroll, at.flameFrame, at.agentSidebar.DetailColors())
+				} else {
+					sidebarView = at.agentSidebar.View(sidebarW, contentH, at.flameFrame)
+				}
+			} else {
+				sidebarView = at.agentSidebar.View(sidebarW, contentH, at.flameFrame)
+			}
+
+			chatView := at.renderChatPane(chatW, contentH)
+			divider := renderVerticalDivider(contentH, ActiveTheme.Border)
+			content = lipgloss.JoinHorizontal(lipgloss.Top, sidebarView, divider, chatView)
+		} else {
+			content = at.renderChatPane(width, contentH)
+		}
 	default:
-		content = at.renderDashboardTab(width, height-headerLines)
+		content = at.renderDashboardTab(width, contentH)
 	}
 
 	return header + "\n" + content

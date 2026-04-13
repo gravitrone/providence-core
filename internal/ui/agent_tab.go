@@ -1799,19 +1799,47 @@ func (at AgentTab) View(width, height int) string {
 		at.Resize(width, height)
 	}
 
-	// Tab bar + content routing.
-	tabBar := at.renderTabBar()
+	// Nebula layout: Banner + Subtitle + Underline above tabs when few messages.
+	// Once messages fill the viewport, collapse to just tabs.
+	contentW := chatContentWidth(width)
+	showBanner := len(at.messages) <= 2 // show banner on initial/near-empty state
 
-	// Content based on active tab. -2 for tab bar + underline.
+	var header string
+	headerLines := 2 // tab bar + underline always
+	if showBanner {
+		banner := centerBlockUniform(
+			RenderBannerAnimated(at.flameFrame, at.streaming),
+			contentW,
+		)
+		subtitle := lipgloss.NewStyle().
+			Foreground(ColorMuted).
+			Width(contentW).
+			Align(lipgloss.Center).
+			Render(bannerSubtitle)
+		subtitleUnderline := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#3a2a1a")).
+			Width(contentW).
+			Align(lipgloss.Center).
+			Render(strings.Repeat("─", lipgloss.Width(bannerSubtitle)+4))
+
+		bannerBlock := banner + "\n" + subtitle + "\n" + subtitleUnderline
+		bannerH := lipgloss.Height(bannerBlock)
+		headerLines += bannerH + 1 // +1 for the newline between banner and tabs
+		header = bannerBlock + "\n" + at.renderTabBar()
+	} else {
+		header = at.renderTabBar()
+	}
+
+	// Content based on active tab.
 	var content string
 	switch at.tab {
 	case tabChat:
-		content = at.renderChatPane(width, height-2)
+		content = at.renderChatPane(width, height-headerLines)
 	default:
-		content = at.renderDashboardTab(width, height-2)
+		content = at.renderDashboardTab(width, height-headerLines)
 	}
 
-	return tabBar + "\n" + content
+	return header + "\n" + content
 }
 
 // renderTabBar renders the horizontal tab strip at the top of the view.
@@ -2463,12 +2491,6 @@ func (at *AgentTab) updateLastPermissionStatus(status string) {
 }
 
 func (at *AgentTab) refreshViewport() {
-	// Banner animates every tick (cheap).
-	banner := centerBlockUniform(
-		RenderBannerAnimated(at.flameFrame, at.streaming),
-		chatContentWidth(at.width),
-	)
-
 	// Messages re-render when dirty, streaming, animating, viz breathing, or batch tools animating.
 	// When idle with no changes, use the cached render to avoid flicker.
 	hasViz := at.hasVizMessages()
@@ -2479,7 +2501,7 @@ func (at *AgentTab) refreshViewport() {
 		at.messagesDirty = false
 	}
 
-	content := banner + "\n" + at.cachedMessages
+	content := at.cachedMessages
 
 	// Overlay: tree view replaces message content when active.
 	if at.treeViewOpen && len(at.messages) > 0 {
@@ -2506,7 +2528,7 @@ func (at *AgentTab) refreshViewport() {
 		}
 		nodes := tree.BuildTree(treeMsgs)
 		treeContent := tree.RenderTree(nodes, chatContentWidth(at.width), treeTheme)
-		content = banner + "\n" + treeContent
+		content = treeContent
 	}
 
 	// Overlay: rewind picker appended at bottom when active.
@@ -3070,13 +3092,13 @@ func (at AgentTab) renderPermissionMessage(msg ChatMessage, contentW int) string
 
 	switch msg.ToolStatus {
 	case "success":
-		// Collapsed: ✓ ToolName args in green border.
+		// Collapsed: ✓ ToolName args in green pulsating border.
 		icon := ToolIconSuccessStyle.Render("✓")
 		line := icon + " " + lipgloss.NewStyle().Foreground(c("#5fa8d0")).Bold(true).Render(msg.ToolName) +
 			" " + ToolArgsStyle.Render(msg.ToolArgs)
 		box := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(c("#50C878")).
+			BorderForeground(pulseColor(at.flameFrame, "#50C878")).
 			Padding(0, 1).
 			Width(dialogW).
 			Render(line)
@@ -3141,7 +3163,7 @@ func (at AgentTab) renderPermissionMessage(msg ChatMessage, contentW int) string
 
 		box := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorSecondary).
+			BorderForeground(pulseColor(at.flameFrame, ActiveTheme.Secondary)).
 			Padding(0, 1).
 			Width(dialogW).
 			Render(inner)

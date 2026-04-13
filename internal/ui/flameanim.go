@@ -258,6 +258,18 @@ func emberBreatheD(frame int) color.Color {
 	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", r, g, b))
 }
 
+// pulseColor returns a color that breathes between a dimmed and full version of baseHex.
+// Use for pulsating borders on permission dialogs and completed tool boxes.
+func pulseColor(frame int, baseHex string) color.Color {
+	t := (math.Sin(float64(frame)*0.14) + 1.0) / 2.0
+	dimR, dimG, dimB := hexToRGB(darkenHex(baseHex, 0.4))
+	fullR, fullG, fullB := hexToRGB(baseHex)
+	r := uint8(float64(dimR) + t*float64(int(fullR)-int(dimR)))
+	g := uint8(float64(dimG) + t*float64(int(fullG)-int(dimG)))
+	b := uint8(float64(dimB) + t*float64(int(fullB)-int(dimB)))
+	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", r, g, b))
+}
+
 // providenceGlamourStyle returns a glamour StyleConfig themed for Providence.
 func providenceGlamourStyle() ansi.StyleConfig {
 	style := glamourStyles.DarkStyleConfig

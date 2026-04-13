@@ -1747,17 +1747,34 @@ func (at AgentTab) View(width, height int) string {
 
 // renderTabBar renders the horizontal tab strip at the top of the view.
 func (at AgentTab) renderTabBar() string {
-	var tabs []string
-	for i, name := range tabNames {
-		style := lipgloss.NewStyle().Padding(0, 1)
-		if i == at.tab {
-			style = style.Bold(true).Foreground(ColorPrimary)
-		} else {
-			style = style.Foreground(ColorMuted)
-		}
-		tabs = append(tabs, style.Render(name))
+	animTab := int(math.Round(at.tabIndicator))
+	if animTab < 0 {
+		animTab = 0
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+	if animTab >= tabCount {
+		animTab = tabCount - 1
+	}
+
+	segments := make([]string, 0, len(tabNames))
+	for i, name := range tabNames {
+		isActive := i == at.tab
+		isAnimating := i == animTab && animTab != at.tab
+
+		if isActive {
+			if at.tabNav {
+				segments = append(segments, TabFocusStyle.Render(name))
+			} else {
+				segments = append(segments, TabActiveStyle.Render(name))
+			}
+		} else if isAnimating {
+			segments = append(segments, TabTrailStyle.Render(name))
+		} else {
+			segments = append(segments, TabInactiveStyle.Render(name))
+		}
+	}
+
+	tabRow := lipgloss.JoinHorizontal(lipgloss.Top, segments...)
+	return lipgloss.NewStyle().Width(at.width).Align(lipgloss.Center).Render(tabRow)
 }
 
 // switchTab changes the active tab and kicks off the indicator spring.

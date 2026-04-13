@@ -94,6 +94,8 @@ var (
 	BannerStyle       lipgloss.Style
 	BannerAccentStyle lipgloss.Style
 	TabActiveStyle    lipgloss.Style
+	TabFocusStyle     lipgloss.Style
+	TabTrailStyle     lipgloss.Style
 	TabInactiveStyle  lipgloss.Style
 	StatusBarStyle    lipgloss.Style
 	SelectedStyle     lipgloss.Style
@@ -187,6 +189,17 @@ func reapplyStyles() {
 	TabActiveStyle = lipgloss.NewStyle().
 		Foreground(ColorBackground).
 		Background(ColorPrimary).
+		Bold(true).
+		Padding(0, 1)
+
+	TabFocusStyle = lipgloss.NewStyle().
+		Foreground(ColorBackground).
+		Background(ColorSecondary).
+		Bold(true).
+		Padding(0, 1)
+
+	TabTrailStyle = lipgloss.NewStyle().
+		Foreground(ColorSecondary).
 		Bold(true).
 		Padding(0, 1)
 

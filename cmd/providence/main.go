@@ -1,11 +1,12 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
@@ -14,6 +15,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine"
 	_ "github.com/gravitrone/providence-core/internal/engine/claude"
 	_ "github.com/gravitrone/providence-core/internal/engine/direct"
+	"github.com/gravitrone/providence-core/internal/engine/headless"
 	"github.com/gravitrone/providence-core/internal/engine/plugin"
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui"
@@ -33,6 +35,10 @@ var engineFlag string
 
 // headlessFlag enables headless NDJSON mode.
 var headlessFlag bool
+
+// outputFormat and inputFormat are CC-compat aliases for --headless.
+var outputFormat string
+var inputFormat string
 
 // NewRootCommand builds the root cobra command.
 func newRootCommand() *cobra.Command {
@@ -61,15 +67,12 @@ func newRootCommand() *cobra.Command {
 		Short: "The Profaned Core - autonomous AI harness",
 		Long:  "providence: autonomous AI harness - terminal, web, and beyond.",
 		RunE: func(_ *cobra.Command, _ []string) error {
+			// --output-format stream-json and --input-format stream-json are CC-compat aliases.
+			if outputFormat == "stream-json" || inputFormat == "stream-json" {
+				headlessFlag = true
+			}
 			if headlessFlag {
-				st, err := store.Open(store.DefaultDBPath())
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "warning: session db: %v\n", err)
-				}
-				if st != nil {
-					defer st.Close()
-				}
-				return runHeadless(engineFlag, cfg, st)
+				return runHeadless(engineFlag, cfg)
 			}
 			return runTUI(engineFlag, cfg)
 		},
@@ -79,6 +82,8 @@ func newRootCommand() *cobra.Command {
 
 	root.Flags().StringVar(&engineFlag, "engine", engineDefault, "AI engine backend (claude, direct, openai)")
 	root.Flags().BoolVar(&headlessFlag, "headless", false, "Run in headless NDJSON mode")
+	root.Flags().StringVar(&outputFormat, "output-format", "", "Output format (stream-json enables headless)")
+	root.Flags().StringVar(&inputFormat, "input-format", "", "Input format (stream-json enables headless)")
 
 	root.RegisterFlagCompletionFunc("engine", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return []string{"claude", "direct"}, cobra.ShellCompDirectiveNoFileComp
@@ -160,32 +165,8 @@ func init() {
 
 // --- Headless NDJSON Mode ---
 
-// headlessInitEvent is emitted on stdout when headless mode starts.
-type headlessInitEvent struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype"`
-	Model   string `json:"model,omitempty"`
-	Engine  string `json:"engine,omitempty"`
-}
-
-// headlessUserMsg is the expected input format on stdin.
-type headlessUserMsg struct {
-	Type    string `json:"type"`
-	Message struct {
-		Content string `json:"content"`
-	} `json:"message"`
-}
-
-// headlessOutputEvent wraps engine events for NDJSON output.
-type headlessOutputEvent struct {
-	Type    string `json:"type"`
-	Subtype string `json:"subtype,omitempty"`
-	Content string `json:"content,omitempty"`
-	Error   string `json:"error,omitempty"`
-}
-
-// runHeadless runs the engine in headless NDJSON mode (stdin -> engine -> stdout).
-func runHeadless(engineType string, cfg config.Config, _ *store.Store) error {
+// runHeadless runs the engine in headless NDJSON mode using headless.Server.
+func runHeadless(engineType string, cfg config.Config) error {
 	wd, _ := os.Getwd()
 
 	eng, err := engine.NewEngine(engine.EngineConfig{
@@ -198,67 +179,19 @@ func runHeadless(engineType string, cfg config.Config, _ *store.Store) error {
 	if err != nil {
 		return fmt.Errorf("failed to create engine: %w", err)
 	}
-	defer eng.Close()
 
-	enc := json.NewEncoder(os.Stdout)
+	srv := headless.NewServer(eng, os.Stdin, os.Stdout, cfg.Model, engineType)
 
-	// Emit init event.
-	_ = enc.Encode(headlessInitEvent{
-		Type:    "system",
-		Subtype: "init",
-		Model:   cfg.Model,
-		Engine:  engineType,
-	})
+	// Wire up signal handling for clean shutdown.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	scanner := bufio.NewScanner(os.Stdin)
-	// Allow large messages (1MB).
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		cancel()
+	}()
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		var msg headlessUserMsg
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			_ = enc.Encode(headlessOutputEvent{
-				Type:  "error",
-				Error: "invalid json: " + err.Error(),
-			})
-			continue
-		}
-
-		if msg.Type != "user" || msg.Message.Content == "" {
-			continue
-		}
-
-		if err := eng.Send(msg.Message.Content); err != nil {
-			_ = enc.Encode(headlessOutputEvent{
-				Type:  "error",
-				Error: "send failed: " + err.Error(),
-			})
-			continue
-		}
-
-		// Drain events until result.
-		for event := range eng.Events() {
-			if event.Err != nil {
-				_ = enc.Encode(headlessOutputEvent{
-					Type:  "error",
-					Error: event.Err.Error(),
-				})
-				continue
-			}
-			_ = enc.Encode(headlessOutputEvent{
-				Type:    event.Type,
-				Content: event.Raw,
-			})
-			if event.Type == "result" {
-				break
-			}
-		}
-	}
-
-	return scanner.Err()
+	return srv.Run(ctx)
 }

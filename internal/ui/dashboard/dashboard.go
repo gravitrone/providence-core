@@ -1,8 +1,10 @@
 package dashboard
 
 import (
+	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/progress"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -26,12 +28,28 @@ type DashboardModel struct {
 	Height   int
 	FocusIdx int  // which panel has keyboard focus for j/k nav
 	Focused  bool // whether the dashboard pane is focused
+
+	// Token usage progress bar.
+	TokenProgress progress.Model
+	TokenPct      float64 // 0.0 - 1.0
 }
 
 // New creates a DashboardModel with default stub panels.
 func New() DashboardModel {
+	p := progress.New(
+		progress.WithColors(
+			lipgloss.Color("#4A2010"),
+			lipgloss.Color("#D77757"),
+			lipgloss.Color("#FFA600"),
+			lipgloss.Color("#FFD700"),
+		),
+		progress.WithWidth(20),
+	)
+	p.ShowPercentage = false
+
 	return DashboardModel{
-		Panels: defaultPanels(),
+		Panels:        defaultPanels(),
+		TokenProgress: p,
 	}
 }
 
@@ -72,9 +90,17 @@ func (d DashboardModel) View() string {
 			innerW = 4
 		}
 
-		body := "  No data"
-		if panel.Render != nil {
-			body = panel.Render(innerW)
+		var body string
+		if panel.ID == "tokens" {
+			// Render token progress bar.
+			d.TokenProgress.SetWidth(innerW - 4)
+			pctLabel := fmt.Sprintf("  %3.0f%% context", d.TokenPct*100)
+			body = pctLabel + "\n  " + d.TokenProgress.ViewAs(d.TokenPct)
+		} else {
+			body = "  No data"
+			if panel.Render != nil {
+				body = panel.Render(innerW)
+			}
 		}
 
 		bodyLines := strings.Split(body, "\n")
@@ -104,9 +130,12 @@ func (d DashboardModel) View() string {
 
 // renderPanelHeader builds a single panel header line: glyph + title + badge.
 func (d DashboardModel) renderPanelHeader(p Panel, focused bool) string {
-	titleStyle := lipgloss.NewStyle().
+	headerStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#D77757"))
+		Foreground(lipgloss.Color("#FFA600"))
+
+	dimStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#5C4A3A"))
 
 	glyphStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#FFA600"))
@@ -114,14 +143,20 @@ func (d DashboardModel) renderPanelHeader(p Panel, focused bool) string {
 	mutedStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#6b5040"))
 
+	titleStyle := headerStyle
+	if p.Collapsed {
+		titleStyle = dimStyle
+		glyphStyle = dimStyle
+	}
+
 	if focused && d.Focused {
-		titleStyle = titleStyle.Foreground(lipgloss.Color("#FFA600"))
+		titleStyle = titleStyle.Foreground(lipgloss.Color("#FFD700"))
 	}
 
 	// Collapse indicator.
-	arrow := "v"
+	arrow := "▾"
 	if p.Collapsed {
-		arrow = ">"
+		arrow = "▸"
 	}
 
 	header := mutedStyle.Render(arrow) + " " +
@@ -201,21 +236,21 @@ func (d *DashboardModel) PanelByID(id string) *Panel {
 
 func defaultPanels() []Panel {
 	return []Panel{
-		{ID: "approvals", Title: "APPROVALS", Glyph: "!", Priority: 0,
+		{ID: "approvals", Title: "APPROVALS", Glyph: "⚠", Priority: 0,
 			Render: func(w int) string { return "  No pending approvals" }},
-		{ID: "agents", Title: "AGENTS", Glyph: "*", Priority: 1,
+		{ID: "agents", Title: "AGENTS", Glyph: "⟁", Priority: 1,
 			Render: func(w int) string { return "  No active agents" }},
-		{ID: "tokens", Title: "TOKENS", Glyph: "#", Priority: 2,
+		{ID: "tokens", Title: "TOKENS", Glyph: "◬", Priority: 2,
 			Render: func(w int) string { return "  0% context used" }},
-		{ID: "tasks", Title: "TASKS", Glyph: "+", Priority: 3,
+		{ID: "tasks", Title: "TASKS", Glyph: "⚑", Priority: 3,
 			Render: func(w int) string { return "  No tasks" }},
-		{ID: "files", Title: "FILES", Glyph: "=", Priority: 4,
+		{ID: "files", Title: "FILES", Glyph: "⊞", Priority: 4,
 			Render: func(w int) string { return "  No files touched" }},
-		{ID: "errors", Title: "ERRORS", Glyph: "x", Priority: 5, Collapsed: true,
+		{ID: "errors", Title: "ERRORS", Glyph: "⊛", Priority: 5, Collapsed: true,
 			Render: func(w int) string { return "  No errors" }},
-		{ID: "compact", Title: "COMPACT", Glyph: "~", Priority: 6, Collapsed: true,
+		{ID: "compact", Title: "COMPACT", Glyph: "⊙", Priority: 6, Collapsed: true,
 			Render: func(w int) string { return "  Idle" }},
-		{ID: "hooks", Title: "HOOKS", Glyph: "o", Priority: 7, Collapsed: true,
+		{ID: "hooks", Title: "HOOKS", Glyph: "⊕", Priority: 7, Collapsed: true,
 			Render: func(w int) string { return "  No hooks firing" }},
 	}
 }

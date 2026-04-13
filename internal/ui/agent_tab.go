@@ -1428,7 +1428,11 @@ func (at AgentTab) View(width, height int) string {
 		chatView := at.renderChatPane(chatW, height)
 		at.dashboard.SetSize(dashW, height)
 		dashView := at.dashboard.View()
-		return lipgloss.JoinHorizontal(lipgloss.Top, chatView, dashView)
+		dashStyle := lipgloss.NewStyle().
+			BorderLeft(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("#4A2010"))
+		return lipgloss.JoinHorizontal(lipgloss.Top, chatView, dashStyle.Render(dashView))
 	}
 
 	return at.renderChatPane(width, height)

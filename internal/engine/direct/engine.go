@@ -596,30 +596,74 @@ func (e *DirectEngine) SetStore(st storeIface) {
 
 // Close cleanly shuts down the engine and closes the events channel.
 // If a store is wired, mechanical session learnings are persisted before closing.
+// Each shutdown step has its own timeout so a hung subsystem cannot block exit.
+// A 10s failsafe timer guarantees Close returns even if everything hangs.
 func (e *DirectEngine) Close() {
-	// Fire SessionEnd hook before teardown.
-	e.fireHookAsync(hooks.SessionEnd, hooks.HookInput{
-		ToolInput: "close",
+	failsafe, failsafeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer failsafeCancel()
+
+	// Step 1: Cancel background agents.
+	runWithDeadline(failsafe, 2*time.Second, func() {
+		e.Interrupt()
+		if e.bgCancel != nil {
+			e.bgCancel()
+		}
+		if e.fileWatcher != nil {
+			e.fileWatcher.Stop()
+		}
+		if e.subagentRunner != nil {
+			e.subagentRunner.Close()
+		}
 	})
 
-	e.Interrupt()
-	if e.bgCancel != nil {
-		e.bgCancel()
+	// Step 2: Close MCP servers (3s timeout).
+	runWithDeadline(failsafe, 3*time.Second, func() {
+		if e.mcpManager != nil {
+			e.mcpManager.CloseAll()
+		}
+	})
+
+	// Step 3: Fire SessionEnd hook (1.5s timeout).
+	runWithDeadline(failsafe, 1500*time.Millisecond, func() {
+		if e.hooksRunner != nil {
+			ctx, cancel := context.WithTimeout(failsafe, 1500*time.Millisecond)
+			defer cancel()
+			e.hooksRunner.Run(ctx, hooks.SessionEnd, hooks.HookInput{
+				SessionID: e.sessionID,
+				ToolInput: "close",
+			})
+		}
+	})
+
+	// Step 4: Save learnings.
+	runWithDeadline(failsafe, 2*time.Second, func() {
+		if e.store != nil {
+			e.saveSessionLearnings(e.store, e.startTime)
+		}
+		e.appendSessionMemory()
+	})
+
+	// Step 5: Print resume hint.
+	if e.sessionID != "" {
+		fmt.Fprintf(os.Stderr, "Resume with: providence --resume %s\n", e.sessionID)
 	}
-	if e.fileWatcher != nil {
-		e.fileWatcher.Stop()
+}
+
+// runWithDeadline executes fn in a goroutine and waits for it to finish, the
+// step timeout to expire, or the parent context to cancel, whichever comes first.
+func runWithDeadline(parent context.Context, timeout time.Duration, fn func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	case <-parent.Done():
 	}
-	if e.subagentRunner != nil {
-		e.subagentRunner.Close()
-	}
-	if e.mcpManager != nil {
-		e.mcpManager.CloseAll()
-	}
-	if e.store != nil {
-		e.saveSessionLearnings(e.store, e.startTime)
-	}
-	// Append mechanical session memory to project MEMORY.md.
-	e.appendSessionMemory()
 }
 
 // GetCurrentTodos implements engine.TodoProvider.

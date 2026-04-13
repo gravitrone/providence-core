@@ -39,6 +39,11 @@ func newRootCommand() *cobra.Command {
 	cwd, _ := os.Getwd()
 	cfg := config.LoadMerged(cwd)
 
+	// Load .claude/settings.json for CC compatibility (env vars, tool permissions).
+	if _, err := config.LoadClaudeSettings(cwd); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: .claude/settings.json: %v\n", err)
+	}
+
 	// Default engine from config, fallback to "claude".
 	engineDefault := "claude"
 	if cfg.Engine != "" {

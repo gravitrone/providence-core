@@ -177,6 +177,7 @@ var slashCommands = []slashCommand{
 	{"/diff", "Show git diff --stat"},
 	{"/branch", "Show git branches"},
 	{"/share", "Export session as JSONL"},
+	{"/tag", "Tag current session (usage: /tag <name>)"},
 	{"/review", "Spawn code review agent"},
 	{"/fork", "Fork N background agents from current context"},
 	{"/init", "Create CLAUDE.md in project root with detected project info"},
@@ -1063,8 +1064,6 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			cwd, _ := os.Getwd()
 			at.store.CreateSession(at.sessionID, cwd, string(at.engineType), at.model)
 		}
-		// Auto-title the session from the first user message.
-		at.generateAutoTitle()
 		imgCount := len(at.pendingImages)
 		at.messages = append(at.messages, ChatMessage{
 			Role:       "user",
@@ -1072,6 +1071,8 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			Done:       true,
 			ImageCount: imgCount,
 		})
+		// Auto-title the session from the first user message (after append so it can find it).
+		at.generateAutoTitle()
 		at.messagesDirty = true
 		at.persistLastMessage()
 		at.streaming = true
@@ -1463,6 +1464,16 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 					// Also refresh token panel after compaction.
 					ctxWindow := engine.ContextWindowFor(at.model)
 					at.dashboard.SetTokens(at.currentTokens, ctxWindow)
+					// Show compaction stats as system message.
+					if at.compactTokensBefore > 0 && at.compactTokensAfter > 0 {
+						reduction := (at.compactTokensBefore - at.compactTokensAfter) * 100 / at.compactTokensBefore
+						at.addSystemMessage(fmt.Sprintf(
+							"Compacted: %s -> %s tokens (%d%% saved)",
+							formatTokenCount(at.compactTokensBefore),
+							formatTokenCount(at.compactTokensAfter),
+							reduction,
+						))
+					}
 				}
 			case "failed":
 				at.compacting = false
@@ -2323,7 +2334,7 @@ func (at AgentTab) StatusLine() string {
 		{Key: session, Desc: "session"},
 	}
 
-	// Context % pill with color.
+	// Context % pill and absolute token count pill.
 	if at.engine != nil {
 		ctxWindow := engine.ContextWindowFor(at.model)
 		if ctxWindow > 0 {
@@ -2340,6 +2351,11 @@ func (at AgentTab) StatusLine() string {
 			}
 
 			items = append(items, components.TintedHint(fmt.Sprintf("%d%%", pct), "ctx", pillColor))
+		}
+
+		// Absolute token count pill.
+		if at.currentTokens > 0 {
+			items = append(items, components.HintItem{Key: formatTokenCount(at.currentTokens), Desc: "tokens"})
 		}
 	}
 
@@ -4521,11 +4537,18 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			at.refreshViewport()
 			return true, nil
 		}
+		home, _ := os.UserHomeDir()
+		exportDir := filepath.Join(home, ".providence", "exports")
+		if err := os.MkdirAll(exportDir, 0o755); err != nil {
+			at.addSystemMessage("Error creating exports dir: " + err.Error())
+			at.refreshViewport()
+			return true, nil
+		}
 		exportID := at.sessionID
 		if len(exportID) > 8 {
 			exportID = exportID[:8]
 		}
-		exportPath := fmt.Sprintf("/tmp/providence-session-%s.jsonl", exportID)
+		exportPath := filepath.Join(exportDir, exportID+".jsonl")
 		f, err := os.Create(exportPath)
 		if err != nil {
 			at.addSystemMessage("Error: " + err.Error())
@@ -4731,6 +4754,37 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			return true, nil
 		}
 		at.addSystemMessage("Created CLAUDE.md with detected project info. Edit to customize.")
+		at.refreshViewport()
+		return true, nil
+
+	case "/tag":
+		if at.store == nil || at.sessionID == "" {
+			at.addSystemMessage("No active session to tag.")
+			at.refreshViewport()
+			return true, nil
+		}
+		if args == "" {
+			// Show current tags.
+			tags, err := at.store.GetSessionTags(at.sessionID)
+			if err != nil {
+				at.addSystemMessage("Error: " + err.Error())
+				at.refreshViewport()
+				return true, nil
+			}
+			if len(tags) == 0 {
+				at.addSystemMessage("No tags. Usage: /tag <name>")
+			} else {
+				at.addSystemMessage("Tags: " + strings.Join(tags, ", "))
+			}
+			at.refreshViewport()
+			return true, nil
+		}
+		if err := at.store.TagSession(at.sessionID, args); err != nil {
+			at.addSystemMessage("Error: " + err.Error())
+			at.refreshViewport()
+			return true, nil
+		}
+		at.addSystemMessage("Tagged: " + args)
 		at.refreshViewport()
 		return true, nil
 
@@ -4952,11 +5006,12 @@ func buildSystemBlocks(outputStyleName, model string) []engine.SystemBlock {
 	}
 
 	cfg := &engine.PromptConfig{
-		OutputStyle:      styleName,
+		OutputStyle:       styleName,
 		OutputStylePrompt: stylePrompt,
-		EnvInfo:          engine.ComputeEnvInfo("", model),
-		InstructionFiles: engine.DiscoverInstructionFiles(cwd, home),
-		Reminders:        engine.ReminderState{},
+		EnvInfo:           engine.ComputeEnvInfo("", model),
+		InstructionFiles:  engine.DiscoverInstructionFiles(cwd, home),
+		Reminders:         engine.ReminderState{},
+		GitStatus:         engine.ComputeGitStatus(cwd),
 	}
 
 	return engine.BuildSystemBlocks(cfg)

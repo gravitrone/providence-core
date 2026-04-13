@@ -1164,7 +1164,8 @@ func (e *DirectEngine) systemBlocks() []anthropic.TextBlockParam {
 	return params
 }
 
-// drainSteeredMessages checks for mid-turn steering messages and adds them as user messages.
+// drainSteeredMessages checks for mid-turn steering messages and injects them
+// as system-reminder blocks so the model addresses them after the current task.
 func (e *DirectEngine) drainSteeredMessages() {
 	e.steerMu.Lock()
 	msgs := e.steered
@@ -1172,7 +1173,8 @@ func (e *DirectEngine) drainSteeredMessages() {
 	e.steerMu.Unlock()
 
 	for _, msg := range msgs {
-		e.history.AddUser(msg)
+		reminder := fmt.Sprintf("<system-reminder>\nThe user sent a new message while you were working:\n%s\nIMPORTANT: After completing your current task, address the user's message.\n</system-reminder>", msg)
+		e.history.AddUser(reminder)
 	}
 }
 

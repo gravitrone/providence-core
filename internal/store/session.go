@@ -1,6 +1,9 @@
 package store
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // SessionRow represents a row from the sessions table.
 type SessionRow struct {
@@ -116,4 +119,64 @@ func (s *Store) ListSessions(cwd string, limit int) ([]SessionRow, error) {
 		rows = append(rows, sr)
 	}
 	return rows, dbRows.Err()
+}
+
+// TagSession adds a tag to a session. Tags are stored as comma-separated values.
+func (s *Store) TagSession(id, tag string) error {
+	if s == nil {
+		return nil
+	}
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return nil
+	}
+
+	// Read existing tags.
+	var current string
+	row := s.db.QueryRow(`SELECT COALESCE(tags, '') FROM sessions WHERE id = ?`, id)
+	if err := row.Scan(&current); err != nil {
+		return err
+	}
+
+	// Check for duplicates.
+	existing := parseTags(current)
+	for _, t := range existing {
+		if t == tag {
+			return nil // already tagged
+		}
+	}
+
+	existing = append(existing, tag)
+	newTags := strings.Join(existing, ",")
+	_, err := s.db.Exec(`UPDATE sessions SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, newTags, id)
+	return err
+}
+
+// GetSessionTags returns the tags for a session.
+func (s *Store) GetSessionTags(id string) ([]string, error) {
+	if s == nil {
+		return nil, nil
+	}
+	var raw string
+	row := s.db.QueryRow(`SELECT COALESCE(tags, '') FROM sessions WHERE id = ?`, id)
+	if err := row.Scan(&raw); err != nil {
+		return nil, err
+	}
+	return parseTags(raw), nil
+}
+
+// parseTags splits a comma-separated tag string into a slice.
+func parseTags(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	var tags []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			tags = append(tags, p)
+		}
+	}
+	return tags
 }

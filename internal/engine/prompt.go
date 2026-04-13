@@ -30,6 +30,8 @@ type PromptConfig struct {
 	InstructionFiles []InstructionFile
 	// Reminders holds system reminder state (date, plan mode, todos).
 	Reminders ReminderState
+	// GitStatus is the pre-computed git status snapshot taken at session start.
+	GitStatus string
 }
 
 // EnvInfo holds computed environment context for the dynamic env block.
@@ -168,7 +170,15 @@ func BuildSystemBlocks(cfg *PromptConfig) []SystemBlock {
 			})
 		}
 
-		// 13. System Reminders
+		// 13. Git Status (computed once at session start)
+		if cfg.GitStatus != "" {
+			blocks = append(blocks, SystemBlock{
+				Text:      cfg.GitStatus,
+				Cacheable: false,
+			})
+		}
+
+		// 14. System Reminders
 		if reminders := BuildSystemReminders(cfg.Reminders); reminders != "" {
 			blocks = append(blocks, SystemBlock{
 				Text:      reminders,
@@ -417,6 +427,71 @@ func formatEnvInfo(env *EnvInfo) string {
 		sb.WriteString(fmt.Sprintf("\nYou are powered by the model named %s. The exact model ID is %s.", env.ModelName, env.ModelID))
 	} else if env.ModelID != "" {
 		sb.WriteString(fmt.Sprintf("\nYou are powered by the model %s.", env.ModelID))
+	}
+
+	sb.WriteString("\n\nAssistant knowledge cutoff is May 2025.")
+	sb.WriteString("\nThe most recent Claude model family is Claude 4.6 and 4.5. Model IDs: claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5-20251001.")
+
+	return sb.String()
+}
+
+// ComputeGitStatus builds the gitStatus system prompt injection by running
+// git commands in the working directory. Returns empty string if not a git repo.
+func ComputeGitStatus(workDir string) string {
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
+
+	// Quick check: is this even a git repo?
+	cmd := exec.Command("git", "-C", workDir, "rev-parse", "--is-inside-work-tree")
+	if out, err := cmd.Output(); err != nil || strings.TrimSpace(string(out)) != "true" {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n\n")
+
+	// Current branch
+	if out, err := exec.Command("git", "-C", workDir, "branch", "--show-current").Output(); err == nil {
+		branch := strings.TrimSpace(string(out))
+		if branch != "" {
+			sb.WriteString(fmt.Sprintf("Current branch: %s\n", branch))
+		}
+	}
+
+	// Detect main branch (main or master)
+	mainBranch := "main"
+	if out, err := exec.Command("git", "-C", workDir, "rev-parse", "--verify", "main").Output(); err != nil || strings.TrimSpace(string(out)) == "" {
+		if _, err2 := exec.Command("git", "-C", workDir, "rev-parse", "--verify", "master").Output(); err2 == nil {
+			mainBranch = "master"
+		}
+	}
+	sb.WriteString(fmt.Sprintf("\nMain branch (you will usually use this for PRs): %s\n", mainBranch))
+
+	// Git user
+	if out, err := exec.Command("git", "-C", workDir, "config", "user.name").Output(); err == nil {
+		user := strings.TrimSpace(string(out))
+		if user != "" {
+			sb.WriteString(fmt.Sprintf("\nGit user: %s\n", user))
+		}
+	}
+
+	// Status
+	sb.WriteString("\nStatus:\n")
+	if out, err := exec.Command("git", "-C", workDir, "status", "--short").Output(); err == nil {
+		status := strings.TrimSpace(string(out))
+		if status != "" {
+			sb.WriteString(status)
+		} else {
+			sb.WriteString("Clean working tree")
+		}
+	}
+	sb.WriteString("\n")
+
+	// Recent commits
+	sb.WriteString("\nRecent commits:\n")
+	if out, err := exec.Command("git", "-C", workDir, "log", "--oneline", "-5").Output(); err == nil {
+		sb.WriteString(strings.TrimSpace(string(out)))
 	}
 
 	return sb.String()

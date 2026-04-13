@@ -282,6 +282,74 @@ func TestFormatToolInput(t *testing.T) {
 	}
 }
 
+// --- formatTaskInput (Agent Dispatch Card) Tests ---
+
+func TestFormatTaskInputBasic(t *testing.T) {
+	input := map[string]any{
+		"description":  "Fix the authentication bypass in auth.go",
+		"subagent_type": "Verification",
+		"name":         "fix-auth-bug",
+		"model":        "opus",
+	}
+	out := formatTaskInput(input)
+	plain := components.SanitizeText(out)
+	assert.Contains(t, plain, "fix-auth-bug", "should contain agent name")
+	assert.Contains(t, plain, "[opus", "should contain model")
+	assert.Contains(t, plain, "Agent Dispatched", "should contain card header")
+	assert.Contains(t, plain, "Fix the authentication bypass", "should contain description")
+}
+
+func TestFormatTaskInputBackground(t *testing.T) {
+	input := map[string]any{
+		"description":    "Background review task",
+		"subagent_type":  "Explore",
+		"run_in_background": true,
+	}
+	out := formatTaskInput(input)
+	plain := components.SanitizeText(out)
+	assert.Contains(t, plain, "background", "should indicate background mode")
+	assert.Contains(t, plain, "Agent Dispatched", "should show dispatch header")
+}
+
+func TestFormatTaskInputFallback(t *testing.T) {
+	input := map[string]any{
+		"description": "Simple task with defaults",
+	}
+	out := formatTaskInput(input)
+	plain := components.SanitizeText(out)
+	assert.Contains(t, plain, "Agent Dispatched", "should show card even with minimal input")
+	assert.Contains(t, plain, "general-purpose", "should show default agent type as name")
+}
+
+func TestFormatTaskInputLongDescription(t *testing.T) {
+	input := map[string]any{
+		"description": strings.Repeat("A long description. ", 10),
+		"name":        "long-desc-agent",
+	}
+	out := formatTaskInput(input)
+	plain := components.SanitizeText(out)
+	assert.Contains(t, plain, "long-desc-agent")
+	// Description should be truncated.
+	assert.Contains(t, plain, "...", "long description should be truncated with ellipsis")
+}
+
+func TestFormatTaskInputMultilineDescription(t *testing.T) {
+	input := map[string]any{
+		"description": "First line of description\nSecond line should be dropped",
+		"name":        "multi-line-agent",
+	}
+	out := formatTaskInput(input)
+	plain := components.SanitizeText(out)
+	assert.Contains(t, plain, "First line of description")
+	assert.NotContains(t, plain, "Second line", "should only show first line of description")
+}
+
+func TestFormatTaskInputInvalidInput(t *testing.T) {
+	// Non-JSON-marshallable input should fall back to formatToolInput.
+	out := formatTaskInput("just a string")
+	assert.NotEmpty(t, out, "should not return empty for invalid input")
+}
+
 func TestFormatToolInputLongStringTruncated(t *testing.T) {
 	long := strings.Repeat("a", 200)
 	out := formatToolInput(long)

@@ -30,9 +30,13 @@ func UpdateThemeColors(primary, secondary, muted, text string) {
 
 // AgentInfo describes an active/completed subagent.
 type AgentInfo struct {
-	Name    string
-	Status  string // "running", "completed", "failed"
-	Elapsed string // e.g. "12s"
+	Name         string
+	Model        string
+	Status       string // "running", "completed", "failed", "killed", "background"
+	Elapsed      string // e.g. "12s"
+	LastActivity string // last tool/action performed
+	ParentName   string // empty = top-level agent
+	ResultPreview string // first few lines of result for expandable preview
 }
 
 // FileInfo describes a file touched during the session.
@@ -395,31 +399,94 @@ func (d *DashboardModel) SetAgents(agents []AgentInfo) {
 	snapshot := make([]AgentInfo, len(agents))
 	copy(snapshot, agents)
 	p.Render = func(w int) string {
-		nameW := w - 18
-		if nameW < 6 {
-			nameW = 6
+		return renderAgentTree(snapshot, w)
+	}
+}
+
+// renderAgentTree renders a hierarchical agent tree with status icons,
+// model, elapsed time, and activity lines.
+func renderAgentTree(agents []AgentInfo, width int) string {
+	if len(agents) == 0 {
+		return ""
+	}
+
+	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeTextColor))
+	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(themeMutedColor))
+	activityStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(themeMutedColor)).Italic(true)
+
+	var lines []string
+	for _, a := range agents {
+		indent := "  "
+		if a.ParentName != "" {
+			indent = "    "
 		}
-		cols := []table.Column{
-			{Title: "Agent", Width: nameW},
-			{Title: "Status", Width: 7},
-			{Title: "Time", Width: 5},
+
+		icon := agentStatusIcon(a.Status)
+
+		model := a.Model
+		if model == "" {
+			model = "default"
 		}
-		rows := make([]table.Row, len(snapshot))
-		for i, a := range snapshot {
-			rows[i] = table.Row{truncatePath(a.Name, nameW), a.Status, a.Elapsed}
+		modelStr := mutedStyle.Render("[" + model + "]")
+
+		elapsedStr := mutedStyle.Render(a.Elapsed)
+
+		// Name + model on left, elapsed on right.
+		leftPart := indent + icon + " " + nameStyle.Render(truncatePath(a.Name, width-20)) + " " + modelStr
+		leftWidth := lipgloss.Width(leftPart)
+		rightWidth := lipgloss.Width(elapsedStr)
+		gap := width - leftWidth - rightWidth - 2
+		if gap < 1 {
+			gap = 1
 		}
-		t := table.New(
-			table.WithColumns(cols),
-			table.WithRows(rows),
-			table.WithHeight(len(rows)+1),
-		)
-		s := table.Styles{
-			Header:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeHeaderColor)),
-			Cell:     lipgloss.NewStyle().Foreground(lipgloss.Color(themeTextColor)),
-			Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeAccentColor)),
+		lines = append(lines, leftPart+strings.Repeat(" ", gap)+elapsedStr)
+
+		// Activity sub-line with connector.
+		if a.LastActivity != "" {
+			connector := mutedStyle.Render("\u23BF") // ⎿
+			activity := a.LastActivity
+			maxLen := width - 10
+			if maxLen < 10 {
+				maxLen = 10
+			}
+			if len(activity) > maxLen {
+				activity = activity[:maxLen-3] + "..."
+			}
+			lines = append(lines, indent+"  "+connector+" "+activityStyle.Render(activity))
 		}
-		t.SetStyles(s)
-		return t.View()
+
+		// Result preview (up to 3 lines) if available.
+		if a.ResultPreview != "" {
+			previewLines := strings.SplitN(a.ResultPreview, "\n", 4)
+			for i, pl := range previewLines {
+				if i >= 3 {
+					lines = append(lines, indent+"    "+mutedStyle.Render(fmt.Sprintf("...+more")))
+					break
+				}
+				if len(pl) > width-8 {
+					pl = pl[:width-11] + "..."
+				}
+				lines = append(lines, indent+"    "+mutedStyle.Render(pl))
+			}
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// agentStatusIcon returns a styled status icon for the dashboard agent tree.
+func agentStatusIcon(status string) string {
+	switch status {
+	case "running":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(themeAccentColor)).Bold(true).Render("\u25CF") // ●
+	case "completed":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#50C878")).Bold(true).Render("\u2713") // ✓
+	case "failed", "killed":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#e05050")).Bold(true).Render("\u00D7") // ×
+	case "background":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(themeMutedColor)).Render("\u25C7") // ◇
+	default:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(themeMutedColor)).Render("\u25CF") // ●
 	}
 }
 
@@ -605,41 +672,12 @@ func (d *DashboardModel) emptyTab(width, height int, label string) string {
 		Render(label)
 }
 
-// renderAgentsTable renders the agents table at a given width (reused by panel and tab).
-func (d *DashboardModel) renderAgentsTable(width int) string {
-	nameW := width - 18
-	if nameW < 6 {
-		nameW = 6
-	}
-	cols := []table.Column{
-		{Title: "Agent", Width: nameW},
-		{Title: "Status", Width: 7},
-		{Title: "Time", Width: 5},
-	}
-	rows := make([]table.Row, len(d.Agents))
-	for i, a := range d.Agents {
-		rows[i] = table.Row{truncatePath(a.Name, nameW), a.Status, a.Elapsed}
-	}
-	t := table.New(
-		table.WithColumns(cols),
-		table.WithRows(rows),
-		table.WithHeight(len(rows)+1),
-	)
-	s := table.Styles{
-		Header:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeHeaderColor)),
-		Cell:     lipgloss.NewStyle().Foreground(lipgloss.Color(themeTextColor)),
-		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeAccentColor)),
-	}
-	t.SetStyles(s)
-	return t.View()
-}
-
 // RenderAgentsTab renders the agents panel at full width for the tab view.
 func (d *DashboardModel) RenderAgentsTab(width, height int) string {
 	if len(d.Agents) == 0 {
 		return d.emptyTab(width, height, "No active agents")
 	}
-	return d.renderAgentsTable(width)
+	return renderAgentTree(d.Agents, width)
 }
 
 // RenderTasksTab renders the tasks panel at full width.

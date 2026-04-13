@@ -29,7 +29,8 @@ import (
 	_ "github.com/gravitrone/providence-core/internal/engine/claude"    // register claude factory
 	_ "github.com/gravitrone/providence-core/internal/engine/codex_re" // register codex_re factory
 	"github.com/gravitrone/providence-core/internal/engine/customtools"
-	"github.com/gravitrone/providence-core/internal/engine/direct" // register direct factory + image types
+	"github.com/gravitrone/providence-core/internal/engine/direct"       // register direct factory + image types
+	"github.com/gravitrone/providence-core/internal/engine/direct/tools" // tool prompts
 	"github.com/gravitrone/providence-core/internal/engine/kairos"
 	"github.com/gravitrone/providence-core/internal/engine/outputstyles"
 	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
@@ -4899,11 +4900,12 @@ func buildSystemBlocks(outputStyleName, model string) []engine.SystemBlock {
 	}
 
 	cfg := &engine.PromptConfig{
-		OutputStyle:      styleName,
+		OutputStyle:       styleName,
 		OutputStylePrompt: stylePrompt,
-		EnvInfo:          engine.ComputeEnvInfo("", model),
-		InstructionFiles: engine.DiscoverInstructionFiles(cwd, home),
-		Reminders:        engine.ReminderState{},
+		EnvInfo:           engine.ComputeEnvInfo("", model),
+		InstructionFiles:  engine.DiscoverInstructionFiles(cwd, home),
+		Reminders:         engine.ReminderState{},
+		ToolPrompts:       tools.DefaultToolPrompts(),
 	}
 
 	return engine.BuildSystemBlocks(cfg)

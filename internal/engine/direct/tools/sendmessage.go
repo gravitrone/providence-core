@@ -24,6 +24,20 @@ func (t *SendMessageTool) Description() string {
 }
 func (t *SendMessageTool) ReadOnly() bool { return true }
 
+// Prompt implements ToolPrompter with CC-parity guidance for inter-agent messaging.
+func (t *SendMessageTool) Prompt() string {
+	return `Send a message to another agent.
+
+| to value | meaning |
+|---|---|
+| "researcher" | Agent by name |
+| "*" | Broadcast to all agents - expensive (linear in team size), use only when everyone genuinely needs it |
+
+Your plain text output is NOT visible to other agents - to communicate, you MUST call this tool. Messages from agents are delivered automatically; you don't check an inbox. Refer to agents by name, never by UUID. When relaying, don't quote the original - it's already rendered to the user.
+
+To continue a previously spawned agent, use SendMessage with the agent's name as the "to" field instead of spawning a new one. The agent resumes with its full context preserved.`
+}
+
 func (t *SendMessageTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",

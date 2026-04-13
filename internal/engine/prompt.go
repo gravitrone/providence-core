@@ -30,6 +30,9 @@ type PromptConfig struct {
 	InstructionFiles []InstructionFile
 	// Reminders holds system reminder state (date, plan mode, todos).
 	Reminders ReminderState
+	// ToolPrompts is the collected per-tool guidance text from ToolPrompter.
+	// Computed by tools.CollectToolPrompts and injected between Tool Usage and Coding Guidelines.
+	ToolPrompts string
 }
 
 // EnvInfo holds computed environment context for the dynamic env block.
@@ -105,6 +108,14 @@ func BuildSystemBlocks(cfg *PromptConfig) []SystemBlock {
 		Text:      toolUsage(),
 		Cacheable: true,
 	})
+
+	// 4.5. Per-tool prompts (CC-parity guidance injected from ToolPrompter interface)
+	if cfg != nil && cfg.ToolPrompts != "" {
+		blocks = append(blocks, SystemBlock{
+			Text:      cfg.ToolPrompts,
+			Cacheable: true,
+		})
+	}
 
 	// 5. Coding Guidelines (extended)
 	blocks = append(blocks, SystemBlock{

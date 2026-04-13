@@ -44,6 +44,11 @@ func (a *AskUserQuestionTool) Description() string {
 }
 func (a *AskUserQuestionTool) ReadOnly() bool { return false }
 
+// Prompt implements ToolPrompter with guidance for user interaction.
+func (a *AskUserQuestionTool) Prompt() string {
+	return `Present a structured question to the user with 2-4 selectable options. Blocks the agent loop until the user responds. Use when you need an explicit decision from the user rather than making an assumption.`
+}
+
 func (a *AskUserQuestionTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",

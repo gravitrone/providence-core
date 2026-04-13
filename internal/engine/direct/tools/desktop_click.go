@@ -24,6 +24,11 @@ func (t *DesktopClickTool) Description() string {
 }
 func (t *DesktopClickTool) ReadOnly() bool { return false }
 
+// Prompt implements ToolPrompter.
+func (t *DesktopClickTool) Prompt() string {
+	return `Click at screen coordinates. Supports click, double_click, and right_click actions. Always take a Screenshot first to identify the target position.`
+}
+
 func (t *DesktopClickTool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",

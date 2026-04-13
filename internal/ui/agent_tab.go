@@ -841,6 +841,7 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 
 	// Permission prompt takes priority.
 	if at.pendingPerm != nil {
+		cardTool := isCardStyleTool(at.pendingPerm.Tool.Name)
 		switch key {
 		case "y":
 			perm := at.pendingPerm
@@ -860,8 +861,11 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			if at.engine != nil && optionID != "" {
 				_ = at.engine.RespondPermission(perm.QuestionID, optionID)
 			}
-			// Update the permission message status to success
-			at.updateLastPermissionStatus("success")
+			if cardTool {
+				at.updateLastToolStatus(perm.Tool.Name, "success")
+			} else {
+				at.updateLastPermissionStatus("success")
+			}
 			at.refreshViewport()
 			return at, at.safeWaitForEvent()
 		case "n":
@@ -882,7 +886,11 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			if at.engine != nil && optionID != "" {
 				_ = at.engine.RespondPermission(perm.QuestionID, optionID)
 			}
-			at.updateLastPermissionStatus("cancelled")
+			if cardTool {
+				at.updateLastToolStatus(perm.Tool.Name, "cancelled")
+			} else {
+				at.updateLastPermissionStatus("cancelled")
+			}
 			at.refreshViewport()
 			return at, at.safeWaitForEvent()
 		case "a":
@@ -908,8 +916,12 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			if at.engine != nil && optionID != "" {
 				_ = at.engine.RespondPermission(perm.QuestionID, optionID)
 			}
-			at.updateLastPermissionStatus("success")
-			at.addSystemMessage(fmt.Sprintf("Always allowing %s for this session", perm.Tool.Name))
+			if cardTool {
+				at.updateLastToolStatus(perm.Tool.Name, "success")
+			} else {
+				at.updateLastPermissionStatus("success")
+				at.addSystemMessage(fmt.Sprintf("Always allowing %s for this session", perm.Tool.Name))
+			}
 			at.refreshViewport()
 			return at, at.safeWaitForEvent()
 		}
@@ -1992,6 +2004,7 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 		if pr, ok := ev.Data.(*engine.PermissionRequestEvent); ok {
 			toolName := pr.Tool.Name
 			toolArgs := formatToolArgs(toolName, pr.Tool.Input)
+			cardTool := isCardStyleTool(toolName)
 
 			// Auto-approve if user previously chose "always allow" for this tool.
 			if at.alwaysAllowTools[toolName] {
@@ -2010,28 +2023,39 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 				if at.engine != nil && optionID != "" {
 					_ = at.engine.RespondPermission(pr.QuestionID, optionID)
 				}
-				at.messages = append(at.messages, ChatMessage{
-					Role:       "permission",
-					Content:    fmt.Sprintf("%s: %s (auto-approved)", toolName, toolArgs),
-					Done:       true,
-					ToolName:   toolName,
-					ToolArgs:   toolArgs,
-					ToolStatus: "success",
-				})
+				if cardTool {
+					// Card-style tools: no separate permission message.
+					// The existing tool message keeps its status as-is.
+				} else {
+					at.messages = append(at.messages, ChatMessage{
+						Role:       "permission",
+						Content:    fmt.Sprintf("%s: %s (auto-approved)", toolName, toolArgs),
+						Done:       true,
+						ToolName:   toolName,
+						ToolArgs:   toolArgs,
+						ToolStatus: "success",
+					})
+				}
 				at.trackToolFile(toolName, pr.Tool.Input)
 				at.refreshViewport()
 				return at, at.safeWaitForEvent()
 			}
 
 			at.pendingPerm = pr
-			at.messages = append(at.messages, ChatMessage{
-				Role:       "permission",
-				Content:    fmt.Sprintf("%s: %s", toolName, toolArgs),
-				Done:       true,
-				ToolName:   toolName,
-				ToolArgs:   toolArgs,
-				ToolStatus: "pending",
-			})
+			if cardTool {
+				// Card-style tools: set the existing tool message to pending
+				// instead of creating a separate permission message.
+				at.updateLastToolStatus(toolName, "pending")
+			} else {
+				at.messages = append(at.messages, ChatMessage{
+					Role:       "permission",
+					Content:    fmt.Sprintf("%s: %s", toolName, toolArgs),
+					Done:       true,
+					ToolName:   toolName,
+					ToolArgs:   toolArgs,
+					ToolStatus: "pending",
+				})
+			}
 			// Track file touches from permission-gated tools too.
 			at.trackToolFile(toolName, pr.Tool.Input)
 			at.refreshViewport()
@@ -2941,18 +2965,35 @@ func (at AgentTab) hasVizMessages() bool {
 	return false
 }
 
-// hasPulsingMessages returns true if any message has a pulsating border (pending permission or completed/approved tool).
+// hasPulsingMessages returns true if any message has a pulsating border (pending permission or card-style tool with pending status).
 func (at AgentTab) hasPulsingMessages() bool {
 	for _, m := range at.messages {
 		if m.Role == "permission" {
 			return true
 		}
-		// Completed tool boxes also pulse green.
-		if m.Role == "permission" && m.ToolStatus == "success" {
+		// Card-style tool with pending permission needs pulse animation.
+		if m.Role == "tool" && m.ToolStatus == "pending" && isCardStyleTool(m.ToolName) {
 			return true
 		}
 	}
 	return false
+}
+
+// isCardStyleTool returns true for tools rendered as double-border cards
+// (Read, Agent, Task) rather than the legacy flat style.
+func isCardStyleTool(toolName string) bool {
+	return toolName == "Read" || toolName == "Agent" || toolName == "Task"
+}
+
+// updateLastToolStatus finds the last tool message matching toolName and sets its status.
+func (at *AgentTab) updateLastToolStatus(toolName, status string) {
+	for i := len(at.messages) - 1; i >= 0; i-- {
+		if at.messages[i].Role == "tool" && at.messages[i].ToolName == toolName {
+			at.messages[i].ToolStatus = status
+			at.messagesDirty = true
+			return
+		}
+	}
 }
 
 // hasSteeredMessage returns true if any queued message is marked as steered.
@@ -3723,20 +3764,32 @@ func (at AgentTab) renderToolMessage(msg ChatMessage, msgIdx int, isLatest bool)
 // renderToolCard renders Read/Agent/Task tools with a double-gradient border
 // and pill keycap, matching the queued message visual style.
 func (at AgentTab) renderToolCard(msg ChatMessage, msgIdx int, isLatest bool) string {
-	frozen := !at.streaming || !isLatest
+	isPending := msg.ToolStatus == "pending"
+	frozen := (!at.streaming || !isLatest) && !isPending
 
 	// --- Build border style ---
 	var boxStyle lipgloss.Style
 
-	if frozen {
+	if isPending {
+		// Pending permission: pulsing animated border.
+		boxStyle = lipgloss.NewStyle().
+			Border(lipgloss.DoubleBorder()).
+			BorderForeground(pulseColor(at.flameFrame, ActiveTheme.Secondary)).
+			Padding(0, 1)
+	} else if frozen {
 		switch msg.ToolStatus {
 		case "error":
 			boxStyle = lipgloss.NewStyle().
 				Border(lipgloss.DoubleBorder()).
 				BorderForegroundBlend(ToolCardErrorEdge, ToolCardErrorMid, ToolCardErrorEdge).
 				Padding(0, 1)
+		case "cancelled":
+			boxStyle = lipgloss.NewStyle().
+				Border(lipgloss.DoubleBorder()).
+				BorderForegroundBlend(ToolCardErrorEdge, ToolCardErrorMid, ToolCardErrorEdge).
+				Padding(0, 1)
 		default:
-			// Success + pending both freeze to muted theme border.
+			// Success freezes to muted theme border.
 			frozenEdge := lipgloss.Color(darkenHex(ActiveTheme.Muted, 0.5))
 			boxStyle = lipgloss.NewStyle().
 				Border(lipgloss.DoubleBorder()).
@@ -3913,6 +3966,21 @@ func (at AgentTab) renderToolCard(msg ChatMessage, msgIdx int, isLatest bool) st
 			resultPrefix := lipgloss.NewStyle().Foreground(ColorError).Render("\u23BF ")
 			body = "\n" + resultPrefix + lipgloss.NewStyle().Foreground(ColorError).Italic(true).Render(msg.ToolBody+"...")
 		}
+	}
+
+	// --- Permission pills inside the card when pending ---
+	if isPending {
+		sel := at.permButtonSelected
+		allow := renderPermButton("Allow", 0, sel == 0)
+		allowSess := renderPermButton("Allow for Session", 10, sel == 1)
+		deny := renderPermButton("Deny", 0, sel == 2)
+		buttons := lipgloss.JoinHorizontal(lipgloss.Left, allow+"  ", allowSess+"  ", deny)
+		body += "\n\n" + buttons
+	}
+
+	// --- Denied label for cancelled ---
+	if msg.ToolStatus == "cancelled" {
+		body += "\n" + lipgloss.NewStyle().Foreground(ColorError).Italic(true).Render("denied")
 	}
 
 	return boxStyle.Render(header+body) + "\n"
@@ -4286,9 +4354,9 @@ func formatToolArgs(toolName string, input any) string {
 	}
 }
 
-// formatTaskInput renders a styled dispatch card for the Task/Agent tool.
-// Shows name, model, isolation mode, and first line of description in a
-// flame-bordered card.
+// formatTaskInput returns plain text for the Task/Agent tool.
+// Format: "name [model, mode]\ndescription" - no borders, no lipgloss.
+// The renderToolCard handles all visual styling.
 func formatTaskInput(input any) string {
 	raw, err := json.Marshal(input)
 	if err != nil {
@@ -4299,61 +4367,45 @@ func formatTaskInput(input any) string {
 		Prompt       string `json:"prompt"`
 		SubagentType string `json:"subagent_type"`
 		Model        string `json:"model"`
-		Engine       string `json:"engine"`
 		Name         string `json:"name"`
 		RunInBG      bool   `json:"run_in_background"`
 	}
 	if err := json.Unmarshal(raw, &ti); err != nil {
 		return formatToolInput(input)
 	}
-	agentType := ti.SubagentType
-	if agentType == "" {
-		agentType = "general-purpose"
-	}
 
-	// Build the meta line: name [model, isolation]
 	name := ti.Name
 	if name == "" {
-		name = agentType
+		name = ti.SubagentType
+	}
+	if name == "" {
+		name = "agent"
 	}
 	model := ti.Model
 	if model == "" {
 		model = "inherit"
 	}
-	isolation := "in-process"
+	mode := "in-process"
 	if ti.RunInBG {
-		isolation = "background"
+		mode = "background"
 	}
 
-	metaStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorText)
-	mutedStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-	meta := metaStyle.Render(name) + " " + mutedStyle.Render("["+model+", "+isolation+"]")
+	header := name + " [" + model + ", " + mode + "]"
 
-	// Description: first line only, truncated.
 	desc := ti.Description
 	if desc == "" {
 		desc = ti.Prompt
 	}
-	if len(desc) > 80 {
-		desc = desc[:77] + "..."
-	}
-	// Take only the first line.
 	if idx := strings.IndexByte(desc, '\n'); idx >= 0 {
 		desc = desc[:idx]
 	}
-	descStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
-
-	// Build the card with rounded border.
-	headerStyle := lipgloss.NewStyle().
-		Foreground(ColorSecondary).
-		Bold(true)
-	content := meta + "\n" + descStyle.Render(desc)
-	cardBorder := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorSecondary).
-		Padding(0, 1)
-	card := "\n" + cardBorder.Render(headerStyle.Render("Agent Dispatched") + "\n" + content)
-	return card
+	if len(desc) > 80 {
+		desc = desc[:77] + "..."
+	}
+	if desc != "" {
+		return header + "\n" + desc
+	}
+	return header
 }
 
 // convertTodosToTaskInfo maps tools.TodoItem slice to dashboard.TaskInfo slice.

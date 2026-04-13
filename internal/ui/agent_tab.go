@@ -4390,15 +4390,13 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			return true, nil
 		}
 		var sb strings.Builder
-		sb.WriteString("## Discovered Skills\n\n")
-		sb.WriteString("| Name | Description |\n")
-		sb.WriteString("|------|-------------|\n")
+		sb.WriteString(fmt.Sprintf("Discovered Skills (%d found)\n\n", len(skillList)))
 		for _, s := range skillList {
 			desc := s.Description
-			if len(desc) > 80 {
-				desc = desc[:77] + "..."
+			if len(desc) > 60 {
+				desc = desc[:57] + "..."
 			}
-			sb.WriteString(fmt.Sprintf("| %s | %s |\n", s.Name, desc))
+			sb.WriteString(fmt.Sprintf("  %-20s %s\n", s.Name, desc))
 		}
 		at.addSystemMessage(sb.String())
 		at.refreshViewport()
@@ -4447,6 +4445,8 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		out, err := exec.Command("git", "diff", "--stat").Output()
 		if err != nil {
 			at.addSystemMessage("No git changes")
+		} else if len(strings.TrimSpace(string(out))) == 0 {
+			at.addSystemMessage("Working tree clean")
 		} else {
 			at.addSystemMessage(string(out))
 		}

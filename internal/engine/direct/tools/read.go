@@ -3,11 +3,15 @@ package tools
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -28,11 +32,17 @@ var imageExts = map[string]string{
 // ReadTool reads text files with line numbers (cat -n format).
 type ReadTool struct {
 	fileState *FileState
+
+	cacheMu   sync.Mutex
+	readCache map[string]string // path -> content sha256 hex
 }
 
 // NewReadTool creates a ReadTool backed by the given FileState tracker.
 func NewReadTool(fs *FileState) *ReadTool {
-	return &ReadTool{fileState: fs}
+	return &ReadTool{
+		fileState: fs,
+		readCache: make(map[string]string),
+	}
 }
 
 func (r *ReadTool) Name() string        { return "Read" }
@@ -60,7 +70,7 @@ func (r *ReadTool) InputSchema() map[string]any {
 	}
 }
 
-func (r *ReadTool) Execute(_ context.Context, input map[string]any) ToolResult {
+func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult {
 	path := paramString(input, "file_path", "")
 	if path == "" {
 		return ToolResult{Content: "file_path is required", IsError: true}
@@ -69,17 +79,15 @@ func (r *ReadTool) Execute(_ context.Context, input map[string]any) ToolResult {
 	// clean the path
 	path = filepath.Clean(path)
 
-	// check if image
+	// clean extension for routing
 	ext := strings.ToLower(filepath.Ext(path))
+
+	// check if image
 	if mime, ok := imageExts[ext]; ok {
 		return r.readImage(path, mime)
 	}
 
-	// check if binary
-	if isBinaryFile(path) {
-		return ToolResult{Content: "binary file, cannot read", IsError: true}
-	}
-
+	// PDF files
 	offset := paramInt(input, "offset", 1)
 	if offset < 1 {
 		offset = 1
@@ -87,6 +95,20 @@ func (r *ReadTool) Execute(_ context.Context, input map[string]any) ToolResult {
 	limit := paramInt(input, "limit", defaultReadLimit)
 	if limit < 1 {
 		limit = defaultReadLimit
+	}
+
+	if ext == ".pdf" {
+		return r.readPDF(ctx, path, offset, limit)
+	}
+
+	// Jupyter notebooks
+	if ext == ".ipynb" {
+		return r.readNotebook(path)
+	}
+
+	// check if binary
+	if isBinaryFile(path) {
+		return ToolResult{Content: "binary file, cannot read", IsError: true}
 	}
 
 	f, err := os.Open(path)
@@ -130,8 +152,21 @@ func (r *ReadTool) Execute(_ context.Context, input map[string]any) ToolResult {
 		return ToolResult{Content: fmt.Sprintf("read error: %v", err), IsError: true}
 	}
 
+	content := b.String()
+
+	// file-unchanged-since-last-read detection
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+	r.cacheMu.Lock()
+	if cached, ok := r.readCache[path]; ok && cached == hash {
+		r.cacheMu.Unlock()
+		r.fileState.MarkRead(path)
+		return ToolResult{Content: "[file unchanged since last read]"}
+	}
+	r.readCache[path] = hash
+	r.cacheMu.Unlock()
+
 	r.fileState.MarkRead(path)
-	return ToolResult{Content: b.String()}
+	return ToolResult{Content: content}
 }
 
 func (r *ReadTool) readImage(path, mime string) ToolResult {
@@ -151,6 +186,82 @@ func (r *ReadTool) readImage(path, mime string) ToolResult {
 			"mime_type": mime,
 		},
 	}
+}
+
+// readPDF extracts text from a PDF using pdftotext (poppler).
+func (r *ReadTool) readPDF(ctx context.Context, path string, offset, limit int) ToolResult {
+	out, err := exec.CommandContext(ctx, "pdftotext", "-layout", path, "-").Output()
+	if err != nil {
+		return ToolResult{
+			Content: "PDF reading requires pdftotext (brew install poppler)",
+			IsError: true,
+		}
+	}
+	text := string(out)
+	lines := strings.Split(text, "\n")
+
+	// apply offset (1-based) and limit
+	start := offset - 1
+	if start < 0 {
+		start = 0
+	}
+	if start > len(lines) {
+		start = len(lines)
+	}
+	end := start + limit
+	if end > len(lines) {
+		end = len(lines)
+	}
+	lines = lines[start:end]
+
+	var b strings.Builder
+	for i, line := range lines {
+		b.WriteString(fmt.Sprintf("%6d\t%s\n", start+i+1, line))
+	}
+
+	r.fileState.MarkRead(path)
+	return ToolResult{Content: b.String()}
+}
+
+// readNotebook reads a Jupyter .ipynb file and renders cells as text.
+func (r *ReadTool) readNotebook(path string) ToolResult {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ToolResult{Content: fmt.Sprintf("file not found: %s", path), IsError: true}
+		}
+		return ToolResult{Content: fmt.Sprintf("cannot read notebook: %v", err), IsError: true}
+	}
+
+	var nb struct {
+		Cells []struct {
+			CellType string   `json:"cell_type"`
+			Source   []string `json:"source"`
+			Outputs  []struct {
+				Text []string `json:"text"`
+			} `json:"outputs"`
+		} `json:"cells"`
+	}
+	if err := json.Unmarshal(data, &nb); err != nil {
+		return ToolResult{Content: fmt.Sprintf("invalid notebook format: %v", err), IsError: true}
+	}
+
+	var sb strings.Builder
+	for i, cell := range nb.Cells {
+		sb.WriteString(fmt.Sprintf("--- Cell %d (%s) ---\n", i+1, cell.CellType))
+		sb.WriteString(strings.Join(cell.Source, ""))
+		sb.WriteString("\n")
+		for _, out := range cell.Outputs {
+			if len(out.Text) > 0 {
+				sb.WriteString("Output:\n")
+				sb.WriteString(strings.Join(out.Text, ""))
+				sb.WriteString("\n")
+			}
+		}
+	}
+
+	r.fileState.MarkRead(path)
+	return ToolResult{Content: sb.String()}
 }
 
 // isBinaryFile checks if a file looks like binary by reading the first 8KB.

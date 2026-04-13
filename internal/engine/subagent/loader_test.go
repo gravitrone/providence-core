@@ -86,7 +86,67 @@ You write things.`
 	assert.Equal(t, "Writing agent", agents["writer"].Description)
 }
 
-func TestProjectOverridesUser(t *testing.T) {
+func TestLoaderValidFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "full-agent.md")
+
+	content := `---
+name: full-agent
+description: Fully specified agent
+tools:
+  - Read
+  - Write
+  - Bash
+disallowedTools:
+  - Grep
+model: fast
+engine: claude
+effort: high
+maxTurns: 25
+permissionMode: plan
+background: true
+isolation: docker
+---
+You are a fully specified agent.`
+
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	agent, err := ParseAgentFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "full-agent", agent.Name)
+	assert.Equal(t, "Fully specified agent", agent.Description)
+	assert.Equal(t, []string{"Read", "Write", "Bash"}, agent.Tools)
+	assert.Equal(t, []string{"Grep"}, agent.DisallowedTools)
+	assert.Equal(t, "fast", agent.Model)
+	assert.Equal(t, "claude", agent.Engine)
+	assert.Equal(t, "high", agent.Effort)
+	assert.Equal(t, 25, agent.MaxTurns)
+	assert.Equal(t, "plan", agent.PermissionMode)
+	assert.True(t, agent.Background)
+	assert.Equal(t, "docker", agent.Isolation)
+}
+
+func TestLoaderBodyAsPrompt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "prompt-agent.md")
+
+	content := `---
+name: prompter
+---
+This is the system prompt.
+It spans multiple lines.
+Third line here.`
+
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	agent, err := ParseAgentFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "prompter", agent.Name)
+	assert.Contains(t, agent.SystemPrompt, "This is the system prompt.")
+	assert.Contains(t, agent.SystemPrompt, "Third line here.")
+}
+
+func TestLoaderProjectOverridesUser(t *testing.T) {
 	projectRoot := t.TempDir()
 	homeDir := t.TempDir()
 

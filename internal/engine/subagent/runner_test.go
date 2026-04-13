@@ -167,3 +167,85 @@ func TestStrippedAgentPrompt(t *testing.T) {
 	assert.NotEmpty(t, StrippedAgentPrompt)
 	assert.Contains(t, StrippedAgentPrompt, "Providence Core")
 }
+
+func TestRunnerConcurrent5Agents(t *testing.T) {
+	r := NewRunner()
+	ids := make([]string, 5)
+	for i := 0; i < 5; i++ {
+		input := TaskInput{
+			Description: fmt.Sprintf("concurrent-%d", i),
+			Prompt:      "go",
+			RunInBG:     true,
+		}
+		id, err := r.Spawn(context.Background(), input, DefaultAgentType(), mockExecutor(fmt.Sprintf("result-%d", i), nil, 20*time.Millisecond))
+		require.NoError(t, err)
+		ids[i] = id
+	}
+
+	// All 5 should complete successfully.
+	for i, id := range ids {
+		result := r.WaitFor(id)
+		require.NotNil(t, result, "agent %d should have result", i)
+		assert.Equal(t, "completed", result.Status)
+		assert.Equal(t, fmt.Sprintf("result-%d", i), result.Result)
+	}
+}
+
+func TestRunnerKillRunning(t *testing.T) {
+	r := NewRunner()
+	input := TaskInput{
+		Description: "killable",
+		Prompt:      "long running",
+		RunInBG:     true,
+	}
+
+	id, err := r.Spawn(context.Background(), input, DefaultAgentType(), mockExecutor("", nil, 10*time.Second))
+	require.NoError(t, err)
+
+	time.Sleep(10 * time.Millisecond) // let goroutine start
+
+	err = r.Kill(id)
+	require.NoError(t, err)
+
+	agent, ok := r.Get(id)
+	require.True(t, ok)
+	assert.Equal(t, "killed", agent.Status)
+
+	result := r.WaitFor(id)
+	require.NotNil(t, result)
+	assert.Equal(t, "killed", result.Status)
+}
+
+func TestRunnerListAll(t *testing.T) {
+	r := NewRunner()
+	for i := 0; i < 3; i++ {
+		input := TaskInput{Description: fmt.Sprintf("list-%d", i), Prompt: "go"}
+		_, err := r.Spawn(context.Background(), input, DefaultAgentType(), mockExecutor("ok", nil, 0))
+		require.NoError(t, err)
+	}
+
+	agents := r.List()
+	assert.Len(t, agents, 3)
+
+	// All should be completed (sync spawn).
+	for _, a := range agents {
+		assert.Equal(t, "completed", a.Status)
+	}
+}
+
+func TestRunnerWaitForCompleted(t *testing.T) {
+	r := NewRunner()
+	input := TaskInput{Description: "already done", Prompt: "fast"}
+	id, err := r.Spawn(context.Background(), input, DefaultAgentType(), mockExecutor("instant", nil, 0))
+	require.NoError(t, err)
+
+	// Agent already completed (sync). WaitFor should return immediately.
+	start := time.Now()
+	result := r.WaitFor(id)
+	elapsed := time.Since(start)
+
+	require.NotNil(t, result)
+	assert.Equal(t, "completed", result.Status)
+	assert.Equal(t, "instant", result.Result)
+	assert.Less(t, elapsed, 50*time.Millisecond, "WaitFor on completed agent should return near-instantly")
+}

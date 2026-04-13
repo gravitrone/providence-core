@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/gravitrone/providence-core/internal/engine/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,6 +24,7 @@ func (m *mockEngine) Cancel()                                   {}
 func (m *mockEngine) Close()                                    {}
 func (m *mockEngine) Status() SessionStatus                     { return m.status }
 func (m *mockEngine) TriggerCompact(_ context.Context) error    { return nil }
+func (m *mockEngine) SessionBus() *session.Bus                  { return session.NewBus() }
 func (m *mockEngine) RestoreHistory(msgs []RestoredMessage) error {
 	m.restored = msgs
 	return nil

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gravitrone/providence-core/internal/engine"
+	"github.com/gravitrone/providence-core/internal/engine/session"
 )
 
 func init() {
@@ -298,6 +299,12 @@ func (s *Session) TriggerCompact(_ context.Context) error {
 			"content": "/compact",
 		},
 	})
+}
+
+// SessionBus returns a no-op bus. The claude headless backend does not support
+// session event broadcasting since it manages its own subprocess state.
+func (s *Session) SessionBus() *session.Bus {
+	return session.NewBus()
 }
 
 // sendJSON marshals v as JSON and writes a newline-terminated line to stdin.

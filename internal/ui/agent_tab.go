@@ -27,6 +27,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine"
 	_ "github.com/gravitrone/providence-core/internal/engine/claude"    // register claude factory
 	_ "github.com/gravitrone/providence-core/internal/engine/codex_re" // register codex_re factory
+	"github.com/gravitrone/providence-core/internal/engine/customtools"
 	"github.com/gravitrone/providence-core/internal/engine/direct" // register direct factory + image types
 	"github.com/gravitrone/providence-core/internal/engine/kairos"
 	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
@@ -302,6 +303,11 @@ type AgentTab struct {
 
 	// Track which background subagent IDs we already notified about.
 	notifiedAgents map[string]bool
+
+	// Discovered skills, custom agents, and custom tools loaded at startup.
+	discoveredSkills []skills.SkillDefinition
+	customAgents     map[string]subagent.AgentType
+	customTools      []customtools.CustomTool
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -344,6 +350,12 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		})
 	}
 
+	// Discover skills, custom agents, and custom tools at startup.
+	cwd, _ := os.Getwd()
+	discoveredSkills, _ := skills.LoadSkills(cwd, home)
+	customAgents, _ := subagent.LoadCustomAgents(cwd, home)
+	customTools, _ := customtools.LoadCustomTools(cwd, home)
+
 	return AgentTab{
 		input:            ti,
 		viewport:         vp,
@@ -361,6 +373,9 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		dashboardVisible: true,
 		dashboard:        dashboard.New(),
 		kairos:           kairos.New(),
+		discoveredSkills: discoveredSkills,
+		customAgents:     customAgents,
+		customTools:      customTools,
 	}
 }
 

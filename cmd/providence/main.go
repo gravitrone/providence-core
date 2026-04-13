@@ -3,11 +3,13 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/gravitrone/providence-core/internal/config"
+	"github.com/gravitrone/providence-core/internal/engine/plugin"
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui"
 )
@@ -93,6 +95,14 @@ func runTUI(engineType string, cfg config.Config) error {
 	if st != nil {
 		defer st.Close()
 	}
+	// Initialize plugin manager.
+	homeDir, _ := os.UserHomeDir()
+	pluginDir := filepath.Join(homeDir, ".providence", "plugins")
+	pluginMgr := plugin.NewManager(pluginDir)
+	if err := pluginMgr.LoadAll(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: plugin load: %v\n", err)
+	}
+
 	app := ui.NewApp(engineType, cfg, st)
 	if err := runBubbleTUI(app); err != nil {
 		return fmt.Errorf("tui error: %w", err)

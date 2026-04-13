@@ -4829,9 +4829,19 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			return true, nil
 		}
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Discovered Skills (%d found)\n", len(skillList)))
-		sb.WriteString("\n")
-		for _, s := range skillList {
+		maxShow := 20
+		showAll := strings.TrimSpace(args) == "-v"
+		if showAll {
+			maxShow = len(skillList)
+			sb.WriteString(fmt.Sprintf("All Skills (%d)\n\n", len(skillList)))
+		} else {
+			sb.WriteString(fmt.Sprintf("Discovered Skills (%d found)\n\n", len(skillList)))
+		}
+		for i, s := range skillList {
+			if i >= maxShow {
+				sb.WriteString(fmt.Sprintf("\n  ... and %d more. Use /skills -v to see all.", len(skillList)-maxShow))
+				break
+			}
 			desc := s.Description
 			if len(desc) > 40 {
 				desc = desc[:37] + "..."

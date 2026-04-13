@@ -6,17 +6,33 @@ import (
 	"sync"
 )
 
+// maxConsecutiveErrors is the number of consecutive CallTool failures before
+// the manager attempts to reconnect the MCP server.
+const maxConsecutiveErrors = 3
+
+// maxReconnectAttempts caps how many times the manager will try to reconnect
+// a single MCP server before giving up.
+const maxReconnectAttempts = 5
+
 // Manager holds all connected MCP server clients and provides a unified
 // interface for tool discovery and invocation.
 type Manager struct {
 	mu      sync.RWMutex
 	clients map[string]*Client
+	configs map[string]ServerConfig
+
+	// Per-client error tracking for auto-reconnect.
+	consecutiveErrors  map[string]int
+	reconnectAttempts  map[string]int
 }
 
 // NewManager creates an empty MCP Manager.
 func NewManager() *Manager {
 	return &Manager{
-		clients: make(map[string]*Client),
+		clients:           make(map[string]*Client),
+		configs:           make(map[string]ServerConfig),
+		consecutiveErrors: make(map[string]int),
+		reconnectAttempts: make(map[string]int),
 	}
 }
 
@@ -50,6 +66,7 @@ func (m *Manager) ConnectAll(configs []ServerConfig) error {
 
 		m.mu.Lock()
 		m.clients[cfg.Name] = client
+		m.configs[cfg.Name] = cfg
 		m.mu.Unlock()
 	}
 
@@ -72,7 +89,8 @@ func (m *Manager) GetAllTools() map[string][]ToolDef {
 	return result
 }
 
-// CallTool invokes a tool on the specified MCP server.
+// CallTool invokes a tool on the specified MCP server. After 3 consecutive
+// errors, automatically attempts to reconnect the server (up to 5 times).
 func (m *Manager) CallTool(serverName, toolName string, args map[string]any) (string, error) {
 	m.mu.RLock()
 	client, ok := m.clients[serverName]
@@ -81,7 +99,92 @@ func (m *Manager) CallTool(serverName, toolName string, args map[string]any) (st
 	if !ok {
 		return "", fmt.Errorf("MCP server %q not connected", serverName)
 	}
+
+	result, err := client.CallTool(toolName, args)
+	if err != nil {
+		m.mu.Lock()
+		m.consecutiveErrors[serverName]++
+		errCount := m.consecutiveErrors[serverName]
+		m.mu.Unlock()
+
+		// Auto-reconnect after threshold consecutive failures.
+		if errCount >= maxConsecutiveErrors {
+			if reconnErr := m.Reconnect(serverName); reconnErr == nil {
+				// Retry the call once on the fresh connection.
+				return m.retryCall(serverName, toolName, args)
+			}
+		}
+		return result, err
+	}
+
+	// Success: reset error counter.
+	m.mu.Lock()
+	m.consecutiveErrors[serverName] = 0
+	m.mu.Unlock()
+
+	return result, nil
+}
+
+// retryCall performs a single retry of CallTool on a freshly reconnected server.
+func (m *Manager) retryCall(serverName, toolName string, args map[string]any) (string, error) {
+	m.mu.RLock()
+	client, ok := m.clients[serverName]
+	m.mu.RUnlock()
+
+	if !ok {
+		return "", fmt.Errorf("MCP server %q not connected after reconnect", serverName)
+	}
 	return client.CallTool(toolName, args)
+}
+
+// Reconnect tears down and re-initializes the named MCP server connection.
+// Returns an error if the server config is unknown or reconnect attempts are
+// exhausted (capped at 5).
+func (m *Manager) Reconnect(name string) error {
+	m.mu.Lock()
+	cfg, hasCfg := m.configs[name]
+	attempts := m.reconnectAttempts[name]
+	if attempts >= maxReconnectAttempts {
+		m.mu.Unlock()
+		return fmt.Errorf("MCP server %q: reconnect attempts exhausted (%d/%d)", name, attempts, maxReconnectAttempts)
+	}
+	m.reconnectAttempts[name] = attempts + 1
+	m.mu.Unlock()
+
+	if !hasCfg {
+		return fmt.Errorf("MCP server %q: no config available for reconnect", name)
+	}
+
+	// Close the existing client if present.
+	m.mu.RLock()
+	oldClient, hasOld := m.clients[name]
+	m.mu.RUnlock()
+	if hasOld {
+		oldClient.Close()
+	}
+
+	// Spawn and initialize a fresh client.
+	client, err := NewStdioClient(cfg)
+	if err != nil {
+		return fmt.Errorf("MCP server %q reconnect spawn: %w", name, err)
+	}
+
+	if err := client.Initialize(); err != nil {
+		client.Close()
+		return fmt.Errorf("MCP server %q reconnect init: %w", name, err)
+	}
+
+	if _, err := client.ListTools(); err != nil {
+		client.Close()
+		return fmt.Errorf("MCP server %q reconnect list tools: %w", name, err)
+	}
+
+	m.mu.Lock()
+	m.clients[name] = client
+	m.consecutiveErrors[name] = 0
+	m.mu.Unlock()
+
+	return nil
 }
 
 // GetInstructions concatenates instructions from all connected servers.

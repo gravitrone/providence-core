@@ -3169,11 +3169,9 @@ func (at AgentTab) renderPermissionMessage(msg ChatMessage, contentW int) string
 		deny := renderPermButton("Deny", 0, sel == 2)
 		buttons := lipgloss.JoinHorizontal(lipgloss.Left, allow+"  ", allowSess+"  ", deny)
 
-		helpText := MutedStyle.Render("a/y: allow  s: session  d/n: deny  ←→: navigate")
-
 		parts := []string{title, ""}
 		parts = append(parts, infoLines...)
-		parts = append(parts, "", buttons, "", helpText)
+		parts = append(parts, "", buttons)
 		inner := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
 		box := lipgloss.NewStyle().

@@ -28,6 +28,14 @@ func translateStreamEvent(event anthropic.MessageStreamEventUnion) *engine.Parse
 					},
 				},
 			}
+		case anthropic.InputJSONDelta:
+			return &engine.ParsedEvent{
+				Type: "tool_input_delta",
+				Data: &engine.ToolInputDelta{
+					Type:        "tool_input_delta",
+					PartialJSON: delta.PartialJSON,
+				},
+			}
 		default:
 			return nil
 		}

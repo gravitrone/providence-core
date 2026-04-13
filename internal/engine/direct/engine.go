@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -519,26 +520,37 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		// Build tool params.
 		toolParams := e.toolParams()
 
-		// Call Messages API with streaming.
-		stream := e.client.Messages.NewStreaming(ctx, anthropic.MessageNewParams{
+		// Call Messages API with streaming + 429 retry + 413 reactive compact.
+		apiParams := anthropic.MessageNewParams{
 			Model:     anthropic.Model(e.model),
 			MaxTokens: 16384,
 			System:    e.systemBlocks(),
 			Messages:  e.history.Messages(),
 			Tools:     toolParams,
-		})
+		}
 
-		// Consume stream, emit text deltas, accumulate message.
-		var accumulated anthropic.Message
-		for stream.Next() {
-			event := stream.Current()
-			_ = accumulated.Accumulate(event)
-			if pe := translateStreamEvent(event); pe != nil {
-				e.events <- *pe
+		accumulated, streamErr := e.streamWithRetry(ctx, apiParams)
+
+		// 413 prompt-too-long reactive compaction.
+		if streamErr != nil {
+			errStr := streamErr.Error()
+			if (strings.Contains(errStr, "413") || strings.Contains(errStr, "prompt_too_long")) && e.compactor != nil {
+				e.events <- engine.ParsedEvent{
+					Type: "system_message",
+					Data: &engine.SystemMessageEvent{
+						Type:    "system_message",
+						Content: "Prompt too long. Compacting context...",
+					},
+				}
+				if compactErr := e.compactor.TriggerReactive(ctx); compactErr == nil {
+					// Compaction succeeded, retry the turn.
+					continue
+				}
 			}
 		}
-		if err := stream.Err(); err != nil {
-			if isOverloadError(err) && !e.fallbackActive {
+
+		if streamErr != nil {
+			if isOverloadError(streamErr) && !e.fallbackActive {
 				fallback := engine.FastForProvider(e.provider)
 				if fallback != "" && fallback != e.model {
 					// Tombstone any partial streaming content so UI can clear it.
@@ -561,7 +573,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 					continue
 				}
 			}
-			e.emitError(err)
+			e.emitError(streamErr)
 			return
 		}
 		e.emitUsageUpdate(
@@ -847,6 +859,46 @@ func (e *DirectEngine) Steer(text string) {
 	e.steerMu.Lock()
 	defer e.steerMu.Unlock()
 	e.steered = append(e.steered, text)
+}
+
+// streamWithRetry calls the Messages API with streaming, retrying up to 3 times
+// on 429 rate limit errors with exponential backoff.
+func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.MessageNewParams) (anthropic.Message, error) {
+	const maxRetries = 3
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		stream := e.client.Messages.NewStreaming(ctx, params)
+
+		var accumulated anthropic.Message
+		for stream.Next() {
+			event := stream.Current()
+			_ = accumulated.Accumulate(event)
+			if pe := translateStreamEvent(event); pe != nil {
+				e.events <- *pe
+			}
+		}
+		if err := stream.Err(); err != nil {
+			errStr := err.Error()
+			if strings.Contains(errStr, "429") || strings.Contains(errStr, "rate_limit") {
+				if attempt < maxRetries-1 {
+					delay := engine.Backoff(attempt)
+					e.events <- engine.ParsedEvent{
+						Type: "system_message",
+						Data: &engine.SystemMessageEvent{
+							Type:    "system_message",
+							Content: fmt.Sprintf("Rate limited. Retrying in %s...", delay),
+						},
+					}
+					time.Sleep(delay)
+					continue
+				}
+			}
+			return accumulated, err
+		}
+		return accumulated, nil
+	}
+	// Unreachable, but satisfies the compiler.
+	return anthropic.Message{}, fmt.Errorf("stream retry exhausted")
 }
 
 // isOverloadError returns true if the error indicates a model overload (HTTP 529

@@ -2441,13 +2441,40 @@ func (at AgentTab) matchingSlashCommands() []slashCommand {
 	// Match on the first token only - the command name - so "/model haiku"
 	// still shows the /model row as the active match.
 	head := strings.ToLower(strings.SplitN(val, " ", 2)[0])
-	var matches []slashCommand
+
+	// Tier 1: exact match.
 	for _, cmd := range slashCommands {
-		if strings.HasPrefix(cmd.Name, head) {
-			matches = append(matches, cmd)
+		if cmd.Name == head {
+			return []slashCommand{cmd}
 		}
 	}
-	return matches
+
+	// Tier 2: prefix match.
+	var prefixMatches []slashCommand
+	for _, cmd := range slashCommands {
+		if strings.HasPrefix(cmd.Name, head) {
+			prefixMatches = append(prefixMatches, cmd)
+		}
+	}
+	if len(prefixMatches) > 0 {
+		return prefixMatches
+	}
+
+	// Tier 3: substring match on name or description (fuzzy fallback).
+	// Strip leading "/" for substring matching so "/mdl" matches "/model".
+	needle := strings.TrimPrefix(head, "/")
+	if needle == "" {
+		return nil
+	}
+	var substringMatches []slashCommand
+	for _, cmd := range slashCommands {
+		nameLower := strings.ToLower(cmd.Name)
+		descLower := strings.ToLower(cmd.Desc)
+		if strings.Contains(nameLower, needle) || strings.Contains(descLower, needle) {
+			substringMatches = append(substringMatches, cmd)
+		}
+	}
+	return substringMatches
 }
 
 // renderCommandPreview renders the flame-styled slash command table that

@@ -4315,24 +4315,41 @@ func isOpenRouterModel(model string) bool {
 	return spec != nil && spec.Provider == "openrouter"
 }
 
-// buildSystemPromptWithStyle builds the system prompt and prepends the active
-// output style if one is configured and found on disk.
+// buildSystemPromptWithStyle builds the system prompt, prepends the active
+// output style if configured, and appends discovered CLAUDE.md/AGENTS.md
+// instruction files plus system reminders.
 func buildSystemPromptWithStyle(outputStyleName string) string {
 	base := engine.BuildSystemPrompt(nil)
-	if outputStyleName == "" {
-		return base
-	}
-	cwd, _ := os.Getwd()
-	home, _ := os.UserHomeDir()
-	styles, err := outputstyles.LoadOutputStyles(cwd, home)
-	if err != nil || len(styles) == 0 {
-		return base
-	}
-	for _, s := range styles {
-		if s.Name == outputStyleName && s.Prompt != "" {
-			return s.Prompt + "\n\n" + base
+
+	// Prepend output style if configured.
+	if outputStyleName != "" {
+		cwd, _ := os.Getwd()
+		home, _ := os.UserHomeDir()
+		styles, err := outputstyles.LoadOutputStyles(cwd, home)
+		if err == nil {
+			for _, s := range styles {
+				if s.Name == outputStyleName && s.Prompt != "" {
+					base = s.Prompt + "\n\n" + base
+					break
+				}
+			}
 		}
 	}
+
+	// Discover and inject CLAUDE.md, AGENTS.md, .claude/rules/*.md.
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+	instructionFiles := engine.DiscoverInstructionFiles(cwd, home)
+	if injection := engine.FormatInstructionInjection(instructionFiles); injection != "" {
+		base = base + "\n\n" + injection
+	}
+
+	// Append system reminders (date, plan mode, etc).
+	reminders := engine.BuildSystemReminders(engine.ReminderState{})
+	if reminders != "" {
+		base = base + "\n\n" + reminders
+	}
+
 	return base
 }
 

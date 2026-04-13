@@ -463,6 +463,8 @@ func (e *DirectEngine) Close() {
 	if e.store != nil {
 		e.saveSessionLearnings(e.store, e.startTime)
 	}
+	// Append mechanical session memory to project MEMORY.md.
+	e.appendSessionMemory()
 }
 
 // GetCurrentTodos implements engine.TodoProvider.

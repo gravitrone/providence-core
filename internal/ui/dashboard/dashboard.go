@@ -9,6 +9,32 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+// FileInfo describes a file touched during the session.
+type FileInfo struct {
+	Path   string // absolute or relative path
+	Action string // "read", "write", "edit"
+}
+
+// ErrorInfo describes a tool or session error.
+type ErrorInfo struct {
+	Tool    string
+	Message string
+}
+
+// TaskInfo describes a single todo item from TodoWrite.
+type TaskInfo struct {
+	Text   string
+	Status string // "pending", "in_progress", "completed"
+}
+
+// CompactInfo describes the last compaction event.
+type CompactInfo struct {
+	Phase        string // "running", "complete", "failed"
+	TokensBefore int
+	TokensAfter  int
+	ErrMsg       string
+}
+
 // Panel is a single dashboard panel with a title, glyph, and render function.
 type Panel struct {
 	ID        string
@@ -32,6 +58,14 @@ type DashboardModel struct {
 	// Token usage progress bar.
 	TokenProgress progress.Model
 	TokenPct      float64 // 0.0 - 1.0
+
+	// Live data backing each panel.
+	CurrentTokens int
+	MaxTokens     int
+	Files         []FileInfo
+	Errors        []ErrorInfo
+	Tasks         []TaskInfo
+	Compact       CompactInfo
 }
 
 // New creates a DashboardModel with default stub panels.
@@ -94,7 +128,12 @@ func (d DashboardModel) View() string {
 		if panel.ID == "tokens" {
 			// Render token progress bar.
 			d.TokenProgress.SetWidth(innerW - 4)
-			pctLabel := fmt.Sprintf("  %3.0f%% context", d.TokenPct*100)
+			var pctLabel string
+			if d.MaxTokens > 0 {
+				pctLabel = fmt.Sprintf("  %dk / %dk (%0.0f%%)", d.CurrentTokens/1000, d.MaxTokens/1000, d.TokenPct*100)
+			} else {
+				pctLabel = fmt.Sprintf("  %3.0f%% context", d.TokenPct*100)
+			}
 			body = pctLabel + "\n  " + d.TokenProgress.ViewAs(d.TokenPct)
 		} else {
 			body = "  No data"
@@ -230,6 +269,219 @@ func (d *DashboardModel) PanelByID(id string) *Panel {
 		}
 	}
 	return nil
+}
+
+// SetTokens updates the token usage panel with real numbers.
+func (d *DashboardModel) SetTokens(current, max int) {
+	d.CurrentTokens = current
+	d.MaxTokens = max
+	if max > 0 {
+		d.TokenPct = float64(current) / float64(max)
+	} else {
+		d.TokenPct = 0
+	}
+}
+
+// SetFiles replaces the tracked file list for the FILES panel.
+func (d *DashboardModel) SetFiles(files []FileInfo) {
+	d.Files = files
+	p := d.PanelByID("files")
+	if p == nil {
+		return
+	}
+	if len(files) == 0 {
+		p.Render = func(w int) string { return "  No files touched" }
+		p.Badge = ""
+		return
+	}
+	p.Badge = fmt.Sprintf("[%d]", len(files))
+	snapshot := make([]FileInfo, len(files))
+	copy(snapshot, files)
+	p.Render = func(w int) string {
+		var b strings.Builder
+		// Show most recent files first, limit to 8 visible.
+		start := 0
+		if len(snapshot) > 8 {
+			start = len(snapshot) - 8
+		}
+		for i := start; i < len(snapshot); i++ {
+			f := snapshot[i]
+			icon := "R"
+			switch f.Action {
+			case "write":
+				icon = "W"
+			case "edit":
+				icon = "E"
+			}
+			line := fmt.Sprintf("  %s %s", icon, truncatePath(f.Path, w-6))
+			b.WriteString(line)
+			if i < len(snapshot)-1 {
+				b.WriteByte('\n')
+			}
+		}
+		if start > 0 {
+			b.WriteString(fmt.Sprintf("\n  ...+%d more", start))
+		}
+		return b.String()
+	}
+}
+
+// AddFile appends a single file touch event.
+func (d *DashboardModel) AddFile(path, action string) {
+	// Deduplicate: if same path+action exists, skip.
+	for _, f := range d.Files {
+		if f.Path == path && f.Action == action {
+			return
+		}
+	}
+	d.Files = append(d.Files, FileInfo{Path: path, Action: action})
+	d.SetFiles(d.Files)
+}
+
+// SetErrors replaces the error list for the ERRORS panel.
+func (d *DashboardModel) SetErrors(errors []ErrorInfo) {
+	d.Errors = errors
+	p := d.PanelByID("errors")
+	if p == nil {
+		return
+	}
+	if len(errors) == 0 {
+		p.Render = func(w int) string { return "  No errors" }
+		p.Badge = ""
+		p.BadgeHot = false
+		return
+	}
+	p.Badge = fmt.Sprintf("[%d]", len(errors))
+	p.BadgeHot = true
+	p.Collapsed = false
+	snapshot := make([]ErrorInfo, len(errors))
+	copy(snapshot, errors)
+	p.Render = func(w int) string {
+		var b strings.Builder
+		start := 0
+		if len(snapshot) > 5 {
+			start = len(snapshot) - 5
+		}
+		for i := start; i < len(snapshot); i++ {
+			e := snapshot[i]
+			line := fmt.Sprintf("  [%s] %s", e.Tool, truncatePath(e.Message, w-8))
+			b.WriteString(line)
+			if i < len(snapshot)-1 {
+				b.WriteByte('\n')
+			}
+		}
+		return b.String()
+	}
+}
+
+// AddError appends a single error event.
+func (d *DashboardModel) AddError(tool, message string) {
+	d.Errors = append(d.Errors, ErrorInfo{Tool: tool, Message: message})
+	d.SetErrors(d.Errors)
+}
+
+// SetTasks updates the TASKS panel from todo items.
+func (d *DashboardModel) SetTasks(tasks []TaskInfo) {
+	d.Tasks = tasks
+	p := d.PanelByID("tasks")
+	if p == nil {
+		return
+	}
+	if len(tasks) == 0 {
+		p.Render = func(w int) string { return "  No tasks" }
+		p.Badge = ""
+		return
+	}
+	pending := 0
+	for _, t := range tasks {
+		if t.Status != "completed" {
+			pending++
+		}
+	}
+	if pending > 0 {
+		p.Badge = fmt.Sprintf("[%d pending]", pending)
+	} else {
+		p.Badge = "[done]"
+	}
+	snapshot := make([]TaskInfo, len(tasks))
+	copy(snapshot, tasks)
+	p.Render = func(w int) string {
+		var b strings.Builder
+		for i, t := range snapshot {
+			marker := "○"
+			switch t.Status {
+			case "in_progress":
+				marker = "◐"
+			case "completed":
+				marker = "●"
+			}
+			line := fmt.Sprintf("  %s %s", marker, truncatePath(t.Text, w-6))
+			b.WriteString(line)
+			if i < len(snapshot)-1 {
+				b.WriteByte('\n')
+			}
+		}
+		return b.String()
+	}
+}
+
+// SetCompact updates the COMPACT panel from compaction state.
+func (d *DashboardModel) SetCompact(info CompactInfo) {
+	d.Compact = info
+	p := d.PanelByID("compact")
+	if p == nil {
+		return
+	}
+	switch info.Phase {
+	case "":
+		p.Render = func(w int) string { return "  Idle" }
+		p.Badge = ""
+		p.Collapsed = true
+	case "running":
+		p.Collapsed = false
+		before := info.TokensBefore
+		p.Badge = "[running]"
+		p.Render = func(w int) string {
+			if before > 0 {
+				return fmt.Sprintf("  Compacting %dk tokens...", before/1000)
+			}
+			return "  Compacting..."
+		}
+	case "complete":
+		p.Collapsed = false
+		before := info.TokensBefore
+		after := info.TokensAfter
+		p.Badge = "[done]"
+		p.Render = func(w int) string {
+			if before > 0 && after > 0 {
+				saved := before - after
+				return fmt.Sprintf("  %dk -> %dk (saved %dk)", before/1000, after/1000, saved/1000)
+			}
+			return "  Compaction complete"
+		}
+	case "failed":
+		p.Collapsed = false
+		errMsg := info.ErrMsg
+		p.Badge = "[failed]"
+		p.BadgeHot = true
+		p.Render = func(w int) string {
+			if errMsg != "" {
+				return fmt.Sprintf("  Failed: %s", truncatePath(errMsg, w-12))
+			}
+			return "  Compaction failed"
+		}
+	}
+}
+
+// truncatePath shortens a string to fit within maxLen, keeping the tail.
+func truncatePath(s string, maxLen int) string {
+	if maxLen < 4 {
+		maxLen = 4
+	}
+	if len(s) <= maxLen {
+		return s
+	}
+	return "..." + s[len(s)-maxLen+3:]
 }
 
 // --- Default Panels (stubs - real renderers come in Phase 6 W2) ---

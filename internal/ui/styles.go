@@ -425,3 +425,17 @@ func Divider(width int) string {
 	}
 	return DividerStyle.Render(strings.Repeat("\u2500", width))
 }
+
+// renderVerticalDivider renders a single-character-wide vertical line of the
+// given height, using the provided border color hex.
+func renderVerticalDivider(height int, borderHex string) string {
+	if height <= 0 {
+		return ""
+	}
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color(borderHex))
+	lines := make([]string, height)
+	for i := range lines {
+		lines[i] = style.Render("\u2502") // │
+	}
+	return strings.Join(lines, "\n")
+}

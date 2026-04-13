@@ -18,6 +18,8 @@ const (
 	FocusModal
 	// FocusDashboard routes keys to the dashboard panel.
 	FocusDashboard
+	// FocusSidebar routes keys to the sidebar agent panel.
+	FocusSidebar
 )
 
 // --- Transcript Model ---

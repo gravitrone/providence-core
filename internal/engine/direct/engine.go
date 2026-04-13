@@ -26,6 +26,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/mcp"
 	"github.com/gravitrone/providence-core/internal/engine/session"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
+	"github.com/gravitrone/providence-core/internal/engine/teams"
 )
 
 // MaxOutputTokensRecoveryLimit is the maximum number of times the engine will
@@ -310,6 +311,14 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	// StructuredOutput tool: headless JSON output (enabled in headless mode only).
 	structuredOutputTool := tools.NewStructuredOutputTool()
 	registry.Register(structuredOutputTool)
+
+	// Team tools: TeamCreate and TeamDelete for agent team coordination.
+	if teamStore, err := teams.DefaultStore(); err == nil {
+		teamCreateTool := tools.NewTeamCreateTool(teamStore)
+		registry.Register(teamCreateTool)
+		teamDeleteTool := tools.NewTeamDeleteTool(teamStore)
+		registry.Register(teamDeleteTool)
+	}
 
 	// MCP server support: load config, connect servers, register tools.
 	mcpHomeDir, _ := os.UserHomeDir()

@@ -22,7 +22,6 @@ import (
 	"github.com/gravitrone/providence-core/internal/ui"
 )
 
-// Main runs the CLI entrypoint.
 func main() {
 	root := newRootCommand()
 	if err := root.Execute(); err != nil {
@@ -41,7 +40,7 @@ var headlessFlag bool
 var outputFormat string
 var inputFormat string
 
-// NewRootCommand builds the root cobra command.
+// newRootCommand builds the root cobra command.
 func newRootCommand() *cobra.Command {
 	cwd, _ := os.Getwd()
 	cfg := config.LoadMerged(cwd)
@@ -112,14 +111,14 @@ func newRootCommand() *cobra.Command {
 	return root
 }
 
-// RunBubbleTUI is a var so tests can override it without launching a real program.
+// runBubbleTUI is a var so tests can override it without launching a real program.
 var runBubbleTUI = func(app tea.Model) error {
 	p := tea.NewProgram(app)
 	_, err := p.Run()
 	return err
 }
 
-// RunTUI launches the fullscreen Bubble Tea TUI.
+// runTUI launches the fullscreen Bubble Tea TUI.
 func runTUI(engineType string, cfg config.Config) error {
 	if !isInteractiveTerminal(os.Stdout) {
 		fmt.Println(ui.RenderBanner())
@@ -147,7 +146,7 @@ func runTUI(engineType string, cfg config.Config) error {
 	return nil
 }
 
-// IsInteractiveTerminal reports whether file is an interactive TTY.
+// isInteractiveTerminal reports whether file is an interactive TTY.
 func isInteractiveTerminal(file *os.File) bool {
 	if file == nil {
 		return false
@@ -159,14 +158,14 @@ func isInteractiveTerminal(file *os.File) bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-// Init sets up environment defaults.
+// init sets up environment defaults.
 func init() {
 	_ = os.Setenv("COLORTERM", "truecolor")
 }
 
 // --- Headless NDJSON Mode ---
 
-// runHeadless runs the engine in headless NDJSON mode using headless.Server.
+// runHeadless runs the engine in headless NDJSON mode via headless.Server.
 func runHeadless(engineType string, cfg config.Config) error {
 	wd, _ := os.Getwd()
 

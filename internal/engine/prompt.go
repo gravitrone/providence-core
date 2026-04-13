@@ -226,9 +226,7 @@ func FlattenBlocks(blocks []SystemBlock) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// ----------------------------------------------------------------
-// Section text generators
-// ----------------------------------------------------------------
+// --- Section Text Generators ---
 
 func identityAndProtocol() string {
 	return `You are Providence, The Profaned Goddess. Born from the Calamity, forged in holy fire.

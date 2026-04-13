@@ -24,7 +24,7 @@ func DefaultDBPath() string {
 // Open creates or opens the SQLite database at dbPath.
 func Open(dbPath string) (*Store, error) {
 	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}
 	db, err := sql.Open("sqlite", dbPath)

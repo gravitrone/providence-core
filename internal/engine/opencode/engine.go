@@ -22,11 +22,11 @@ func init() {
 // management (port discovery, health checks, SSE event streaming) will be fleshed
 // out when opencode is actually installed and available.
 type OpenCodeEngine struct {
-	events  chan engine.ParsedEvent
-	status  engine.SessionStatus
-	model   string
-	cmd *exec.Cmd
-	mu  sync.Mutex
+	events chan engine.ParsedEvent
+	status engine.SessionStatus
+	model  string
+	cmd    *exec.Cmd
+	mu     sync.Mutex
 }
 
 // NewOpenCodeEngine creates a new OpenCode engine from the given config.

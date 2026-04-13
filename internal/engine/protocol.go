@@ -4,6 +4,9 @@ package engine
 // Claude-headless-specific types (UserMessage, PermissionResponse, ParseEvent)
 // remain in internal/engine/claude/protocol.go.
 
+// --- Message Types ---
+
+// ContentPart is a single element in a message content array (text, tool_use, tool_result).
 type ContentPart struct {
 	Type  string `json:"type"`
 	Text  string `json:"text,omitempty"`
@@ -12,16 +15,21 @@ type ContentPart struct {
 	Input any    `json:"input,omitempty"`
 }
 
+// MessageBody is a structured message with a role and content parts.
 type MessageBody struct {
 	Role    string        `json:"role"`
 	Content []ContentPart `json:"content"`
 }
 
+// --- Event Types ---
+
+// Event is the base envelope for all NDJSON events (type + subtype).
 type Event struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype,omitempty"`
 }
 
+// SystemInitEvent is emitted on session startup to announce capabilities.
 type SystemInitEvent struct {
 	Type      string   `json:"type"`
 	Subtype   string   `json:"subtype"`
@@ -30,31 +38,37 @@ type SystemInitEvent struct {
 	Model     string   `json:"model"`
 }
 
+// StreamEvent wraps a streaming API delta event.
 type StreamEvent struct {
 	Type  string          `json:"type"`
 	Event StreamEventData `json:"event"`
 }
 
+// StreamEventData carries the delta payload inside a StreamEvent.
 type StreamEventData struct {
 	Type  string       `json:"type"`
 	Index int          `json:"index"`
 	Delta *StreamDelta `json:"delta,omitempty"`
 }
 
+// StreamDelta is a text or tool-input fragment from a streaming response.
 type StreamDelta struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
 }
 
+// AssistantEvent wraps a complete assistant message turn.
 type AssistantEvent struct {
 	Type    string       `json:"type"`
 	Message AssistantMsg `json:"message"`
 }
 
+// AssistantMsg is the content payload of an assistant turn.
 type AssistantMsg struct {
 	Content []ContentPart `json:"content"`
 }
 
+// ResultEvent is emitted at turn completion with outcome and cost metrics.
 type ResultEvent struct {
 	Type         string  `json:"type"`
 	Subtype      string  `json:"subtype"`
@@ -64,6 +78,7 @@ type ResultEvent struct {
 	IsError      bool    `json:"is_error"`
 }
 
+// PermissionRequestEvent is emitted when the engine needs user approval for a tool.
 type PermissionRequestEvent struct {
 	Type       string             `json:"type"`
 	Tool       PermissionTool     `json:"tool"`
@@ -71,11 +86,13 @@ type PermissionRequestEvent struct {
 	Options    []PermissionOption `json:"options"`
 }
 
+// PermissionTool describes the tool awaiting permission.
 type PermissionTool struct {
 	Name  string `json:"name"`
 	Input any    `json:"input"`
 }
 
+// PermissionOption is a selectable response to a permission request.
 type PermissionOption struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`

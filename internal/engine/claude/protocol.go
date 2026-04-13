@@ -7,13 +7,15 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine"
 )
 
-// Inbound messages (sent to Claude's stdin) - claude-headless-specific NDJSON format.
+// --- Inbound Message Types ---
 
+// UserMessage is the NDJSON envelope for a user turn sent to Claude's stdin.
 type UserMessage struct {
-	Type    string           `json:"type"`
+	Type    string             `json:"type"`
 	Message engine.MessageBody `json:"message"`
 }
 
+// PermissionResponse is the NDJSON response to a permission_request event.
 type PermissionResponse struct {
 	Type       string `json:"type"`
 	QuestionID string `json:"question_id"`

@@ -5,14 +5,14 @@ package headless
 // --- CC-Compatible Event Types ---
 
 const (
-	TypeSystem         = "system"
-	TypeAssistant      = "assistant"
-	TypeUser           = "user"
-	TypeResult         = "result"
-	TypeStreamEvent    = "stream_event"
-	TypeToolProgress   = "tool_progress"
-	TypeRateLimitEvent = "rate_limit_event"
-	TypeControlRequest = "control_request"
+	TypeSystem          = "system"
+	TypeAssistant       = "assistant"
+	TypeUser            = "user"
+	TypeResult          = "result"
+	TypeStreamEvent     = "stream_event"
+	TypeToolProgress    = "tool_progress"
+	TypeRateLimitEvent  = "rate_limit_event"
+	TypeControlRequest  = "control_request"
 	TypeControlResponse = "control_response"
 )
 

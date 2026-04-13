@@ -98,7 +98,9 @@ func TestGrepInvalidRegex(t *testing.T) {
 		"path":    ".",
 	})
 	assert.True(t, res.IsError)
-	assert.Contains(t, res.Content, "invalid regex")
+	// rg reports "regex parse error", Go fallback reports "invalid regex"
+	assert.True(t, strings.Contains(res.Content, "invalid regex") || strings.Contains(res.Content, "regex parse error"),
+		"expected regex error message, got: %s", res.Content)
 }
 
 func TestGrepMissingPattern(t *testing.T) {
@@ -188,7 +190,9 @@ func TestGrepSingleFile(t *testing.T) {
 	})
 	assert.False(t, res.IsError)
 	assert.Contains(t, res.Content, "target")
-	assert.Contains(t, res.Content, ":2:")
+	// rg uses "N:line" for single files, Go fallback uses "path:N:line"
+	assert.True(t, strings.Contains(res.Content, ":2:") || strings.Contains(res.Content, "2:line2"),
+		"expected line 2, got: %s", res.Content)
 }
 
 func TestGrepBadPath(t *testing.T) {
@@ -198,5 +202,9 @@ func TestGrepBadPath(t *testing.T) {
 		"path":    "/nonexistent/dir",
 	})
 	assert.True(t, res.IsError)
-	assert.Contains(t, res.Content, "path error")
+	// rg reports "IO error", Go fallback reports "path error"
+	assert.True(t, strings.Contains(res.Content, "path error") ||
+		strings.Contains(res.Content, "No such file") ||
+		strings.Contains(res.Content, "IO error"),
+		"expected path error, got: %s", res.Content)
 }

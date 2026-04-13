@@ -108,3 +108,19 @@ type ToolInputDelta struct {
 	Type        string `json:"type"`
 	PartialJSON string `json:"partial_json"`
 }
+
+// ThinkingStartEvent signals the beginning of a thinking block.
+type ThinkingStartEvent struct {
+	Type string `json:"type"`
+}
+
+// ThinkingDelta carries a partial text fragment from a thinking block.
+type ThinkingDelta struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// ThinkingStopEvent signals the end of a thinking block.
+type ThinkingStopEvent struct {
+	Type string `json:"type"`
+}

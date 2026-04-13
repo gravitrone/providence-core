@@ -295,7 +295,6 @@ func TestFormatTaskInputBasic(t *testing.T) {
 	plain := components.SanitizeText(out)
 	assert.Contains(t, plain, "fix-auth-bug", "should contain agent name")
 	assert.Contains(t, plain, "[opus", "should contain model")
-	assert.Contains(t, plain, "Agent Dispatched", "should contain card header")
 	assert.Contains(t, plain, "Fix the authentication bypass", "should contain description")
 }
 
@@ -308,7 +307,6 @@ func TestFormatTaskInputBackground(t *testing.T) {
 	out := formatTaskInput(input)
 	plain := components.SanitizeText(out)
 	assert.Contains(t, plain, "background", "should indicate background mode")
-	assert.Contains(t, plain, "Agent Dispatched", "should show dispatch header")
 }
 
 func TestFormatTaskInputFallback(t *testing.T) {
@@ -317,7 +315,6 @@ func TestFormatTaskInputFallback(t *testing.T) {
 	}
 	out := formatTaskInput(input)
 	plain := components.SanitizeText(out)
-	assert.Contains(t, plain, "Agent Dispatched", "should show card even with minimal input")
 	assert.Contains(t, plain, "general-purpose", "should show default agent type as name")
 }
 

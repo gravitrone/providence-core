@@ -393,7 +393,7 @@ func TestMapModelForEngine(t *testing.T) {
 	}{
 		// Codex always maps to gpt-5.4-codex.
 		{"opus", "codex", "gpt-5.4-codex"},
-		{"sonnet", "codex_re", "gpt-5.4-codex"},
+		{"sonnet", "codex_headless", "gpt-5.4-codex"},
 		{"anything", "codex", "gpt-5.4-codex"},
 
 		// Claude maps aliases.

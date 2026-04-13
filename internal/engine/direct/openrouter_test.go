@@ -24,7 +24,7 @@ func TestBuildOpenRouterTools(t *testing.T) {
 		&tools.BashTool{},
 	)
 
-	out := buildOpenRouterTools(registry)
+	out := buildOpenRouterTools(registry.All())
 	require.Len(t, out, 2)
 
 	// Every entry must be an OpenAI function-style tool.

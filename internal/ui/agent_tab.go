@@ -101,6 +101,10 @@ func doublePressReset(key string) tea.Cmd {
 
 // --- Agent Tab Messages ---
 
+// resumeInitMsg is emitted by App.Init() when --resume or --continue was
+// specified on the CLI. Handled in Update to restore the session.
+type resumeInitMsg struct{}
+
 // AgentEventMsg wraps a parsed event from the Claude headless session.
 type AgentEventMsg struct {
 	Event engine.ParsedEvent
@@ -382,6 +386,10 @@ type AgentTab struct {
 	// Auto-title: generate session title from first user message.
 	autoTitleGenerated bool
 
+	// Pending resume: set by --resume/--continue CLI flags. Processed once
+	// during Init() to restore the session before the first user interaction.
+	pendingResume *ResumeData
+
 	// Input history: up-arrow recalls previous submissions.
 	inputHistory         []string
 	inputHistoryIdx      int
@@ -413,7 +421,8 @@ type AgentTab struct {
 
 // NewAgentTab creates and returns a new AgentTab.
 // engineType overrides the default engine; pass "" for the default (claude).
-func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Store) AgentTab {
+// resume may be nil; when set the tab restores that session on startup.
+func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Store, resume *ResumeData) AgentTab {
 	if engineType == "" {
 		engineType = engine.EngineTypeClaude
 	}
@@ -440,9 +449,10 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 	model := cfg.Model
 
 	// First-run onboarding: show welcome message and create .providence/ dir.
+	// Skip welcome when resuming a session via CLI flags.
 	var initialMessages []ChatMessage
 	home, _ := os.UserHomeDir()
-	if IsFirstRun(home) {
+	if resume == nil && IsFirstRun(home) {
 		welcomeContent := "Welcome to Providence! The Profaned Core awaits.\n\n" +
 			"Quick start:\n" +
 			"  /model  - switch models\n" +
@@ -506,6 +516,7 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		keybindings:      keybindings,
 		toolsExpanded:    make(map[int]bool),
 		errorExpanded:    make(map[int]bool),
+		pendingResume:    resume,
 	}
 }
 
@@ -656,6 +667,10 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 			return at, spinnerTick()
 		}
 		return at, nil
+
+	case resumeInitMsg:
+		cmd := at.handleResumeInit()
+		return at, cmd
 
 	case engineCreatedMsg:
 		cmd := at.handleEngineCreated(msg)
@@ -5519,6 +5534,75 @@ func createEngineAndSend(prompt, model string, engineType engine.EngineType, out
 		}
 		return engineCreatedMsg{engine: eng, prompt: prompt}
 	}
+}
+
+// handleResumeInit processes pendingResume data set by --resume/--continue CLI
+// flags. Mirrors the /resume N handler but uses pre-loaded messages from the
+// CLI layer instead of querying the store.
+func (at *AgentTab) handleResumeInit() tea.Cmd {
+	rd := at.pendingResume
+	at.pendingResume = nil
+	if rd == nil {
+		return nil
+	}
+
+	msgs := rd.Messages
+	at.messages = nil
+	restored := make([]engine.RestoredMessage, 0, len(msgs))
+	pendingToolIDs := make(map[string]string)
+
+	for _, m := range msgs {
+		at.messages = append(at.messages, ChatMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			Done:       m.Done,
+			ToolName:   m.ToolName,
+			ToolArgs:   m.ToolArgs,
+			ToolStatus: m.ToolStatus,
+			ToolBody:   m.ToolBody,
+			ToolOutput: m.ToolOutput,
+			ImageCount: m.ImageCount,
+		})
+
+		rm := engine.RestoredMessage{
+			Role:    m.Role,
+			Content: m.Content,
+		}
+		switch m.Role {
+		case "assistant":
+			if m.ToolName != "" {
+				callID := fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
+				pendingToolIDs[m.ToolName] = callID
+			}
+		case "tool":
+			callID, ok := pendingToolIDs[m.ToolName]
+			if !ok || callID == "" {
+				callID = fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
+			}
+			delete(pendingToolIDs, m.ToolName)
+			rm.ToolName = m.ToolName
+			rm.ToolInput = m.ToolArgs
+			rm.ToolCallID = callID
+			rm.Content = m.ToolOutput
+		}
+		restored = append(restored, rm)
+	}
+
+	var wasInterrupted bool
+	restored, wasInterrupted = repairRestoredMessages(restored, pendingToolIDs)
+
+	at.sessionID = rd.SessionID
+	at.messagesDirty = true
+	title := rd.Title
+	if title == "" {
+		title = "(untitled)"
+	}
+	at.addSystemMessage("Session restored: " + title)
+	if wasInterrupted {
+		at.addSystemMessage("Session was interrupted. Continuing from where you left off.")
+	}
+	at.refreshViewport()
+	return createEngineAndRestore(restored, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks)
 }
 
 // repairRestoredMessages fixes common interruption artifacts in restored

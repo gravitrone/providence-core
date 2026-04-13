@@ -13,6 +13,14 @@ import (
 	"github.com/gravitrone/providence-core/internal/ui/components"
 )
 
+// ResumeData carries pre-loaded session data from the CLI into the TUI so
+// providence --resume / --continue can restore a session on startup.
+type ResumeData struct {
+	SessionID string
+	Title     string
+	Messages  []store.MessageRow
+}
+
 // App is the root TUI model. Providence is purely the agent chat - no tabs.
 type App struct {
 	keys     KeyMap
@@ -23,7 +31,8 @@ type App struct {
 
 // NewApp creates and returns a new App model.
 // engineType sets the initial AI backend; pass "" for the default (claude).
-func NewApp(engineType string, cfg config.Config, st *store.Store) App {
+// resume may be nil; when set the TUI restores that session on startup.
+func NewApp(engineType string, cfg config.Config, st *store.Store, resume *ResumeData) App {
 	// Restore persisted theme before constructing the agent tab so the
 	// renderer picks up the correct palette on first paint.
 	switch cfg.Theme {
@@ -39,13 +48,17 @@ func NewApp(engineType string, cfg config.Config, st *store.Store) App {
 	}
 	return App{
 		keys:     DefaultKeyMap(),
-		agentTab: NewAgentTab(engine.EngineType(engineType), cfg, st),
+		agentTab: NewAgentTab(engine.EngineType(engineType), cfg, st, resume),
 	}
 }
 
 // Init implements tea.Model.
 func (a App) Init() tea.Cmd {
-	return flameTick()
+	cmds := []tea.Cmd{flameTick()}
+	if a.agentTab.pendingResume != nil {
+		cmds = append(cmds, func() tea.Msg { return resumeInitMsg{} })
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update implements tea.Model.

@@ -15,7 +15,7 @@ import (
 )
 
 func TestNewAgentTab(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	// Creates without panic, dbPath stored
 	assert.NotNil(t, at)
 	// Input is initialized and focused
@@ -23,40 +23,40 @@ func TestNewAgentTab(t *testing.T) {
 }
 
 func TestAgentTabView(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	out := at.View(120, 40)
 	// Does not panic, produces output
 	assert.NotEmpty(t, out)
 }
 
 func TestAgentTabViewContainsInputArea(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	out := at.View(120, 40)
 	// The view should contain the ❯ prompt from the textarea.
 	assert.Contains(t, out, "❯", "view should contain the input prompt indicator")
 }
 
 func TestAgentTabFocusedWhenIdle(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	// Agent tab is NOT focused when idle (allows tab switching)
 	assert.False(t, at.Focused())
 }
 
 func TestAgentTabFocusedWhenStreaming(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.streaming = true
 	assert.True(t, at.Focused())
 }
 
 func TestAgentTabHintsDefaultState(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	hints := at.Hints()
 	// Default state has no hints (clean UI).
 	assert.Nil(t, hints)
 }
 
 func TestAgentTabHintsStreamingState(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.streaming = true
 	hints := at.Hints()
 	// Streaming without queue has no hints.
@@ -64,7 +64,7 @@ func TestAgentTabHintsStreamingState(t *testing.T) {
 }
 
 func TestAgentTabHintsQueueSelected(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.queue = []QueuedMessage{{Text: "test"}}
 	at.queueCursor = 0
 	hints := at.Hints()
@@ -80,7 +80,7 @@ func TestAgentTabHintsQueueSelected(t *testing.T) {
 }
 
 func TestAgentTabHintsPermissionPending(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.pendingPerm = &engine.PermissionRequestEvent{
 		QuestionID: "q-1",
 	}
@@ -96,7 +96,7 @@ func TestAgentTabHintsPermissionPending(t *testing.T) {
 }
 
 func TestAgentTabStatusLineShowsContextPillWhenEngineActive(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.model = "sonnet"
 	at.engine = &direct.DirectEngine{}
 	at.currentTokens = 120000
@@ -108,7 +108,7 @@ func TestAgentTabStatusLineShowsContextPillWhenEngineActive(t *testing.T) {
 }
 
 func TestStatusLineSingleRow(t *testing.T) {
-	at := NewAgentTab("direct", config.Config{}, nil)
+	at := NewAgentTab("direct", config.Config{}, nil, nil)
 	at.model = "sonnet"
 	at.width = 200
 	at.engine = &direct.DirectEngine{}
@@ -129,7 +129,7 @@ func TestStatusLineSingleRow(t *testing.T) {
 }
 
 func TestStatusLineTruncation(t *testing.T) {
-	at := NewAgentTab("direct", config.Config{}, nil)
+	at := NewAgentTab("direct", config.Config{}, nil, nil)
 	at.model = "sonnet"
 	at.width = 60 // narrow - should drop low-priority pills
 	at.engine = &direct.DirectEngine{}
@@ -146,7 +146,7 @@ func TestStatusLineTruncation(t *testing.T) {
 }
 
 func TestStatusLineAllPills(t *testing.T) {
-	at := NewAgentTab("direct", config.Config{}, nil)
+	at := NewAgentTab("direct", config.Config{}, nil, nil)
 	at.model = "sonnet"
 	at.width = 300
 	at.engine = &direct.DirectEngine{}
@@ -177,7 +177,7 @@ func TestAgentTabResize(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			at := NewAgentTab("", config.Config{}, nil)
+			at := NewAgentTab("", config.Config{}, nil, nil)
 			assert.NotPanics(t, func() {
 				at.Resize(tc.width, tc.height)
 			})
@@ -186,14 +186,14 @@ func TestAgentTabResize(t *testing.T) {
 }
 
 func TestAgentTabResizeUpdatesView(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.Resize(120, 40)
 	out := at.View(120, 40)
 	assert.NotEmpty(t, out)
 }
 
 func TestAgentTabEmptyChat(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	// Initial state has no messages
 	assert.Empty(t, at.messages)
 	// View should show empty state indicator
@@ -204,34 +204,34 @@ func TestAgentTabEmptyChat(t *testing.T) {
 }
 
 func TestAgentTabInit(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	cmd := at.Init()
 	// Init returns flameTick cmd for flame animation.
 	assert.NotNil(t, cmd)
 }
 
 func TestAgentTabRenderMessagesEmpty(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	rendered := at.renderMessages()
 	assert.Contains(t, rendered, "Providence Awaits")
 }
 
 func TestAgentTabRenderMessagesWithUserMessage(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.addMessage("user", "find me ML jobs", true)
 	rendered := at.renderMessages()
 	assert.Contains(t, rendered, "find me ML jobs")
 }
 
 func TestAgentTabRenderMessagesWithSystemMessage(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.addMessage("system", "session connected", true)
 	rendered := at.renderMessages()
 	assert.Contains(t, rendered, "session connected")
 }
 
 func TestAgentTabViewWidthPropagation(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	// View at a narrower vs wider width should produce different results
 	narrow := at.View(60, 30)
 	wide := at.View(200, 30)
@@ -360,7 +360,7 @@ func TestFormatToolInputLongStringTruncated(t *testing.T) {
 // --- Message Queue & Steering Tests ---
 
 func TestQueueMessageDuringStreaming(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.streaming = true
 	at.input.SetValue("hello world")
 
@@ -372,7 +372,7 @@ func TestQueueMessageDuringStreaming(t *testing.T) {
 }
 
 func TestQueueMultipleMessages(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.streaming = true
 
 	messages := []string{"first", "second", "third"}
@@ -388,7 +388,7 @@ func TestQueueMultipleMessages(t *testing.T) {
 }
 
 func TestShiftEnterInsertsNewline(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 
 	// Type some text then shift+enter should insert a newline (handled by textarea).
 	at.input.SetValue("line one")
@@ -400,7 +400,7 @@ func TestShiftEnterInsertsNewline(t *testing.T) {
 }
 
 func TestEscExitsQueueSelection(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.streaming = true
 	at.queue = []QueuedMessage{
 		{Text: "msg1"}, {Text: "msg2"}, {Text: "msg3"},
@@ -415,7 +415,7 @@ func TestEscExitsQueueSelection(t *testing.T) {
 }
 
 func TestUpArrowSelectsLastQueueMessage(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.queue = []QueuedMessage{{Text: "first"}, {Text: "second"}}
 	at.input.SetValue("") // empty input required for queue selection
 
@@ -425,7 +425,7 @@ func TestUpArrowSelectsLastQueueMessage(t *testing.T) {
 }
 
 func TestUpArrowNavigatesQueue(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.queue = []QueuedMessage{{Text: "first"}, {Text: "second"}, {Text: "third"}}
 	at.queueCursor = 2
 
@@ -435,7 +435,7 @@ func TestUpArrowNavigatesQueue(t *testing.T) {
 }
 
 func TestDownArrowNavigatesQueue(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.queue = []QueuedMessage{{Text: "first"}, {Text: "second"}}
 	at.queueCursor = 0
 
@@ -445,7 +445,7 @@ func TestDownArrowNavigatesQueue(t *testing.T) {
 }
 
 func TestDownArrowPastLastExitsQueue(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.queue = []QueuedMessage{{Text: "first"}, {Text: "second"}}
 	at.queueCursor = 1 // last message
 
@@ -455,7 +455,7 @@ func TestDownArrowPastLastExitsQueue(t *testing.T) {
 }
 
 func TestEnterOnSelectedSteersMessage(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.queue = []QueuedMessage{{Text: "waiting"}, {Text: "also waiting"}}
 	at.queueCursor = 0
 
@@ -466,7 +466,7 @@ func TestEnterOnSelectedSteersMessage(t *testing.T) {
 }
 
 func TestEnterOnAlreadySteeredIsNoop(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.queue = []QueuedMessage{{Text: "already steered", Steered: true}}
 	at.queueCursor = 0
 
@@ -476,7 +476,7 @@ func TestEnterOnAlreadySteeredIsNoop(t *testing.T) {
 }
 
 func TestDeleteRemovesSelectedMessage(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.queue = []QueuedMessage{{Text: "first"}, {Text: "second"}, {Text: "third"}}
 	at.queueCursor = 1 // select "second"
 
@@ -489,7 +489,7 @@ func TestDeleteRemovesSelectedMessage(t *testing.T) {
 }
 
 func TestDeleteLastMessageExitsQueue(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.queue = []QueuedMessage{{Text: "only one"}}
 	at.queueCursor = 0
 
@@ -500,7 +500,7 @@ func TestDeleteLastMessageExitsQueue(t *testing.T) {
 }
 
 func TestBackspaceRemovesSelectedMessage(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.queue = []QueuedMessage{{Text: "first"}, {Text: "second"}}
 	at.queueCursor = 0
 
@@ -530,7 +530,7 @@ func TestSlashCommandFiresOnFirstEnter(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.cmd, func(t *testing.T) {
-			at := NewAgentTab("", config.Config{}, nil)
+			at := NewAgentTab("", config.Config{}, nil, nil)
 			at.Resize(120, 40)
 			at.input.SetValue(tc.cmd)
 
@@ -549,7 +549,7 @@ func TestSlashCommandFiresOnFirstEnter(t *testing.T) {
 // TestSlashTableNavigation verifies up/down navigates the slash table
 // when the input starts with "/".
 func TestSlashTableNavigation(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.Resize(120, 40)
 	at.input.SetValue("/")
 
@@ -574,7 +574,7 @@ func TestSlashTableNavigation(t *testing.T) {
 // through handleAgentEvent and verifies the indicator state machine
 // transitions cleanly through running -> complete and running -> failed.
 func TestCompactIndicatorStateMachine(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.Resize(120, 40)
 
 	// Running phase: indicator should arm with before token count and verb.
@@ -600,7 +600,7 @@ func TestCompactIndicatorStateMachine(t *testing.T) {
 	assert.Equal(t, 45000, at.compactTokensAfter)
 
 	// Failed path from a fresh running state.
-	at2 := NewAgentTab("", config.Config{}, nil)
+	at2 := NewAgentTab("", config.Config{}, nil, nil)
 	at2.Resize(120, 40)
 	at2, _ = at2.handleAgentEvent(AgentEventMsg{Event: engine.ParsedEvent{
 		Type: "compaction",
@@ -626,7 +626,7 @@ func TestIsKnownSlashCommand(t *testing.T) {
 }
 
 func TestSafeWaitForEventNilSession(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	// session is nil by default
 	require.Nil(t, at.engine)
 
@@ -636,7 +636,7 @@ func TestSafeWaitForEventNilSession(t *testing.T) {
 }
 
 func TestPrepareSend(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 
 	at.prepareSend("test message")
 
@@ -648,7 +648,7 @@ func TestPrepareSend(t *testing.T) {
 }
 
 func TestRenderQueuedMessages(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.streaming = true
 	at.queue = []QueuedMessage{{Text: "find me remote ML jobs"}}
 	// Need at least one message so renderMessages doesn't show empty state.
@@ -660,7 +660,7 @@ func TestRenderQueuedMessages(t *testing.T) {
 }
 
 func TestRenderSteeredMessage(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.streaming = true
 	at.queue = []QueuedMessage{{Text: "urgent task", Steered: true}}
 	at.addMessage("user", "test prompt", true)
@@ -671,7 +671,7 @@ func TestRenderSteeredMessage(t *testing.T) {
 }
 
 func TestRenderSelectedMessage(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.streaming = true
 	at.queue = []QueuedMessage{{Text: "selectable"}, {Text: "also here"}}
 	at.queueCursor = 0
@@ -686,7 +686,7 @@ func TestRenderSelectedMessage(t *testing.T) {
 // --- Batch Tool Display Tests ---
 
 func TestBatchGrouping_ConsecutiveSameTool(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.width = 120
 	// Add 5 consecutive Read tool messages.
 	for i := 0; i < 5; i++ {
@@ -709,7 +709,7 @@ func TestBatchGrouping_ConsecutiveSameTool(t *testing.T) {
 }
 
 func TestBatchGrouping_NonConsecutiveNotGrouped(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.width = 120
 	at.messages = append(at.messages,
 		ChatMessage{Role: "tool", ToolName: "Read", ToolArgs: "a.go", ToolStatus: "success", Done: true},
@@ -722,7 +722,7 @@ func TestBatchGrouping_NonConsecutiveNotGrouped(t *testing.T) {
 }
 
 func TestBatchGrouping_SingleToolNotGrouped(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.width = 120
 	at.messages = append(at.messages,
 		ChatMessage{Role: "tool", ToolName: "Read", ToolArgs: "only.go", ToolStatus: "success", Done: true},
@@ -733,7 +733,7 @@ func TestBatchGrouping_SingleToolNotGrouped(t *testing.T) {
 }
 
 func TestBatchGrouping_MixedTools(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.width = 120
 	// Read, Read, Write -> first 2 grouped, Write standalone.
 	at.messages = append(at.messages,
@@ -748,7 +748,7 @@ func TestBatchGrouping_MixedTools(t *testing.T) {
 }
 
 func TestBatchGrouping_ExpandedShowsAll(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.width = 120
 	for i := 0; i < 3; i++ {
 		at.messages = append(at.messages, ChatMessage{
@@ -770,7 +770,7 @@ func TestBatchGrouping_ExpandedShowsAll(t *testing.T) {
 }
 
 func TestCtrlOEntersFreezeMode(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.messages = append(at.messages, ChatMessage{Role: "user", Content: "hello"})
 	assert.Equal(t, FocusInput, at.focus)
 
@@ -786,14 +786,14 @@ func TestCtrlOEntersFreezeMode(t *testing.T) {
 
 func TestHintsNoCtrlOInIdle(t *testing.T) {
 	// ctrl+o freeze hint moved to StatusLine; Hints() should be empty in idle.
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.messages = append(at.messages, ChatMessage{Role: "tool", ToolName: "Read", Done: true})
 	hints := at.Hints()
 	assert.Empty(t, hints, "idle hints should be empty, ctrl+o is now in StatusLine")
 }
 
 func TestHintsShowFreezeControls(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.messages = append(at.messages, ChatMessage{Role: "user", Content: "hello"})
 	at.focus = FocusTranscript
 	at.transcript.SetFrozen(true)
@@ -807,7 +807,7 @@ func TestHintsShowFreezeControls(t *testing.T) {
 }
 
 func TestToolOutputShownWhenExpanded(t *testing.T) {
-	at := NewAgentTab("", config.Config{}, nil)
+	at := NewAgentTab("", config.Config{}, nil, nil)
 	at.width = 120
 	at.messages = append(at.messages, ChatMessage{
 		Role:       "tool",

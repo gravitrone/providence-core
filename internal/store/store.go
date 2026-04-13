@@ -52,6 +52,79 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// CleanupOldSessions deletes sessions and their messages older than
+// retentionDays. Returns the number of sessions removed.
+func (s *Store) CleanupOldSessions(retentionDays int) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	if retentionDays < 1 {
+		retentionDays = 30
+	}
+	cutoff := fmt.Sprintf("-%d days", retentionDays)
+	res, err := s.db.Exec(
+		`DELETE FROM sessions WHERE updated_at < datetime('now', ?)`, cutoff,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("cleanup sessions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// FindSessionByIDOrTitle looks up a session by exact ID prefix or title
+// substring match. Returns the first match or nil.
+func (s *Store) FindSessionByIDOrTitle(query string) (*SessionRow, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+
+	// Try exact ID prefix first.
+	row := s.db.QueryRow(
+		`SELECT id, cwd, engine_type, model, COALESCE(title,''), created_at, updated_at, token_count, cost_usd
+		 FROM sessions WHERE id LIKE ? ORDER BY updated_at DESC LIMIT 1`,
+		query+"%",
+	)
+	var sr SessionRow
+	err := row.Scan(&sr.ID, &sr.CWD, &sr.EngineType, &sr.Model, &sr.Title, &sr.CreatedAt, &sr.UpdatedAt, &sr.TokenCount, &sr.CostUSD)
+	if err == nil {
+		return &sr, nil
+	}
+
+	// Fall back to title substring match.
+	row = s.db.QueryRow(
+		`SELECT id, cwd, engine_type, model, COALESCE(title,''), created_at, updated_at, token_count, cost_usd
+		 FROM sessions WHERE title LIKE ? ORDER BY updated_at DESC LIMIT 1`,
+		"%"+query+"%",
+	)
+	err = row.Scan(&sr.ID, &sr.CWD, &sr.EngineType, &sr.Model, &sr.Title, &sr.CreatedAt, &sr.UpdatedAt, &sr.TokenCount, &sr.CostUSD)
+	if err != nil {
+		return nil, nil
+	}
+	return &sr, nil
+}
+
+// MostRecentSession returns the most recently updated session, or nil.
+func (s *Store) MostRecentSession() (*SessionRow, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	row := s.db.QueryRow(
+		`SELECT id, cwd, engine_type, model, COALESCE(title,''), created_at, updated_at, token_count, cost_usd
+		 FROM sessions ORDER BY updated_at DESC LIMIT 1`,
+	)
+	var sr SessionRow
+	err := row.Scan(&sr.ID, &sr.CWD, &sr.EngineType, &sr.Model, &sr.Title, &sr.CreatedAt, &sr.UpdatedAt, &sr.TokenCount, &sr.CostUSD)
+	if err != nil {
+		return nil, nil
+	}
+	return &sr, nil
+}
+
 func migrate(db *sql.DB) error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS sessions (

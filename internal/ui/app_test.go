@@ -10,12 +10,12 @@ import (
 
 func TestNewAppNoPanic(t *testing.T) {
 	assert.NotPanics(t, func() {
-		_ = NewApp("claude", config.Config{}, nil)
+		_ = NewApp("claude", config.Config{}, nil, nil)
 	})
 }
 
 func TestAppUpdate(t *testing.T) {
-	app := NewApp("claude", config.Config{}, nil)
+	app := NewApp("claude", config.Config{}, nil, nil)
 	msg := tea.WindowSizeMsg{Width: 120, Height: 40}
 
 	updated, cmd := app.Update(msg)

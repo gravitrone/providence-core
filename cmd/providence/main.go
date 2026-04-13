@@ -40,6 +40,12 @@ var headlessFlag bool
 var outputFormat string
 var inputFormat string
 
+// resumeFlag takes a session ID or title substring to resume.
+var resumeFlag string
+
+// continueFlag loads the most recent session.
+var continueFlag bool
+
 // newRootCommand builds the root cobra command.
 func newRootCommand() *cobra.Command {
 	cwd, _ := os.Getwd()
@@ -74,7 +80,7 @@ func newRootCommand() *cobra.Command {
 			if headlessFlag {
 				return runHeadless(engineFlag, cfg)
 			}
-			return runTUI(engineFlag, cfg)
+			return runTUI(engineFlag, cfg, resumeFlag, continueFlag)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -84,6 +90,8 @@ func newRootCommand() *cobra.Command {
 	root.Flags().BoolVar(&headlessFlag, "headless", false, "Run in headless NDJSON mode")
 	root.Flags().StringVar(&outputFormat, "output-format", "", "Output format (stream-json enables headless)")
 	root.Flags().StringVar(&inputFormat, "input-format", "", "Input format (stream-json enables headless)")
+	root.Flags().StringVar(&resumeFlag, "resume", "", "Resume session by ID or title substring")
+	root.Flags().BoolVar(&continueFlag, "continue", false, "Resume the most recent session")
 
 	root.RegisterFlagCompletionFunc("engine", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return []string{"claude", "direct", "codex_headless", "codex_re"}, cobra.ShellCompDirectiveNoFileComp
@@ -119,7 +127,7 @@ var runBubbleTUI = func(app tea.Model) error {
 }
 
 // runTUI launches the fullscreen Bubble Tea TUI.
-func runTUI(engineType string, cfg config.Config) error {
+func runTUI(engineType string, cfg config.Config, resumeQuery string, continueSession bool) error {
 	if !isInteractiveTerminal(os.Stdout) {
 		fmt.Println(ui.RenderBanner())
 		return nil
@@ -130,7 +138,23 @@ func runTUI(engineType string, cfg config.Config) error {
 	}
 	if st != nil {
 		defer st.Close()
+		// Clean up sessions older than 30 days on startup.
+		if cleaned, cerr := st.CleanupOldSessions(30); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: session cleanup: %v\n", cerr)
+		} else if cleaned > 0 {
+			fmt.Fprintf(os.Stderr, "cleaned %d old session(s)\n", cleaned)
+		}
 	}
+
+	// Resolve --resume / --continue to a ResumeData payload.
+	var resume *ui.ResumeData
+	if st != nil && (resumeQuery != "" || continueSession) {
+		resume, err = resolveResumeSession(st, resumeQuery, continueSession)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Initialize plugin manager.
 	homeDir, _ := os.UserHomeDir()
 	pluginDir := filepath.Join(homeDir, ".providence", "plugins")
@@ -139,11 +163,52 @@ func runTUI(engineType string, cfg config.Config) error {
 		fmt.Fprintf(os.Stderr, "warning: plugin load: %v\n", err)
 	}
 
-	app := ui.NewApp(engineType, cfg, st)
+	app := ui.NewApp(engineType, cfg, st, resume)
 	if err := runBubbleTUI(app); err != nil {
 		return fmt.Errorf("tui error: %w", err)
 	}
 	return nil
+}
+
+// resolveResumeSession looks up a session from the store based on the CLI flags.
+// --resume takes a session ID or title substring; --continue picks the most
+// recent session. Returns nil if no session was found.
+func resolveResumeSession(st *store.Store, query string, mostRecent bool) (*ui.ResumeData, error) {
+	var sess *store.SessionRow
+	var err error
+
+	if query != "" {
+		sess, err = st.FindSessionByIDOrTitle(query)
+		if err != nil {
+			return nil, fmt.Errorf("session lookup failed: %w", err)
+		}
+		if sess == nil {
+			return nil, fmt.Errorf("no session matching %q", query)
+		}
+	} else if mostRecent {
+		sess, err = st.MostRecentSession()
+		if err != nil {
+			return nil, fmt.Errorf("session lookup failed: %w", err)
+		}
+		if sess == nil {
+			return nil, fmt.Errorf("no sessions found")
+		}
+	}
+
+	if sess == nil {
+		return nil, nil
+	}
+
+	msgs, err := st.GetMessages(sess.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load session messages: %w", err)
+	}
+
+	return &ui.ResumeData{
+		SessionID: sess.ID,
+		Title:     sess.Title,
+		Messages:  msgs,
+	}, nil
 }
 
 // isInteractiveTerminal reports whether file is an interactive TTY.

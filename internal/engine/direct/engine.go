@@ -1199,9 +1199,20 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			}
 		}
 
-		// Image error classification: detect image-specific API errors and
-		// show user-friendly messages with resize hints.
+		// Content error classification: detect PDF, multi-image, and image
+		// API errors and show user-friendly messages with actionable hints.
 		if streamErr != nil {
+			if contentMsg := classifyContentError(streamErr); contentMsg != "" {
+				e.events <- engine.ParsedEvent{
+					Type: "system_message",
+					Data: &engine.SystemMessageEvent{
+						Type:    "system_message",
+						Content: contentMsg,
+					},
+				}
+				e.emitError(fmt.Errorf("content error: %s", contentMsg))
+				return
+			}
 			if imgMsg := classifyImageError(streamErr); imgMsg != "" {
 				e.events <- engine.ParsedEvent{
 					Type: "system_message",

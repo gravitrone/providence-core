@@ -62,7 +62,13 @@ Brief the agent like a smart colleague who just walked into the room - it hasn't
 
 Terse command-style prompts produce shallow, generic work.
 
-Never delegate understanding. Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.`
+Never delegate understanding. Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.
+
+When dispatching multiple agents:
+- Each agent gets a specific scope, clear goal, constraints, and expected output format.
+- Only parallelize truly independent tasks (no shared state, no sequential dependencies).
+- After agents return: review each summary, check for conflicts, run full test suite, integrate.
+- Focused beats broad: "Fix agent-tool-abort.test.ts" is better than "fix all the tests".`
 }
 
 // InputSchema returns the JSON Schema for the Task tool input.

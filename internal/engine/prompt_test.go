@@ -65,13 +65,13 @@ func TestBuildSystemBlocksWithConfigHasDynamicBlocks(t *testing.T) {
 
 func TestBuildSystemBlocksSection9StaticBlocks(t *testing.T) {
 	blocks := BuildSystemBlocks(nil)
-	// Should have exactly 9 static blocks (identity, system, actions, tools, coding, output, git, ember, viz).
-	assert.Equal(t, 9, len(blocks), "expected 9 static blocks, got %d", len(blocks))
+	// Should have exactly 10 static blocks (identity, system, actions, tools, coding, dev-discipline, output, git, ember, viz).
+	assert.Equal(t, 10, len(blocks), "expected 10 static blocks, got %d", len(blocks))
 }
 
 func TestBuildSystemBlocksSectionOrder(t *testing.T) {
 	blocks := BuildSystemBlocks(nil)
-	require.Equal(t, 9, len(blocks))
+	require.Equal(t, 10, len(blocks))
 
 	// Verify section content ordering.
 	assert.Contains(t, blocks[0].Text, "Providence", "block 0: identity")
@@ -79,10 +79,11 @@ func TestBuildSystemBlocksSectionOrder(t *testing.T) {
 	assert.Contains(t, blocks[2].Text, "reversibility", "block 2: action safety")
 	assert.Contains(t, blocks[3].Text, "Using your tools", "block 3: tool usage")
 	assert.Contains(t, blocks[4].Text, "Doing tasks", "block 4: coding guidelines")
-	assert.Contains(t, blocks[5].Text, "Output efficiency", "block 5: output efficiency")
-	assert.Contains(t, blocks[6].Text, "Git safety", "block 6: git safety")
-	assert.Contains(t, blocks[7].Text, "Ember", "block 7: ember protocol")
-	assert.Contains(t, blocks[8].Text, "providence-viz", "block 8: viz examples")
+	assert.Contains(t, blocks[5].Text, "Development discipline", "block 5.5: dev discipline")
+	assert.Contains(t, blocks[6].Text, "Output efficiency", "block 6: output efficiency")
+	assert.Contains(t, blocks[7].Text, "Git safety", "block 7: git safety")
+	assert.Contains(t, blocks[8].Text, "Ember", "block 8: ember protocol")
+	assert.Contains(t, blocks[9].Text, "providence-viz", "block 9: viz examples")
 }
 
 func TestBuildSystemPromptStillWorks(t *testing.T) {

@@ -126,6 +126,12 @@ func BuildSystemBlocks(cfg *PromptConfig) []SystemBlock {
 		Cacheable: true,
 	})
 
+	// 5.5. Development Discipline (TDD, debugging, verification)
+	blocks = append(blocks, SystemBlock{
+		Text:      developmentDiscipline(),
+		Cacheable: true,
+	})
+
 	// 6. Output Efficiency
 	blocks = append(blocks, SystemBlock{
 		Text:      outputEfficiency(),
@@ -295,6 +301,10 @@ func codingGuidelines() string {
 
  - The user will primarily request software engineering tasks: solving bugs, adding features, refactoring, explaining code, and more.
  - Do not propose changes to code you haven't read. Read first, then modify.
+ - For non-trivial tasks, explore context first: check files, docs, recent commits. Understand what exists before proposing changes.
+ - When multiple approaches exist, propose 2-3 options with tradeoffs and your recommendation. Don't just pick one silently.
+ - Design for isolation: break systems into units with one clear purpose and well-defined interfaces. Each unit should be understandable and testable independently.
+ - YAGNI ruthlessly. If the user didn't ask for it, don't build it. Remove unnecessary features from designs.
  - Do not create files unless absolutely necessary for achieving your goal. Prefer editing existing files to creating new ones.
  - Avoid giving time estimates or predictions for how long tasks will take.
  - If an approach fails, diagnose why before switching tactics. Read the error, check your assumptions, try a focused fix. Don't retry blindly, but don't abandon a viable approach after a single failure either.
@@ -304,6 +314,18 @@ func codingGuidelines() string {
  - Don't create helpers, utilities, or abstractions for one-time operations. Three similar lines is better than a premature abstraction.
  - Only add comments where the logic isn't self-evident.
  - Avoid backwards-compatibility hacks like renaming unused _vars, re-exporting types, adding "// removed" comments. If something is unused, delete it completely.`
+}
+
+func developmentDiscipline() string {
+	return `# Development discipline
+
+ - Write the test first. Watch it fail. Write minimal code to pass. If you didn't watch the test fail, you don't know if it tests the right thing.
+ - One behavior per test. Clear name describing behavior. Real code, not mocks (unless unavoidable).
+ - Tests written after code pass immediately - that proves nothing. Test-first forces you to see the test fail, proving it actually tests something.
+ - When fixing bugs: write a failing test that reproduces the bug first. The test proves the fix and prevents regression.
+ - If you wrote code before writing a test for it, delete the code and start over with TDD. No exceptions.
+ - When encountering a bug or test failure, find the root cause before attempting fixes. Read error messages completely. Reproduce consistently. Check recent changes. Trace data flow to the source. Don't propose fixes without understanding what went wrong.
+ - Before claiming work is complete: run the verification command fresh. Read the full output. Check the exit code. If you haven't run verification in this response, you cannot claim it passes. "Should work" is not evidence. Run the command, read the output, then state the result.`
 }
 
 func outputEfficiency() string {
@@ -320,7 +342,10 @@ Focus text output on:
 
 If you can say it in one sentence, don't use three. This does not apply to code or tool calls.
 
-Never echo or repeat tool results back to the user. The terminal already displays tool calls and their output. Act on the results and give your response.`
+Never echo or repeat tool results back to the user. The terminal already displays tool calls and their output. Act on the results and give your response.
+
+ - When receiving feedback or corrections: verify against the codebase before implementing. Push back with technical reasoning if wrong. No performative agreement - just fix and state what changed.
+ - For multi-item feedback: clarify anything unclear FIRST, then implement in order: blocking issues, simple fixes, complex fixes. Test each individually.`
 }
 
 func gitSafety() string {

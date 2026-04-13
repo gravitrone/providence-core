@@ -4205,18 +4205,23 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			at.refreshViewport()
 			return true, nil
 		}
+
+		// Serialize current conversation for context inheritance.
+		convState := at.serializeConversationState()
+
 		for i := 0; i < n; i++ {
 			input := subagent.TaskInput{
 				Description: fmt.Sprintf("Fork %d of %d", i+1, n),
-				Prompt:      "Continue the current task. You have the full conversation context.",
+				Prompt:      "Continue the current task with full conversation context.",
 				RunInBG:     true,
+				Name:        fmt.Sprintf("fork-%d", i+1),
 			}
-			agentID, err := de.SubagentRunner().Spawn(context.Background(), input, subagent.DefaultAgentType(), de.SubagentExecutor())
+			agentID, err := de.SubagentRunner().SpawnWithContext(context.Background(), input, subagent.DefaultAgentType(), de.SubagentContextExecutor(), convState)
 			if err != nil {
 				at.addSystemMessage(fmt.Sprintf("Fork %d failed: %s", i+1, err))
 				continue
 			}
-			at.addSystemMessage(fmt.Sprintf("Fork %d spawned: %s", i+1, agentID))
+			at.addSystemMessage(fmt.Sprintf("Fork %d spawned: %s (with full context)", i+1, agentID))
 		}
 		at.refreshViewport()
 		return true, nil
@@ -4248,6 +4253,41 @@ func (at AgentTab) modelDisplay() string {
 		return spec.Display
 	}
 	return at.model
+}
+
+// serializeConversationState converts the UI message history into a portable
+// subagent.ConversationState for context inheritance in /fork.
+func (at *AgentTab) serializeConversationState() *subagent.ConversationState {
+	var msgs []subagent.PortableMessage
+	for _, m := range at.messages {
+		switch m.Role {
+		case "user", "assistant":
+			if m.Content == "" {
+				continue
+			}
+			msgs = append(msgs, subagent.PortableMessage{
+				Role:    m.Role,
+				Content: m.Content,
+			})
+		case "tool":
+			// Flatten tool results into assistant-visible text.
+			text := fmt.Sprintf("[Tool: %s] %s", m.ToolName, m.ToolBody)
+			if m.ToolOutput != "" {
+				text = fmt.Sprintf("[Tool: %s] %s", m.ToolName, m.ToolOutput)
+			}
+			msgs = append(msgs, subagent.PortableMessage{
+				Role:    "assistant",
+				Content: text,
+			})
+		}
+	}
+
+	return &subagent.ConversationState{
+		Messages:     msgs,
+		SystemPrompt: "", // child uses its own system prompt
+		Model:        at.model,
+		Engine:       string(at.engineType),
+	}
 }
 
 // drainCompletedSubagents checks the subagent runner (if available) for any

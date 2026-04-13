@@ -545,12 +545,11 @@ func (c *Config) Validate() error {
 		"":               true, // empty = use default
 		"direct":         true,
 		"claude":         true,
-		"codex_re":       true,
 		"codex_headless": true,
 		"opencode":       true,
 	}
 	if !validEngines[c.Engine] {
-		errs = append(errs, fmt.Sprintf("engine %q is not valid (allowed: direct, claude, codex_re, codex_headless, opencode)", c.Engine))
+		errs = append(errs, fmt.Sprintf("engine %q is not valid (allowed: direct, claude, codex_headless, opencode)", c.Engine))
 	}
 
 	if c.Model == "" && c.Engine == "direct" {

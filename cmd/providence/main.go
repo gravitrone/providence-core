@@ -94,7 +94,7 @@ func newRootCommand() *cobra.Command {
 	root.Flags().BoolVar(&continueFlag, "continue", false, "Resume the most recent session")
 
 	root.RegisterFlagCompletionFunc("engine", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return []string{"claude", "direct", "codex_headless", "codex_re"}, cobra.ShellCompDirectiveNoFileComp
+		return []string{"claude", "direct", "codex_headless", "codex_headless"}, cobra.ShellCompDirectiveNoFileComp
 	})
 
 	completionCmd := &cobra.Command{

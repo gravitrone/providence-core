@@ -382,7 +382,7 @@ var EngineThemes = map[string]EngineTheme{
 		BannerText:   "CLAUDE CODE",
 		SpinnerVerbs: []string{"thinking", "analyzing", "reasoning"},
 	},
-	"codex_re": {
+	"codex_headless": {
 		Name: "Codex Engine", Primary: "#00FF88", Secondary: "#00CC66",
 		BannerText:   "CODEX",
 		SpinnerVerbs: []string{"computing", "generating", "processing"},

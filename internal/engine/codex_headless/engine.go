@@ -42,13 +42,13 @@ type CodexHeadlessEngine struct {
 
 // NewCodexHeadlessEngine creates a new codex headless engine. The codex binary
 // must be installed and on PATH. If not found, returns a helpful error pointing
-// users to the codex_re engine as an alternative.
+// users to the codex CLI directly.
 func NewCodexHeadlessEngine(cfg engine.EngineConfig) (*CodexHeadlessEngine, error) {
 	codexPath, err := exec.LookPath("codex")
 	if err != nil {
 		return nil, fmt.Errorf(
 			"codex CLI not installed (not found on PATH). "+
-				"Install it or use the codex_re engine instead, "+
+				"Install the codex CLI for headless mode, "+
 				"which calls the OpenAI API directly: %w", err,
 		)
 	}

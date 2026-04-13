@@ -930,7 +930,7 @@ func formatRestoredToolMessage(message engine.RestoredMessage) string {
 // and direct/opencode pass through.
 func MapModelForEngine(requestedModel, targetEngine string) string {
 	switch engine.EngineType(targetEngine) {
-	case "codex", "codex_re":
+	case "codex", "codex_headless":
 		return "gpt-5.4-codex"
 	case engine.EngineTypeClaude, engine.EngineTypeDirect:
 		switch requestedModel {

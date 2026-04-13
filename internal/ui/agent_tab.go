@@ -29,7 +29,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine"
 	_ "github.com/gravitrone/providence-core/internal/engine/claude"    // register claude factory
 	_ "github.com/gravitrone/providence-core/internal/engine/codex_headless" // register codex_headless factory
-	_ "github.com/gravitrone/providence-core/internal/engine/codex_re"       // register codex_re factory
+	_ "github.com/gravitrone/providence-core/internal/engine/codex_headless"       // register codex_headless factory
 	"github.com/gravitrone/providence-core/internal/engine/customtools"
 	"github.com/gravitrone/providence-core/internal/engine/direct"       // register direct factory + image types
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools" // tool prompts
@@ -181,7 +181,7 @@ type slashCommand struct {
 // slashCommands defines the available slash commands for the preview typeahead.
 var slashCommands = []slashCommand{
 	{"/model", "Switch model (Haiku, Sonnet, Opus, Codex)"},
-	{"/engine", "Switch engine (claude, direct, codex_re)"},
+	{"/engine", "Switch engine (claude, direct, codex_headless)"},
 	{"/image", "Attach image file (png, jpg, gif, webp)"},
 	{"/theme", "Switch theme (flame, night, auto)"},
 	{"/auth", "Login to OpenAI (Codex OAuth)"},
@@ -4448,11 +4448,11 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		return true, nil
 	case "/engine":
 		if args == "" {
-			at.addSystemMessage("Current engine: " + string(at.engineType) + "\nAvailable: claude, direct, codex_re")
+			at.addSystemMessage("Current engine: " + string(at.engineType) + "\nAvailable: claude, direct, codex_headless")
 		} else {
 			newType := engine.EngineType(strings.TrimSpace(args))
 			switch newType {
-			case engine.EngineTypeClaude, engine.EngineTypeDirect, "codex_re":
+			case engine.EngineTypeClaude, engine.EngineTypeDirect, "codex_headless":
 				// Serialize current state for context portability.
 				var portableState *engine.ConversationState
 				if at.engine != nil {
@@ -4479,7 +4479,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				at.cfg.Engine = string(newType)
 				_ = at.cfg.Save()
 			default:
-				at.addSystemMessage("Unknown engine: " + args + " (valid: claude, direct, codex_re)")
+				at.addSystemMessage("Unknown engine: " + args + " (valid: claude, direct, codex_headless)")
 			}
 		}
 		at.refreshViewport()

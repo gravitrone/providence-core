@@ -110,7 +110,7 @@ func TestTaskNotificationXML(t *testing.T) {
 func TestTaskToolName(t *testing.T) {
 	runner := subagent.NewRunner()
 	tool := NewTaskTool(runner, mockTaskExecutor(""))
-	assert.Equal(t, "Task", tool.Name())
+	assert.Equal(t, "Agent", tool.Name())
 	assert.NotEmpty(t, tool.Description())
 	assert.True(t, tool.ReadOnly())
 }

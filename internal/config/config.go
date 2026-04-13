@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -473,6 +474,54 @@ func (p *PermissionsConfig) AskRules(source string) []PermissionRule {
 		rules[i] = PermissionRule{Pattern: pattern, Behavior: "ask", Source: source}
 	}
 	return rules
+}
+
+// Validate checks that config fields are within allowed values.
+// Returns a combined error with all violations found, or nil if valid.
+func (c *Config) Validate() error {
+	var errs []string
+
+	validEngines := map[string]bool{
+		"":               true, // empty = use default
+		"direct":         true,
+		"claude":         true,
+		"codex_re":       true,
+		"codex_headless": true,
+		"opencode":       true,
+	}
+	if !validEngines[c.Engine] {
+		errs = append(errs, fmt.Sprintf("engine %q is not valid (allowed: direct, claude, codex_re, codex_headless, opencode)", c.Engine))
+	}
+
+	if c.Model == "" && c.Engine == "direct" {
+		errs = append(errs, "model must not be empty when engine is direct")
+	}
+
+	validCompactModes := map[string]bool{
+		"":                true, // empty = use default
+		"cc-tail-replace": true,
+		"dynamic-rolling": true,
+		"both":            true,
+		"off":             true,
+	}
+	if !validCompactModes[c.Compact.Mode] {
+		errs = append(errs, fmt.Sprintf("compact.mode %q is not valid (allowed: cc-tail-replace, dynamic-rolling, both, off)", c.Compact.Mode))
+	}
+
+	validEffort := map[string]bool{
+		"":       true, // empty = use default
+		"low":    true,
+		"medium": true,
+		"high":   true,
+	}
+	if !validEffort[c.Effort] {
+		errs = append(errs, fmt.Sprintf("effort %q is not valid (allowed: low, medium, high)", c.Effort))
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("config validation errors: %s", strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // Save writes config to DefaultPath as TOML, creating ~/.providence/ if needed.

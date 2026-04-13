@@ -1807,24 +1807,13 @@ func (at AgentTab) View(width, height int) string {
 	var header string
 	headerLines := 2 // tab bar + underline always
 	if showBanner {
-		banner := centerBlockUniform(
+		// RenderBannerAnimated already includes subtitle + underline.
+		bannerBlock := centerBlockUniform(
 			RenderBannerAnimated(at.flameFrame, at.streaming),
 			contentW,
 		)
-		subtitle := lipgloss.NewStyle().
-			Foreground(ColorMuted).
-			Width(contentW).
-			Align(lipgloss.Center).
-			Render(bannerSubtitle)
-		subtitleUnderline := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#3a2a1a")).
-			Width(contentW).
-			Align(lipgloss.Center).
-			Render(strings.Repeat("─", lipgloss.Width(bannerSubtitle)+4))
-
-		bannerBlock := banner + "\n" + subtitle + "\n" + subtitleUnderline
 		bannerH := lipgloss.Height(bannerBlock)
-		headerLines += bannerH + 1 // +1 for the newline between banner and tabs
+		headerLines += bannerH + 1
 		header = bannerBlock + "\n" + at.renderTabBar()
 	} else {
 		header = at.renderTabBar()

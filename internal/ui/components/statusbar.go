@@ -9,7 +9,7 @@ import (
 // Exported style vars so the theme system can update them.
 var (
 	HintDescStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#6b5040"))
+			Foreground(lipgloss.Color("#d0c8c0"))
 	KeyCapStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#0a0a0a")).
 			Background(lipgloss.Color("#D77757")).

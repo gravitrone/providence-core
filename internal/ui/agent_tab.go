@@ -1855,7 +1855,18 @@ func (at AgentTab) renderTabBar() string {
 		} else if isAnimating {
 			segments = append(segments, TabTrailStyle.Render(name))
 		} else {
-			segments = append(segments, TabInactiveStyle.Render(name))
+			// Gradient on inactive tabs: muted → slightly brighter toward center.
+			dist := math.Abs(float64(i) - float64(tabCount-1)/2.0)
+			maxDist := float64(tabCount-1) / 2.0
+			brightness := 0.5 + 0.5*(1.0-dist/maxDist) // center tabs brighter
+			mutR, mutG, mutB := hexToRGB(ActiveTheme.Muted)
+			secR, secG, secB := hexToRGB(ActiveTheme.Secondary)
+			r := uint8(float64(mutR) + brightness*0.3*float64(int(secR)-int(mutR)))
+			g := uint8(float64(mutG) + brightness*0.3*float64(int(secG)-int(mutG)))
+			b := uint8(float64(mutB) + brightness*0.3*float64(int(secB)-int(mutB)))
+			tabColor := fmt.Sprintf("#%02x%02x%02x", r, g, b)
+			style := lipgloss.NewStyle().Foreground(lipgloss.Color(tabColor)).Padding(0, 1)
+			segments = append(segments, style.Render(name))
 		}
 	}
 
@@ -2458,10 +2469,14 @@ func (at AgentTab) hasVizMessages() bool {
 	return false
 }
 
-// hasPulsingMessages returns true if any message has a pulsating border (pending permission or completed tool).
+// hasPulsingMessages returns true if any message has a pulsating border (pending permission or completed/approved tool).
 func (at AgentTab) hasPulsingMessages() bool {
 	for _, m := range at.messages {
 		if m.Role == "permission" {
+			return true
+		}
+		// Completed tool boxes also pulse green.
+		if m.Role == "permission" && m.ToolStatus == "success" {
 			return true
 		}
 	}

@@ -27,7 +27,8 @@ import (
 	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/engine"
 	_ "github.com/gravitrone/providence-core/internal/engine/claude"    // register claude factory
-	_ "github.com/gravitrone/providence-core/internal/engine/codex_re" // register codex_re factory
+	_ "github.com/gravitrone/providence-core/internal/engine/codex_headless" // register codex_headless factory
+	_ "github.com/gravitrone/providence-core/internal/engine/codex_re"       // register codex_re factory
 	"github.com/gravitrone/providence-core/internal/engine/customtools"
 	"github.com/gravitrone/providence-core/internal/engine/direct"       // register direct factory + image types
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools" // tool prompts

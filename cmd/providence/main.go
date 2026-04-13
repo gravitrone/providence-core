@@ -13,6 +13,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/engine"
 	_ "github.com/gravitrone/providence-core/internal/engine/claude"
+	_ "github.com/gravitrone/providence-core/internal/engine/codex_headless"
 	_ "github.com/gravitrone/providence-core/internal/engine/direct"
 	"github.com/gravitrone/providence-core/internal/engine/plugin"
 	"github.com/gravitrone/providence-core/internal/store"
@@ -81,7 +82,7 @@ func newRootCommand() *cobra.Command {
 	root.Flags().BoolVar(&headlessFlag, "headless", false, "Run in headless NDJSON mode")
 
 	root.RegisterFlagCompletionFunc("engine", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return []string{"claude", "direct"}, cobra.ShellCompDirectiveNoFileComp
+		return []string{"claude", "direct", "codex_headless", "codex_re"}, cobra.ShellCompDirectiveNoFileComp
 	})
 
 	completionCmd := &cobra.Command{

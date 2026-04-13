@@ -4615,6 +4615,11 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			}
 			restored = append(restored, restoredMessage)
 		}
+
+		// --- Turn interruption repair ---
+		var wasInterrupted bool
+		restored, wasInterrupted = repairRestoredMessages(restored, pendingToolIDs)
+
 		at.sessionID = sess.ID
 		at.messagesDirty = true
 		title := sess.Title
@@ -4622,6 +4627,9 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			title = "(untitled)"
 		}
 		at.addSystemMessage("Session restored: " + title)
+		if wasInterrupted {
+			at.addSystemMessage("Session was interrupted. Continuing from where you left off.")
+		}
 		at.refreshViewport()
 		// Spin up a fresh engine and rehydrate its history so the model
 		// actually remembers this conversation on the next turn.
@@ -5511,6 +5519,54 @@ func createEngineAndSend(prompt, model string, engineType engine.EngineType, out
 		}
 		return engineCreatedMsg{engine: eng, prompt: prompt}
 	}
+}
+
+// repairRestoredMessages fixes common interruption artifacts in restored
+// session history before feeding it to the engine:
+//   - Synthesizes error tool_results for orphaned tool_use blocks (assistant
+//     message with ToolName but no matching tool result in the next message).
+//   - Filters out whitespace-only assistant messages.
+//   - If the last message is a user message with no following assistant reply,
+//     appends a continuation prompt so the model picks up where it left off.
+//
+// Returns the repaired slice and whether the session was interrupted (orphaned
+// tools or trailing user message with no reply).
+func repairRestoredMessages(msgs []engine.RestoredMessage, pendingToolIDs map[string]string) ([]engine.RestoredMessage, bool) {
+	var repaired []engine.RestoredMessage
+	interrupted := false
+
+	for _, m := range msgs {
+		// Filter whitespace-only assistant messages.
+		if m.Role == "assistant" && strings.TrimSpace(m.Content) == "" && m.ToolName == "" {
+			continue
+		}
+		repaired = append(repaired, m)
+	}
+
+	// Synthesize error results for any orphaned tool calls still in pendingToolIDs.
+	// These are tool_use blocks from the assistant that never got a tool_result.
+	if len(pendingToolIDs) > 0 {
+		interrupted = true
+		for toolName, callID := range pendingToolIDs {
+			repaired = append(repaired, engine.RestoredMessage{
+				Role:       "tool",
+				Content:    "[tool execution interrupted - session was terminated]",
+				ToolCallID: callID,
+				ToolName:   toolName,
+			})
+		}
+	}
+
+	// Detect interrupted state: last message is user with no following assistant.
+	if len(repaired) > 0 && repaired[len(repaired)-1].Role == "user" {
+		interrupted = true
+		repaired = append(repaired, engine.RestoredMessage{
+			Role:    "user",
+			Content: "Session was interrupted. Continuing from where you left off.",
+		})
+	}
+
+	return repaired, interrupted
 }
 
 // createEngineAndRestore spawns a new engine session and immediately

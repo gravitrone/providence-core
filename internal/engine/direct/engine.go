@@ -290,6 +290,18 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	sendMsgTool := tools.NewSendMessageTool(e.subagentRunner)
 	registry.Register(sendMsgTool)
 
+	// Brief tool: proactive notifications via session bus.
+	briefTool := tools.NewBriefTool(e.sessionBus)
+	registry.Register(briefTool)
+
+	// Config tool: runtime settings get/set.
+	configTool := tools.NewConfigTool()
+	registry.Register(configTool)
+
+	// StructuredOutput tool: headless JSON output (enabled in headless mode only).
+	structuredOutputTool := tools.NewStructuredOutputTool()
+	registry.Register(structuredOutputTool)
+
 	// MCP server support: load config, connect servers, register tools.
 	mcpHomeDir, _ := os.UserHomeDir()
 	mcpWorkDir := cfg.WorkDir
@@ -406,6 +418,23 @@ func (e *DirectEngine) SubagentExecutor() subagent.Executor {
 // state before running the prompt. Used by /fork for full context inheritance.
 func (e *DirectEngine) SubagentContextExecutor() subagent.ContextExecutor {
 	return e.subagentContextExecutor
+}
+
+// CacheSafeSystemBlocks returns the engine's pre-built system prompt blocks
+// for cache-sharing with forked subagents. The child engine can reuse these
+// exact bytes so the Anthropic API prompt cache key matches the parent.
+func (e *DirectEngine) CacheSafeSystemBlocks() []subagent.SystemBlock {
+	if len(e.blocks) == 0 {
+		return nil
+	}
+	out := make([]subagent.SystemBlock, len(e.blocks))
+	for i, b := range e.blocks {
+		out[i] = subagent.SystemBlock{
+			Text:      b.Text,
+			Cacheable: b.Cacheable,
+		}
+	}
+	return out
 }
 
 // SessionBus returns the engine's session event bus.
@@ -1035,6 +1064,12 @@ func (e *DirectEngine) drainEngineEvents(ctx context.Context, child engine.Engin
 
 // subagentContextExecutor creates a child DirectEngine, restores conversation
 // state into it, then sends the prompt. Used by /fork for full context inheritance.
+//
+// Cache-sharing optimization: when the ConversationState carries
+// CacheSafeSystemBlocks (the parent's pre-built prompt blocks), those exact
+// bytes are reused in the child engine. This ensures the Anthropic API
+// prompt cache key matches between parent and child, giving near-zero extra
+// input cost for forked agents.
 func (e *DirectEngine) subagentContextExecutor(ctx context.Context, prompt string, agentType subagent.AgentType, state *subagent.ConversationState) (string, error) {
 	systemPrompt := agentType.SystemPrompt + "\n\n" + subagent.AntiRecursionPrompt
 
@@ -1048,9 +1083,23 @@ func (e *DirectEngine) subagentContextExecutor(ctx context.Context, prompt strin
 		workDir = agentType.WorkDir
 	}
 
+	// Cache-sharing: reuse parent's system blocks if available so the API
+	// prompt cache key matches (identical byte prefix = cache hit).
+	var sysBlocks []engine.SystemBlock
+	if state != nil && len(state.CacheSafeSystemBlocks) > 0 {
+		sysBlocks = make([]engine.SystemBlock, len(state.CacheSafeSystemBlocks))
+		for i, sb := range state.CacheSafeSystemBlocks {
+			sysBlocks[i] = engine.SystemBlock{
+				Text:      sb.Text,
+				Cacheable: sb.Cacheable,
+			}
+		}
+	}
+
 	cfg := engine.EngineConfig{
 		Type:             engine.EngineTypeDirect,
 		SystemPrompt:     systemPrompt,
+		SystemBlocks:     sysBlocks,
 		Model:            model,
 		APIKey:           e.apiKey,
 		WorkDir:          workDir,

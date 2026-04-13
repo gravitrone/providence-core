@@ -25,6 +25,18 @@ type ConversationState struct {
 	SystemPrompt string            `json:"system_prompt"`
 	Model        string            `json:"model"`
 	Engine       string            `json:"engine"`
+
+	// CacheSafeSystemBlocks holds the parent's pre-built system prompt blocks.
+	// When present, the child engine reuses these exact bytes instead of
+	// rebuilding from SystemPrompt, ensuring the Anthropic API prompt cache
+	// key matches across parent and child (near-zero extra input cost).
+	CacheSafeSystemBlocks []SystemBlock `json:"-"`
+}
+
+// SystemBlock is a cycle-free mirror of engine.SystemBlock for subagent usage.
+type SystemBlock struct {
+	Text      string
+	Cacheable bool
 }
 
 // PortableMessage mirrors engine.PortableMessage for cycle-free usage.

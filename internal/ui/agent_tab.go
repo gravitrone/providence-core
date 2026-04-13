@@ -178,6 +178,7 @@ var slashCommands = []slashCommand{
 	{"/share", "Export session as JSONL"},
 	{"/review", "Spawn code review agent"},
 	{"/fork", "Fork N background agents from current context"},
+	{"/init", "Create CLAUDE.md in project root with detected project info"},
 	{"/help", "Show available commands"},
 }
 
@@ -4288,6 +4289,127 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			}
 			at.addSystemMessage(fmt.Sprintf("Fork %d spawned: %s (with full context)", i+1, agentID))
 		}
+		at.refreshViewport()
+		return true, nil
+
+	case "/init":
+		cwd, err := os.Getwd()
+		if err != nil {
+			at.addSystemMessage("Could not determine working directory: " + err.Error())
+			at.refreshViewport()
+			return true, nil
+		}
+		// Check if CLAUDE.md already exists.
+		candidatePaths := []string{
+			filepath.Join(cwd, ".claude", "CLAUDE.md"),
+			filepath.Join(cwd, "CLAUDE.md"),
+		}
+		for _, p := range candidatePaths {
+			if _, err := os.Stat(p); err == nil {
+				at.addSystemMessage("CLAUDE.md already exists. Edit it directly or delete to reinit.")
+				at.refreshViewport()
+				return true, nil
+			}
+		}
+
+		// Scan the project to detect language/framework.
+		detected := "Unknown project"
+		buildCmd := ""
+		testCmd := ""
+
+		if _, err := os.Stat(filepath.Join(cwd, "go.mod")); err == nil {
+			data, _ := os.ReadFile(filepath.Join(cwd, "go.mod"))
+			modLine := ""
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "module ") {
+					modLine = strings.TrimPrefix(line, "module ")
+					break
+				}
+			}
+			if modLine != "" {
+				detected = "Go project (module: " + modLine + ")"
+			} else {
+				detected = "Go project"
+			}
+			buildCmd = "go build ./..."
+			testCmd = "go test -race -count=1 ./..."
+		} else if _, err := os.Stat(filepath.Join(cwd, "package.json")); err == nil {
+			data, _ := os.ReadFile(filepath.Join(cwd, "package.json"))
+			pkg := struct {
+				Name string `json:"name"`
+			}{}
+			_ = json.Unmarshal(data, &pkg)
+			if pkg.Name != "" {
+				detected = "Node.js project (name: " + pkg.Name + ")"
+			} else {
+				detected = "Node.js project"
+			}
+			buildCmd = "npm run build"
+			testCmd = "npm test"
+		} else if _, err := os.Stat(filepath.Join(cwd, "Cargo.toml")); err == nil {
+			detected = "Rust project"
+			buildCmd = "cargo build"
+			testCmd = "cargo test"
+		} else if _, err := os.Stat(filepath.Join(cwd, "pyproject.toml")); err == nil {
+			detected = "Python project"
+			buildCmd = "pip install -e ."
+			testCmd = "pytest"
+		} else if _, err := os.Stat(filepath.Join(cwd, "requirements.txt")); err == nil {
+			detected = "Python project"
+			buildCmd = "pip install -r requirements.txt"
+			testCmd = "pytest"
+		}
+
+		// Check for .git.
+		gitInfo := ""
+		if _, err := os.Stat(filepath.Join(cwd, ".git")); err == nil {
+			gitInfo = " (git repo)"
+		}
+
+		// List top-level directories.
+		entries, _ := os.ReadDir(cwd)
+		var dirs []string
+		for _, e := range entries {
+			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+				dirs = append(dirs, e.Name())
+			}
+		}
+		dirList := ""
+		if len(dirs) > 0 {
+			dirList = strings.Join(dirs, ", ")
+		}
+
+		// Build CLAUDE.md content.
+		var b strings.Builder
+		b.WriteString("# Project Instructions\n\n")
+		b.WriteString("## Overview\n\n")
+		b.WriteString("Detected: " + detected + gitInfo + "\n")
+		if dirList != "" {
+			b.WriteString("Directories: " + dirList + "\n")
+		}
+		b.WriteString("\n## Conventions\n\n")
+		b.WriteString("- [placeholder for user to fill]\n\n")
+		b.WriteString("## Build & Test\n\n")
+		b.WriteString("```\n")
+		if buildCmd != "" {
+			b.WriteString(buildCmd + "\n")
+		}
+		if testCmd != "" {
+			b.WriteString(testCmd + "\n")
+		}
+		if buildCmd == "" && testCmd == "" {
+			b.WriteString("# Add build and test commands here\n")
+		}
+		b.WriteString("```\n")
+
+		claudeMD := filepath.Join(cwd, "CLAUDE.md")
+		if err := os.WriteFile(claudeMD, []byte(b.String()), 0o644); err != nil {
+			at.addSystemMessage("Failed to write CLAUDE.md: " + err.Error())
+			at.refreshViewport()
+			return true, nil
+		}
+		at.addSystemMessage("Created CLAUDE.md with detected project info. Edit to customize.")
 		at.refreshViewport()
 		return true, nil
 

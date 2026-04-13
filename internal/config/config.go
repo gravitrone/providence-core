@@ -19,6 +19,7 @@ type Config struct {
 	AutoTitleEnabled bool   `toml:"auto_title_enabled" json:"auto_title_enabled,omitempty"`
 	ToolUseSummary   bool   `toml:"tool_use_summary" json:"tool_use_summary,omitempty"`
 	DashboardVisible bool   `toml:"dashboard_visible" json:"dashboard_visible,omitempty"`
+	BGAgentsEnabled  bool   `toml:"bg_agents_enabled" json:"bg_agents_enabled,omitempty"`
 
 	Compact CompactConfig `toml:"compact" json:"compact,omitempty"`
 }

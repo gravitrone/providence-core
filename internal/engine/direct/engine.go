@@ -18,6 +18,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/compact"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
 	"github.com/gravitrone/providence-core/internal/engine/hooks"
+	"github.com/gravitrone/providence-core/internal/engine/mcp"
 	"github.com/gravitrone/providence-core/internal/engine/session"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
 )
@@ -103,6 +104,9 @@ type DirectEngine struct {
 	// Hooks runner for lifecycle event hooks.
 	hooksRunner    *hooks.Runner
 	sessionStarted bool // tracks whether SessionStart hook has fired
+
+	// MCP server manager (nil when no MCP servers are configured).
+	mcpManager *mcp.Manager
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -238,6 +242,32 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	registry.Register(taskTool)
 	sendMsgTool := tools.NewSendMessageTool(e.subagentRunner)
 	registry.Register(sendMsgTool)
+
+	// MCP server support: load config, connect servers, register tools.
+	mcpHomeDir, _ := os.UserHomeDir()
+	mcpWorkDir := cfg.WorkDir
+	if mcpWorkDir == "" {
+		mcpWorkDir, _ = os.Getwd()
+	}
+	mcpConfigs, mcpErr := mcp.LoadMCPConfig(mcpWorkDir, mcpHomeDir)
+	if mcpErr == nil && len(mcpConfigs) > 0 {
+		mgr := mcp.NewManager()
+		// ConnectAll logs failures per-server but continues with successful ones.
+		_ = mgr.ConnectAll(mcpConfigs)
+		if mgr.ServerCount() > 0 {
+			mcp.RegisterMCPTools(mgr, registry)
+			e.mcpManager = mgr
+
+			// Inject MCP server instructions into system prompt blocks.
+			if inst := mgr.GetInstructions(); inst != "" {
+				e.blocks = append(e.blocks, engine.SystemBlock{
+					Text:      inst,
+					Cacheable: false,
+				})
+				e.system = engine.FlattenBlocks(e.blocks)
+			}
+		}
+	}
 
 	var provider compact.Provider
 	switch {
@@ -517,6 +547,9 @@ func (e *DirectEngine) Close() {
 	if e.subagentRunner != nil {
 		e.subagentRunner.Close()
 	}
+	if e.mcpManager != nil {
+		e.mcpManager.CloseAll()
+	}
 	if e.store != nil {
 		e.saveSessionLearnings(e.store, e.startTime)
 	}
@@ -538,6 +571,15 @@ func (e *DirectEngine) GetCurrentTodos() []engine.TodoItem {
 		}
 	}
 	return out
+}
+
+// MCPInstructions returns concatenated MCP server instructions, or empty string
+// if no MCP servers are connected. Used by prompt assembly.
+func (e *DirectEngine) MCPInstructions() string {
+	if e.mcpManager == nil {
+		return ""
+	}
+	return e.mcpManager.GetInstructions()
 }
 
 // Status returns the current engine status (thread-safe).

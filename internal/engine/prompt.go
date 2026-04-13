@@ -34,6 +34,8 @@ type PromptConfig struct {
 	GitStatus string
 	// ToolPrompts is the collected per-tool guidance text from ToolPrompter.
 	ToolPrompts string
+	// MCPInstructions is the concatenated instructions from connected MCP servers.
+	MCPInstructions string
 }
 
 // EnvInfo holds computed environment context for the dynamic env block.
@@ -176,6 +178,14 @@ func BuildSystemBlocks(cfg *PromptConfig) []SystemBlock {
 		if injection := FormatInstructionInjection(cfg.InstructionFiles); injection != "" {
 			blocks = append(blocks, SystemBlock{
 				Text:      injection,
+				Cacheable: false,
+			})
+		}
+
+		// 12.5. MCP Server Instructions
+		if cfg.MCPInstructions != "" {
+			blocks = append(blocks, SystemBlock{
+				Text:      cfg.MCPInstructions,
 				Cacheable: false,
 			})
 		}

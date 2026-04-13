@@ -20,6 +20,7 @@ type Config struct {
 	ToolUseSummary   bool   `toml:"tool_use_summary" json:"tool_use_summary,omitempty"`
 	DashboardVisible bool   `toml:"dashboard_visible" json:"dashboard_visible,omitempty"`
 	BGAgentsEnabled  bool   `toml:"bg_agents_enabled" json:"bg_agents_enabled,omitempty"`
+	OutputStyle      string `toml:"output_style" json:"output_style,omitempty"`
 
 	Compact CompactConfig `toml:"compact" json:"compact,omitempty"`
 }
@@ -122,6 +123,90 @@ func loadFromJSON(path string) Config {
 		return Config{}
 	}
 	return c
+}
+
+// LoadMerged loads config with 5-level merge: user global -> project -> local -> (flags + policy at runtime).
+// projectRoot is the working directory or project root where .providence/ may live.
+func LoadMerged(projectRoot string) Config {
+	home, _ := os.UserHomeDir()
+
+	// Level 1: user global
+	cfg := loadWithMigration(DefaultTOMLPath(), defaultJSONPath())
+
+	// Level 2: project (committed)
+	projectCfg := LoadFromTOML(filepath.Join(projectRoot, ".providence", "config.toml"))
+	mergeConfig(&cfg, &projectCfg)
+
+	// Level 3: local (gitignored)
+	localCfg := LoadFromTOML(filepath.Join(projectRoot, ".providence", "config.local.toml"))
+	mergeConfig(&cfg, &localCfg)
+
+	// Level 4: .claude/ compat path
+	claudeCfg := LoadFromTOML(filepath.Join(projectRoot, ".claude", "config.toml"))
+	mergeConfig(&cfg, &claudeCfg)
+
+	// Level 5: CLI flags + policy handled at runtime by caller
+	_ = home
+	return cfg
+}
+
+// mergeConfig overlays non-zero fields from override onto base.
+func mergeConfig(base, override *Config) {
+	if override.Engine != "" {
+		base.Engine = override.Engine
+	}
+	if override.Model != "" {
+		base.Model = override.Model
+	}
+	if override.Theme != "" {
+		base.Theme = override.Theme
+	}
+	if override.Effort != "" {
+		base.Effort = override.Effort
+	}
+	if override.OpenRouterAPIKey != "" {
+		base.OpenRouterAPIKey = override.OpenRouterAPIKey
+	}
+	if override.TokenBudget != 0 {
+		base.TokenBudget = override.TokenBudget
+	}
+	if override.AutoTitleEnabled {
+		base.AutoTitleEnabled = true
+	}
+	if override.ToolUseSummary {
+		base.ToolUseSummary = true
+	}
+	if override.DashboardVisible {
+		base.DashboardVisible = true
+	}
+	if override.OutputStyle != "" {
+		base.OutputStyle = override.OutputStyle
+	}
+	// Compact: merge non-zero fields
+	if override.Compact.Mode != "" {
+		base.Compact.Mode = override.Compact.Mode
+	}
+	if override.Compact.Trigger != "" {
+		base.Compact.Trigger = override.Compact.Trigger
+	}
+	if override.Compact.ThresholdPct != 0 {
+		base.Compact.ThresholdPct = override.Compact.ThresholdPct
+	}
+	if override.Compact.TurnCount != 0 {
+		base.Compact.TurnCount = override.Compact.TurnCount
+	}
+	if override.Compact.KeepRecentPct != 0 {
+		base.Compact.KeepRecentPct = override.Compact.KeepRecentPct
+	}
+	if override.Compact.RollingTokens != 0 {
+		base.Compact.RollingTokens = override.Compact.RollingTokens
+	}
+	if override.Compact.FastTierModel != "" {
+		base.Compact.FastTierModel = override.Compact.FastTierModel
+	}
+	if override.Compact.CircuitBreaker != 0 {
+		base.Compact.CircuitBreaker = override.Compact.CircuitBreaker
+	}
 }
 
 // Save writes config to DefaultPath as TOML, creating ~/.providence/ if needed.

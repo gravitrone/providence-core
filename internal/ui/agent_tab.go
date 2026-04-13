@@ -1861,12 +1861,8 @@ func (at AgentTab) renderTabBar() string {
 
 	tabRow := lipgloss.JoinHorizontal(lipgloss.Top, segments...)
 	centered := lipgloss.NewStyle().Width(at.width).Align(lipgloss.Center).Render(tabRow)
-	// Underline separator below tabs (nebula style: ─ chars in border color).
-	underline := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#3a2a1a")).
-		Width(at.width).
-		Align(lipgloss.Center).
-		Render(strings.Repeat("─", lipgloss.Width(tabRow)))
+	// Animated gradient divider below tabs (wifey-bench style).
+	underline := animatedDivider(at.width, at.flameFrame)
 	return centered + "\n" + underline
 }
 

@@ -258,6 +258,68 @@ func emberBreatheD(frame int) color.Color {
 	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", r, g, b))
 }
 
+// animatedDivider renders a full-width gradient ─ line that pulses from edges to center.
+// Adapted from wifey-bench: edges dim, center pulses with flame theme colors.
+func animatedDivider(width, frame int) string {
+	if width < 3 {
+		return ""
+	}
+	// Edge color: dimmed secondary.
+	edgeHex := darkenHex(ActiveTheme.Secondary, 0.3)
+	// Center color: pulsing between secondary and bright.
+	t := (math.Sin(float64(frame)*0.12) + 1.0) / 2.0
+	secR, secG, secB := hexToRGB(ActiveTheme.Secondary)
+	brightR, brightG, brightB := hexToRGB(darkenHex(ActiveTheme.Secondary, 1.3))
+	centerR := uint8(float64(secR) + t*float64(int(brightR)-int(secR)))
+	centerG := uint8(float64(secG) + t*float64(int(brightG)-int(secG)))
+	centerB := uint8(float64(secB) + t*float64(int(brightB)-int(secB)))
+	centerHex := fmt.Sprintf("#%02x%02x%02x", centerR, centerG, centerB)
+
+	edgeR, edgeG, edgeB := hexToRGB(edgeHex)
+	midR, midG, midB := hexToRGB(ActiveTheme.Secondary)
+
+	var b strings.Builder
+	half := width / 2
+	for i := 0; i < width; i++ {
+		var r, g, bb uint8
+		var progress float64
+		if i <= half {
+			// Left edge → center: edge → mid → center
+			progress = float64(i) / float64(half)
+			if progress < 0.5 {
+				p := progress * 2
+				r = uint8(float64(edgeR) + p*float64(int(midR)-int(edgeR)))
+				g = uint8(float64(edgeG) + p*float64(int(midG)-int(edgeG)))
+				bb = uint8(float64(edgeB) + p*float64(int(midB)-int(edgeB)))
+			} else {
+				p := (progress - 0.5) * 2
+				cR, cG, cB := hexToRGB(centerHex)
+				r = uint8(float64(midR) + p*float64(int(cR)-int(midR)))
+				g = uint8(float64(midG) + p*float64(int(cG)-int(midG)))
+				bb = uint8(float64(midB) + p*float64(int(cB)-int(midB)))
+			}
+		} else {
+			// Center → right edge: center → mid → edge
+			progress = float64(i-half) / float64(width-half)
+			if progress < 0.5 {
+				p := progress * 2
+				cR, cG, cB := hexToRGB(centerHex)
+				r = uint8(float64(cR) + p*float64(int(midR)-int(cR)))
+				g = uint8(float64(cG) + p*float64(int(midG)-int(cG)))
+				bb = uint8(float64(cB) + p*float64(int(midB)-int(cB)))
+			} else {
+				p := (progress - 0.5) * 2
+				r = uint8(float64(midR) + p*float64(int(edgeR)-int(midR)))
+				g = uint8(float64(midG) + p*float64(int(edgeG)-int(midG)))
+				bb = uint8(float64(midB) + p*float64(int(edgeB)-int(midB)))
+			}
+		}
+		hex := fmt.Sprintf("#%02x%02x%02x", r, g, bb)
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(hex)).Render("─"))
+	}
+	return b.String()
+}
+
 // pulseColor returns a color that breathes between a dimmed and full version of baseHex.
 // Use for pulsating borders on permission dialogs and completed tool boxes.
 func pulseColor(frame int, baseHex string) color.Color {

@@ -43,23 +43,10 @@ import (
 	"github.com/gravitrone/providence-core/internal/ui/dashboard"
 	"github.com/gravitrone/providence-core/internal/ui/panels"
 	"github.com/gravitrone/providence-core/internal/ui/picker"
+	"github.com/gravitrone/providence-core/internal/ui/sidebar"
 	"github.com/gravitrone/providence-core/internal/ui/tree"
 )
 
-// Tab constants for the tab system (replaces sidebar).
-const (
-	tabChat    = 0
-	tabAgents  = 1
-	tabTasks   = 2
-	tabFiles   = 3
-	tabTokens  = 4
-	tabErrors  = 5
-	tabCompact = 6
-	tabHooks   = 7
-	tabCount   = 8
-)
-
-var tabNames = []string{"Chat", "Agents", "Tasks", "Files", "Tokens", "Errors", "Compact", "Hooks"}
 
 // compactBoundaryMarker is the sentinel content for the compaction boundary system message.
 // renderSystemMessage detects this and renders a styled visual separator instead of plain text.
@@ -365,14 +352,11 @@ type AgentTab struct {
 	// Tree view state.
 	treeViewOpen bool
 
-	// Tab system (replaces sidebar).
-	tab          int
-	tabNav       bool
-	tabSpring    harmonica.Spring
-	tabIndicator float64
-	tabIndVel    float64
-	tabIndTarget float64
-	dashboard    dashboard.DashboardModel
+	// Sidebar: shows live background agents.
+	sidebar sidebar.Model
+
+	// Dashboard data (tokens, files, errors, etc). Sidebar reads from this.
+	dashboard dashboard.DashboardModel
 
 	// Context portability: pending state to restore after engine switch.
 	pendingPortableState *engine.ConversationState
@@ -541,8 +525,7 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		store:            st,
 		focus:            FocusInput,
 		transcript:       NewTranscriptModel(),
-		tab:       tabChat,
-		tabSpring: harmonica.NewSpring(harmonica.FPS(60), 10.0, 1.0),
+		sidebar:          sidebar.New(),
 		dashboard:        dashboard.New(),
 		ember:            ember.New(),
 		discoveredSkills: discoveredSkills,
@@ -674,8 +657,9 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 				at.compactVel = 0.0
 			}
 		}
-		// Tab indicator spring animation.
-		at.tabIndicator, at.tabIndVel = at.tabSpring.Update(at.tabIndicator, at.tabIndVel, at.tabIndTarget)
+		// Sidebar spring animation + agent data feed.
+		at.feedSidebar()
+		at.sidebar.Tick()
 		at.notifications.Tick()
 		// Poll for completed background subagents and inject notifications.
 		at.drainCompletedSubagents()
@@ -1001,21 +985,6 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			at.refreshViewport()
 			return at, nil
 		}
-	}
-
-	// Number keys switch tabs when input is empty.
-	if at.input.Value() == "" && len(key) == 1 && key[0] >= '1' && key[0] <= '8' {
-		newTab := int(key[0] - '1')
-		if newTab < tabCount {
-			at.switchTab(newTab)
-			return at, nil
-		}
-	}
-
-	// Escape returns to chat tab from any other tab.
-	if key == "esc" && at.tab != tabChat {
-		at.switchTab(tabChat)
-		return at, nil
 	}
 
 	// Slash table navigation takes priority when the table is visible.
@@ -2242,114 +2211,127 @@ func (at AgentTab) View(width, height int) string {
 		at.Resize(width, height)
 	}
 
-	// Nebula layout: Banner + Subtitle + Underline above tabs when few messages.
-	// Once messages fill the viewport, collapse to just tabs.
-	showBanner := len(at.messages) <= 2 // show banner on initial/near-empty state
+	// Nebula layout: Banner when few messages, then gradient divider, then content.
+	showBanner := len(at.messages) <= 2
 
 	var header string
-	headerLines := 2 // tab bar + underline always
+	headerLines := 1 // gradient divider always
 	if showBanner {
-		// RenderBannerAnimated already includes subtitle + underline.
-		// Center on full terminal width so banner aligns with tabs.
 		bannerBlock := centerBlockUniform(
 			RenderBannerAnimated(at.flameFrame, at.streaming),
 			width,
 		)
 		bannerH := lipgloss.Height(bannerBlock)
+		divider := lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(
+			animatedDivider(width*2/3, at.flameFrame),
+		)
 		headerLines += bannerH + 1
-		header = bannerBlock + "\n" + at.renderTabBar()
+		header = bannerBlock + "\n" + divider
 	} else {
-		header = at.renderTabBar()
+		header = lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(
+			animatedDivider(width*2/3, at.flameFrame),
+		)
 	}
 
-	// Content based on active tab.
+	// Content: sidebar + chat or just chat.
 	var content string
-	switch at.tab {
-	case tabChat:
-		content = at.renderChatPane(width, height-headerLines)
-	default:
-		content = at.renderDashboardTab(width, height-headerLines)
+	contentH := height - headerLines
+
+	sideW := at.sidebar.EffectiveWidth(at.sidebarTargetWidth(width))
+	if sideW > 0 {
+		chatW := width - sideW - 1 // -1 for vertical divider
+		if chatW < 20 {
+			chatW = 20
+			sideW = width - chatW - 1
+		}
+		sideView := at.sidebar.View(sideW, contentH, at.flameFrame)
+		chatView := at.renderChatPane(chatW, contentH)
+		divider := renderVerticalDivider(contentH, at.flameFrame)
+		content = lipgloss.JoinHorizontal(lipgloss.Top, sideView, divider, chatView)
+	} else {
+		content = at.renderChatPane(width, contentH)
 	}
 
 	return header + "\n" + content
 }
 
-// renderTabBar renders the horizontal tab strip at the top of the view.
-func (at AgentTab) renderTabBar() string {
-	animTab := int(math.Round(at.tabIndicator))
-	if animTab < 0 {
-		animTab = 0
+// sidebarTargetWidth returns the target sidebar width based on terminal width.
+func (at AgentTab) sidebarTargetWidth(termW int) int {
+	w := termW * 25 / 100
+	if w < 20 {
+		w = 20
 	}
-	if animTab >= tabCount {
-		animTab = tabCount - 1
+	if w > 40 {
+		w = 40
 	}
+	return w
+}
 
-	segments := make([]string, 0, len(tabNames))
-	for i, name := range tabNames {
-		isActive := i == at.tab
-		isAnimating := i == animTab && animTab != at.tab
-
-		if isActive {
-			if at.tabNav {
-				segments = append(segments, TabFocusStyle.Render(name))
-			} else {
-				segments = append(segments, TabActiveStyle.Render(name))
-			}
-		} else if isAnimating {
-			segments = append(segments, TabTrailStyle.Render(name))
-		} else {
-			// Gradient on inactive tabs: edge tabs dimmer, center tabs brighter.
-			dist := math.Abs(float64(i) - float64(tabCount-1)/2.0)
-			maxDist := float64(tabCount-1) / 2.0
-			t := 1.0 - dist/maxDist // 0.0 at edges, 1.0 at center
-			// Blend from dim muted to halfway toward secondary.
-			dimHex := darkenHex(ActiveTheme.Muted, 0.6)
-			dimR, dimG, dimB := hexToRGB(dimHex)
-			secR, secG, secB := hexToRGB(ActiveTheme.Secondary)
-			r := uint8(float64(dimR) + t*0.5*float64(int(secR)-int(dimR)))
-			g := uint8(float64(dimG) + t*0.5*float64(int(secG)-int(dimG)))
-			b := uint8(float64(dimB) + t*0.5*float64(int(secB)-int(dimB)))
-			tabColor := fmt.Sprintf("#%02x%02x%02x", r, g, b)
-			style := lipgloss.NewStyle().Foreground(lipgloss.Color(tabColor)).Padding(0, 1)
-			segments = append(segments, style.Render(name))
+// renderVerticalDivider renders a single-char-wide animated gradient line.
+func renderVerticalDivider(height, frame int) string {
+	if height <= 0 {
+		return ""
+	}
+	n := len(flameGradientStops)
+	if n == 0 {
+		return strings.Repeat("│\n", height)
+	}
+	var b strings.Builder
+	for i := 0; i < height; i++ {
+		idx := (i + frame/4) % n
+		if idx < 0 {
+			idx += n
+		}
+		clr := flameGradientStops[idx]
+		b.WriteString(lipgloss.NewStyle().Foreground(clr).Render("│"))
+		if i < height-1 {
+			b.WriteByte('\n')
 		}
 	}
-
-	tabRow := lipgloss.JoinHorizontal(lipgloss.Top, segments...)
-	tabW := lipgloss.Width(tabRow)
-	centered := lipgloss.NewStyle().Width(at.width).Align(lipgloss.Center).Render(tabRow)
-	// Animated gradient divider below tabs, same width as tab row, centered.
-	divider := animatedDivider(tabW, at.flameFrame)
-	centeredDiv := lipgloss.NewStyle().Width(at.width).Align(lipgloss.Center).Render(divider)
-	return centered + "\n" + centeredDiv
+	return b.String()
 }
 
-// switchTab changes the active tab and kicks off the indicator spring.
-func (at *AgentTab) switchTab(newTab int) {
-	at.tab = newTab
-	at.tabIndTarget = float64(newTab)
-	at.tabNav = true
-}
-
-// renderDashboardTab renders a full-width dashboard panel for non-chat tabs.
-func (at AgentTab) renderDashboardTab(width, height int) string {
-	switch at.tab {
-	case tabAgents:
-		return at.dashboard.RenderAgentsTab(width, height)
-	case tabTasks:
-		return at.dashboard.RenderTasksTab(width, height)
-	case tabFiles:
-		return at.dashboard.RenderFilesTab(width, height)
-	case tabTokens:
-		return at.dashboard.RenderTokensTab(width, height)
-	case tabErrors:
-		return at.dashboard.RenderErrorsTab(width, height)
-	case tabCompact:
-		return at.dashboard.RenderCompactTab(width, height)
-	case tabHooks:
-		return at.dashboard.RenderHooksTab(width, height)
+// feedSidebar updates the sidebar model from the subagent runner state.
+func (at *AgentTab) feedSidebar() {
+	de, ok := at.engine.(*direct.DirectEngine)
+	if !ok || de == nil {
+		at.sidebar.Update(nil)
+		return
 	}
-	return ""
+	runner := de.SubagentRunner()
+	if runner == nil {
+		at.sidebar.Update(nil)
+		return
+	}
+	agents := runner.List()
+	cards := make([]sidebar.AgentCard, len(agents))
+	for i, a := range agents {
+		var elapsed time.Duration
+		if a.CompletedAt.IsZero() {
+			elapsed = time.Since(a.StartedAt)
+		} else {
+			elapsed = a.CompletedAt.Sub(a.StartedAt)
+		}
+		var result string
+		if a.Result != nil {
+			result = a.Result.Result
+		}
+		var toolCount int
+		if a.Result != nil {
+			toolCount = a.Result.ToolUses
+		}
+		cards[i] = sidebar.AgentCard{
+			ID:        a.ID,
+			Name:      a.Name,
+			Status:    a.Status,
+			Model:     a.Type,
+			Elapsed:   elapsed,
+			Started:   a.StartedAt,
+			Result:    result,
+			ToolCount: toolCount,
+		}
+	}
+	at.sidebar.Update(cards)
 }
 
 // renderChatPane renders the full chat view (viewport + divider + preview + input)

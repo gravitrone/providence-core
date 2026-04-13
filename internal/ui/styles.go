@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 	"github.com/gravitrone/providence-core/internal/ui/dashboard"
+	"github.com/gravitrone/providence-core/internal/ui/sidebar"
 )
 
 // --- Theme System (Providence - The Profaned Goddess) ---
@@ -188,6 +189,17 @@ func ApplyTheme(name string) {
 		ActiveTheme.Secondary,
 		ActiveTheme.Muted,
 		ActiveTheme.Text,
+	)
+
+	sidebar.UpdateThemeColors(
+		ActiveTheme.Primary,
+		ActiveTheme.Secondary,
+		ActiveTheme.Muted,
+		ActiveTheme.Text,
+		ActiveTheme.Border,
+		ActiveTheme.Success,
+		ActiveTheme.Error,
+		ActiveTheme.Card,
 	)
 }
 

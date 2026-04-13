@@ -3730,21 +3730,17 @@ func (at AgentTab) renderToolCard(msg ChatMessage, msgIdx int, isLatest bool) st
 
 	if frozen {
 		switch msg.ToolStatus {
-		case "success":
-			boxStyle = lipgloss.NewStyle().
-				Border(lipgloss.DoubleBorder()).
-				BorderForegroundBlend(ToolCardSuccessEdge, ToolCardSuccessMid, ToolCardSuccessEdge).
-				Padding(0, 1)
 		case "error":
 			boxStyle = lipgloss.NewStyle().
 				Border(lipgloss.DoubleBorder()).
 				BorderForegroundBlend(ToolCardErrorEdge, ToolCardErrorMid, ToolCardErrorEdge).
 				Padding(0, 1)
 		default:
-			frozenEdge := lipgloss.Color(darkenHex(ActiveTheme.Primary, 0.4))
+			// Success + pending both freeze to muted theme border.
+			frozenEdge := lipgloss.Color(darkenHex(ActiveTheme.Muted, 0.5))
 			boxStyle = lipgloss.NewStyle().
 				Border(lipgloss.DoubleBorder()).
-				BorderForegroundBlend(frozenEdge, ColorFrozen, frozenEdge).
+				BorderForegroundBlend(frozenEdge, ColorMuted, frozenEdge).
 				Padding(0, 1)
 		}
 	} else {
@@ -3759,17 +3755,10 @@ func (at AgentTab) renderToolCard(msg ChatMessage, msgIdx int, isLatest bool) st
 			Padding(0, 1)
 	}
 
-	// --- Build status icon (frozen only) ---
+	// --- Build status icon (frozen only, errors only) ---
 	var statusIcon string
-	if frozen {
-		switch msg.ToolStatus {
-		case "success":
-			statusIcon = ToolIconSuccessStyle.Render("✓") + " "
-		case "error":
-			statusIcon = ToolIconErrorStyle.Render("×") + " "
-		default:
-			statusIcon = ToolIconPendingStyle.Render("●") + " "
-		}
+	if frozen && msg.ToolStatus == "error" {
+		statusIcon = ToolIconErrorStyle.Render("×") + " "
 	}
 
 	// --- Build pill keycap ---

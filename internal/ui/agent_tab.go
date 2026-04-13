@@ -1855,15 +1855,17 @@ func (at AgentTab) renderTabBar() string {
 		} else if isAnimating {
 			segments = append(segments, TabTrailStyle.Render(name))
 		} else {
-			// Gradient on inactive tabs: muted → slightly brighter toward center.
+			// Gradient on inactive tabs: edge tabs dimmer, center tabs brighter.
 			dist := math.Abs(float64(i) - float64(tabCount-1)/2.0)
 			maxDist := float64(tabCount-1) / 2.0
-			brightness := 0.5 + 0.5*(1.0-dist/maxDist) // center tabs brighter
-			mutR, mutG, mutB := hexToRGB(ActiveTheme.Muted)
+			t := 1.0 - dist/maxDist // 0.0 at edges, 1.0 at center
+			// Blend from dim muted to halfway toward secondary.
+			dimHex := darkenHex(ActiveTheme.Muted, 0.6)
+			dimR, dimG, dimB := hexToRGB(dimHex)
 			secR, secG, secB := hexToRGB(ActiveTheme.Secondary)
-			r := uint8(float64(mutR) + brightness*0.3*float64(int(secR)-int(mutR)))
-			g := uint8(float64(mutG) + brightness*0.3*float64(int(secG)-int(mutG)))
-			b := uint8(float64(mutB) + brightness*0.3*float64(int(secB)-int(mutB)))
+			r := uint8(float64(dimR) + t*0.5*float64(int(secR)-int(dimR)))
+			g := uint8(float64(dimG) + t*0.5*float64(int(secG)-int(dimG)))
+			b := uint8(float64(dimB) + t*0.5*float64(int(secB)-int(dimB)))
 			tabColor := fmt.Sprintf("#%02x%02x%02x", r, g, b)
 			style := lipgloss.NewStyle().Foreground(lipgloss.Color(tabColor)).Padding(0, 1)
 			segments = append(segments, style.Render(name))

@@ -344,7 +344,7 @@ func reapplyStyles() {
 		Padding(0, 2)
 
 	// Update component styles (separate package, can't access theme directly).
-	components.HintDescStyle = lipgloss.NewStyle().Foreground(ColorMuted)
+	components.HintDescStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#d0c8c0"))
 	components.KeyCapStyle = lipgloss.NewStyle().
 		Foreground(ColorBackground).
 		Background(ColorSecondary).

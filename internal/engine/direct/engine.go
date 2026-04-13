@@ -1170,6 +1170,20 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			int(accumulated.Usage.CacheCreationInputTokens),
 		)
 
+		// Task budget tracking: deduct tokens and stop if exhausted.
+		if e.deductBudget(int(accumulated.Usage.InputTokens), int(accumulated.Usage.OutputTokens)) {
+			e.history.AddAssistant(accumulated)
+			e.emitAssistant(accumulated)
+			e.events <- engine.ParsedEvent{
+				Type: "system_message",
+				Data: &engine.SystemMessageEvent{
+					Type:    "system_message",
+					Content: "Token budget exhausted. Stopping session.",
+				},
+			}
+			return
+		}
+
 		e.history.AddAssistant(accumulated)
 		if e.compactor != nil {
 			e.compactor.TriggerIfNeeded(ctx)
@@ -1777,6 +1791,60 @@ func (e *DirectEngine) generateToolSummary(results []ToolCallResult) {
 
 	// Inject as a system note in the conversation history.
 	e.history.AddUser(fmt.Sprintf("[Tool summary: %s]", summary))
+}
+
+// --- Task budget tracking ---
+
+// SetTokenBudget sets the total token budget for this session. When non-zero,
+// each API call's total tokens (input + output) are deducted from the budget.
+// Warnings fire when 80% consumed, and the session stops when exhausted.
+func (e *DirectEngine) SetTokenBudget(budget int) {
+	e.budgetMu.Lock()
+	defer e.budgetMu.Unlock()
+	e.tokenBudget = budget
+	e.tokensConsumed = 0
+}
+
+// deductBudget records token usage and returns true if the budget is exhausted.
+// Also emits warnings when approaching the limit.
+func (e *DirectEngine) deductBudget(inputTokens, outputTokens int) bool {
+	e.budgetMu.Lock()
+	defer e.budgetMu.Unlock()
+
+	if e.tokenBudget <= 0 {
+		return false // no budget set, never exhausted
+	}
+
+	e.tokensConsumed += inputTokens + outputTokens
+
+	// Warn at 80%.
+	threshold80 := e.tokenBudget * 80 / 100
+	if e.tokensConsumed >= threshold80 && (e.tokensConsumed-inputTokens-outputTokens) < threshold80 {
+		remaining := e.tokenBudget - e.tokensConsumed
+		e.events <- engine.ParsedEvent{
+			Type: "system_message",
+			Data: &engine.SystemMessageEvent{
+				Type:    "system_message",
+				Content: fmt.Sprintf("Token budget warning: %d/%d consumed (%d remaining).", e.tokensConsumed, e.tokenBudget, remaining),
+			},
+		}
+	}
+
+	return e.tokensConsumed >= e.tokenBudget
+}
+
+// BudgetRemaining returns the remaining token budget, or -1 if no budget is set.
+func (e *DirectEngine) BudgetRemaining() int {
+	e.budgetMu.Lock()
+	defer e.budgetMu.Unlock()
+	if e.tokenBudget <= 0 {
+		return -1
+	}
+	remaining := e.tokenBudget - e.tokensConsumed
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining
 }
 
 // --- Per-turn context injection ---

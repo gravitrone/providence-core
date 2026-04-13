@@ -833,6 +833,10 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			}
 		}
 
+		// Microcompact: prune old tool results before the API call (zero cost).
+		msgs := e.history.Messages()
+		msgs, _ = compact.Microcompact(msgs)
+
 		// Build tool params.
 		toolParams := e.toolParams()
 
@@ -841,7 +845,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			Model:     anthropic.Model(e.model),
 			MaxTokens: 16384,
 			System:    e.systemBlocks(),
-			Messages:  e.history.Messages(),
+			Messages:  msgs,
 			Tools:     toolParams,
 		}
 

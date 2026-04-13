@@ -187,6 +187,7 @@ var slashCommands = []slashCommand{
 	{"/permissions", "Show current permission mode"},
 	{"/hooks", "Show hook configuration info"},
 	{"/diff", "Show git diff --stat"},
+	{"/plan", "Toggle plan mode (read-only tools)"},
 	{"/branch", "Fork conversation into a new session"},
 	{"/branches", "Show git branches"},
 	{"/share", "Export session as JSONL"},
@@ -368,6 +369,10 @@ type AgentTab struct {
 
 	// permissionMode is the active permission mode (default, acceptEdits, plan, bypassPermissions, dontAsk).
 	permissionMode string
+	// planModeActive tracks whether /plan mode is engaged (read-only tools).
+	planModeActive bool
+	// planPrevPermMode stores the permission mode before /plan toggled on.
+	planPrevPermMode string
 
 	// Discovered skills, custom agents, and custom tools loaded at startup.
 	discoveredSkills []skills.SkillDefinition
@@ -4902,6 +4907,25 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		}
 		at.permissionMode = args
 		at.addSystemMessage("Permission mode set to: " + args)
+		at.refreshViewport()
+		return true, nil
+
+	case "/plan":
+		if at.planModeActive {
+			// Toggle off: restore previous permission mode.
+			at.planModeActive = false
+			at.permissionMode = at.planPrevPermMode
+			at.planPrevPermMode = ""
+			at.addSystemMessage("Plan mode OFF - write tools restored.")
+		} else {
+			// Toggle on: save current mode, switch to plan.
+			at.planModeActive = true
+			at.planPrevPermMode = at.permissionMode
+			at.permissionMode = "plan"
+			at.addSystemMessage("Plan mode ON - read-only tools only. /plan again to exit.")
+			// Inject system reminder so the model respects plan mode.
+			at.addSystemMessage("Plan mode is active. Discuss the approach before making changes.")
+		}
 		at.refreshViewport()
 		return true, nil
 

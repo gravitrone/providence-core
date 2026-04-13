@@ -130,6 +130,12 @@ func runTUI(engineType string, cfg config.Config) error {
 	}
 	if st != nil {
 		defer st.Close()
+		// Clean up sessions older than 30 days on startup.
+		if cleaned, cerr := st.CleanupOldSessions(30); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: session cleanup: %v\n", cerr)
+		} else if cleaned > 0 {
+			fmt.Fprintf(os.Stderr, "cleaned %d old session(s)\n", cleaned)
+		}
 	}
 	// Initialize plugin manager.
 	homeDir, _ := os.UserHomeDir()

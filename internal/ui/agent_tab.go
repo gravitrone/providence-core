@@ -1799,13 +1799,13 @@ func (at AgentTab) View(width, height int) string {
 	// Tab bar + content routing.
 	tabBar := at.renderTabBar()
 
-	// Content based on active tab.
+	// Content based on active tab. -2 for tab bar + underline.
 	var content string
 	switch at.tab {
 	case tabChat:
-		content = at.renderChatPane(width, height-1) // -1 for tab bar
+		content = at.renderChatPane(width, height-2)
 	default:
-		content = at.renderDashboardTab(width, height-1)
+		content = at.renderDashboardTab(width, height-2)
 	}
 
 	return tabBar + "\n" + content
@@ -1840,7 +1840,14 @@ func (at AgentTab) renderTabBar() string {
 	}
 
 	tabRow := lipgloss.JoinHorizontal(lipgloss.Top, segments...)
-	return lipgloss.NewStyle().Width(at.width).Align(lipgloss.Center).Render(tabRow)
+	centered := lipgloss.NewStyle().Width(at.width).Align(lipgloss.Center).Render(tabRow)
+	// Underline separator below tabs (nebula style: ─ chars in border color).
+	underline := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#3a2a1a")).
+		Width(at.width).
+		Align(lipgloss.Center).
+		Render(strings.Repeat("─", lipgloss.Width(tabRow)))
+	return centered + "\n" + underline
 }
 
 // switchTab changes the active tab and kicks off the indicator spring.

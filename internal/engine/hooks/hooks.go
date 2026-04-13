@@ -38,6 +38,7 @@ const (
 	WorktreeCreate       = "WorktreeCreate"
 	WorktreeRemove       = "WorktreeRemove"
 	DashboardPanelUpdate = "DashboardPanelUpdate"
+	PostSampling         = "PostSampling"
 )
 
 // --- Types ---

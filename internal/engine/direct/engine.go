@@ -127,6 +127,19 @@ type DirectEngine struct {
 	preExecResults map[string]tools.ToolResult
 	preExecMu      sync.Mutex
 	preExecWg      sync.WaitGroup
+
+	// Content replacement tracking: maps toolUseID -> original content for
+	// tool results that were compressed or cleared by microcompact/budget passes.
+	// Allows future restore if context re-expansion is needed.
+	contentReplacements   map[string]string
+	contentReplacementsMu sync.Mutex
+
+	// Task budget tracking: total token budget for the session. When non-zero,
+	// each API call's usage is deducted. Warnings fire near exhaustion, and
+	// the session stops when the budget is fully consumed.
+	tokenBudget    int
+	tokensConsumed int
+	budgetMu       sync.Mutex
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -237,29 +250,30 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	hooksRunner := hooks.NewRunner(hooksMap)
 
 	e := &DirectEngine{
-		client:           client,
-		model:            model,
-		system:           sysFlat,
-		blocks:           sysBlocks,
-		events:           make(chan engine.ParsedEvent, 64),
-		history:          history,
-		registry:         registry,
-		permissions:      NewPermissionHandler(),
-		workDir:          cfg.WorkDir,
-		sessionID:        uuid.New().String(),
-		status:           engine.StatusIdle,
-		ctx:              ctx,
-		cancel:           cancel,
-		provider:         providerName,
-		codexMode:        isCodex,
-		openrouterMode:   isOpenRouter,
-		openrouterAPIKey: openrouterKey,
-		subagentRunner:   subagent.NewRunnerWithWorkDir(cfg.WorkDir),
-		apiKey:           cfg.APIKey,
-		sessionBus:       session.NewBus(),
-		todoTool:         todoTool,
-		startTime:        time.Now(),
-		hooksRunner:      hooksRunner,
+		client:              client,
+		model:               model,
+		system:              sysFlat,
+		blocks:              sysBlocks,
+		events:              make(chan engine.ParsedEvent, 64),
+		history:             history,
+		registry:            registry,
+		permissions:         NewPermissionHandler(),
+		workDir:             cfg.WorkDir,
+		sessionID:           uuid.New().String(),
+		status:              engine.StatusIdle,
+		ctx:                 ctx,
+		cancel:              cancel,
+		provider:            providerName,
+		codexMode:           isCodex,
+		openrouterMode:      isOpenRouter,
+		openrouterAPIKey:    openrouterKey,
+		subagentRunner:      subagent.NewRunnerWithWorkDir(cfg.WorkDir),
+		apiKey:              cfg.APIKey,
+		sessionBus:          session.NewBus(),
+		todoTool:            todoTool,
+		startTime:           time.Now(),
+		hooksRunner:         hooksRunner,
+		contentReplacements: make(map[string]string),
 	}
 
 	taskTool := tools.NewTaskTool(e.subagentRunner, e.subagentExecutor)
@@ -1068,6 +1082,22 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			}
 		}
 
+		// Image error classification: detect image-specific API errors and
+		// show user-friendly messages with resize hints.
+		if streamErr != nil {
+			if imgMsg := classifyImageError(streamErr); imgMsg != "" {
+				e.events <- engine.ParsedEvent{
+					Type: "system_message",
+					Data: &engine.SystemMessageEvent{
+						Type:    "system_message",
+						Content: imgMsg,
+					},
+				}
+				e.emitError(fmt.Errorf("image error: %s", imgMsg))
+				return
+			}
+		}
+
 		if streamErr != nil {
 			if isFallbackTriggerable(streamErr) && !e.fallbackActive {
 				fallback := engine.FastForProvider(e.provider)
@@ -1119,6 +1149,12 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		}
 
 		e.emitAssistant(accumulated)
+
+		// Fire PostSampling hook after each model response completes.
+		e.fireHookAsync(hooks.PostSampling, hooks.HookInput{
+			ToolName:  e.model,
+			ToolInput: accumulated.StopReason,
+		})
 
 		// Max output tokens recovery: first try escalating to 64k, then
 		// fall through to multi-turn resume with recovery prompts.
@@ -1250,6 +1286,9 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		var resultBlocks []anthropic.ContentBlockParamUnion
 		for _, r := range queue.Results() {
+			// Normalize tool result before adding to history.
+			r.Result.Content = normalizeToolResult(r.Result.Content, maxToolResultSize)
+
 			e.sessionBus.Publish(session.Event{Type: session.EventToolCallResult, Data: r.Result.Content})
 
 			// Fire PostToolUse or PostToolUseFailure hook.
@@ -1711,6 +1750,82 @@ func (e *DirectEngine) generateToolSummary(results []ToolCallResult) {
 
 	// Inject as a system note in the conversation history.
 	e.history.AddUser(fmt.Sprintf("[Tool summary: %s]", summary))
+}
+
+// --- Content replacement tracking ---
+
+// TrackContentReplacement records that a tool result's content was replaced
+// (e.g. by compression or budget enforcement), storing the original for
+// potential future restoration.
+func (e *DirectEngine) TrackContentReplacement(toolUseID, originalContent string) {
+	e.contentReplacementsMu.Lock()
+	defer e.contentReplacementsMu.Unlock()
+	e.contentReplacements[toolUseID] = originalContent
+}
+
+// GetReplacedContent returns the original content for a replaced tool result,
+// or empty string if not tracked.
+func (e *DirectEngine) GetReplacedContent(toolUseID string) (string, bool) {
+	e.contentReplacementsMu.Lock()
+	defer e.contentReplacementsMu.Unlock()
+	content, ok := e.contentReplacements[toolUseID]
+	return content, ok
+}
+
+// ContentReplacementCount returns the number of tracked replacements.
+func (e *DirectEngine) ContentReplacementCount() int {
+	e.contentReplacementsMu.Lock()
+	defer e.contentReplacementsMu.Unlock()
+	return len(e.contentReplacements)
+}
+
+// --- Message normalization ---
+
+// normalizeToolResult cleans a tool result string before adding to history:
+// trims trailing whitespace, caps at maxResultSize, and ensures valid UTF-8.
+func normalizeToolResult(content string, maxResultSize int) string {
+	// Trim trailing whitespace.
+	content = strings.TrimRight(content, " \t\n\r")
+
+	// Ensure valid UTF-8 by replacing invalid sequences.
+	content = strings.ToValidUTF8(content, "\uFFFD")
+
+	// Cap at maxResultSize.
+	if maxResultSize > 0 && len(content) > maxResultSize {
+		content = content[:maxResultSize] + "\n[truncated: exceeded " + fmt.Sprintf("%d", maxResultSize) + " bytes]"
+	}
+
+	return content
+}
+
+// maxToolResultSize is the ceiling for individual tool result content.
+const maxToolResultSize = 512_000 // 512KB
+
+// --- Image error classification ---
+
+// classifyImageError checks if an API error is image-related and returns
+// a user-friendly message with resize hints. Returns empty string if not
+// an image error.
+func classifyImageError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+
+	if strings.Contains(msg, "image_too_large") || strings.Contains(msg, "ImageSizeError") {
+		return "Image too large for the API. Resize to under 5MB or 8000x8000px before retrying."
+	}
+	if strings.Contains(msg, "invalid_image") || strings.Contains(msg, "ImageResizeError") {
+		return "Image could not be processed. Ensure it is a valid PNG, JPEG, GIF, or WebP file."
+	}
+	if strings.Contains(msg, "image_resize") || strings.Contains(msg, "image dimensions") {
+		return "Image dimensions exceed limits. Try resizing to 2048x2048 or smaller."
+	}
+	if strings.Contains(msg, "unsupported_image") || strings.Contains(msg, "image_content_type") {
+		return "Unsupported image format. Use PNG, JPEG, GIF, or WebP."
+	}
+
+	return ""
 }
 
 // computerUseToolNames lists the CU tools that may leave macOS state dirty.

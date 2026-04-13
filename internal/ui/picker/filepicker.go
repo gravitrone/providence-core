@@ -320,6 +320,33 @@ func loadFiles(cwd string) tea.Cmd {
 	}
 }
 
+// View renders the file picker popup as a list of fuzzy-filtered paths.
+// The selected entry is marked with "> ". Returns "" when inactive or empty.
+func (m FilePickerModel) View(width int) string {
+	if !m.active || len(m.filtered) == 0 {
+		return ""
+	}
+
+	maxW := width - 6
+	if maxW < 20 {
+		maxW = 20
+	}
+
+	var b strings.Builder
+	for i, f := range m.filtered {
+		display := f
+		if len(display) > maxW {
+			display = "..." + display[len(display)-maxW+3:]
+		}
+		if i == m.selected {
+			b.WriteString("  > " + display + "\n")
+		} else {
+			b.WriteString("    " + display + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func tickRefresh() tea.Cmd {
 	return tea.Tick(refreshInterval, func(t time.Time) tea.Msg {
 		return FilesRefreshMsg{}

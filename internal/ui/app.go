@@ -71,15 +71,10 @@ func (a App) View() tea.View {
 	hints := a.agentTab.Hints()
 	tabStatusLine := a.agentTab.StatusLine()
 
-	// Bottom: divider + status line + hints (only if non-nil).
+	// Bottom: divider + status line + context hints (freeze/perm mode only).
 	bottomDivider := centerBlockUniform(gradientDivider(chatContentWidth(a.width)), a.width)
-	cwdLine := centerBlockUniform(
-		lipgloss.NewStyle().Foreground(ColorMuted).Render(cwdShort()),
-		a.width,
-	)
 	var bottomParts []string
 	bottomParts = append(bottomParts, bottomDivider)
-	bottomParts = append(bottomParts, cwdLine)
 	if tabStatusLine != "" {
 		bottomParts = append(bottomParts, centerBlockUniform(tabStatusLine, a.width))
 	}

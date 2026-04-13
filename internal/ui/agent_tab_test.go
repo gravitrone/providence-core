@@ -107,6 +107,63 @@ func TestAgentTabStatusLineShowsContextPillWhenEngineActive(t *testing.T) {
 	assert.Contains(t, out, "ctx")
 }
 
+func TestStatusLineSingleRow(t *testing.T) {
+	at := NewAgentTab("direct", config.Config{}, nil)
+	at.model = "sonnet"
+	at.width = 200
+	at.engine = &direct.DirectEngine{}
+	at.currentTokens = 50000
+	at.messages = []ChatMessage{{Role: "user", Content: "hi", Done: true}}
+
+	out := at.StatusLine()
+
+	// All pills rendered in one StatusBarFromItems call (single bar).
+	// The bordered segments produce 3 visual lines (top border, content, bottom border),
+	// but all pills must be on that same single bar, not split across sections.
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	assert.Equal(t, 3, len(lines), "bordered status bar should be exactly 3 lines (top/content/bottom)")
+	// All pill content is on the middle line.
+	assert.Contains(t, lines[1], "direct", "engine pill on content line")
+	assert.Contains(t, lines[1], "cwd", "cwd pill on content line")
+	assert.Contains(t, lines[1], "ctrl+o", "freeze pill on content line")
+}
+
+func TestStatusLineTruncation(t *testing.T) {
+	at := NewAgentTab("direct", config.Config{}, nil)
+	at.model = "sonnet"
+	at.width = 60 // narrow - should drop low-priority pills
+	at.engine = &direct.DirectEngine{}
+	at.currentTokens = 50000
+	at.messages = []ChatMessage{{Role: "user", Content: "hi", Done: true}}
+
+	out := at.StatusLine()
+
+	// Engine pill (first) should survive.
+	assert.Contains(t, out, "direct", "engine pill must survive narrow width")
+	// Low-priority pills (cwd, freeze) should be dropped or replaced with overflow.
+	// We just check it doesn't panic and produces output.
+	assert.NotEmpty(t, out)
+}
+
+func TestStatusLineAllPills(t *testing.T) {
+	at := NewAgentTab("direct", config.Config{}, nil)
+	at.model = "sonnet"
+	at.width = 300
+	at.engine = &direct.DirectEngine{}
+	at.currentTokens = 120000
+	at.messages = []ChatMessage{{Role: "user", Content: "hi", Done: true}}
+
+	out := at.StatusLine()
+
+	assert.Contains(t, out, "direct", "engine pill missing")
+	assert.Contains(t, out, "sonnet", "model pill missing")
+	assert.Contains(t, out, "active", "session pill missing")
+	assert.Contains(t, out, "60%", "ctx pill missing")
+	assert.Contains(t, out, "cwd", "cwd pill missing")
+	assert.Contains(t, out, "ctrl+o", "freeze pill missing")
+	assert.Contains(t, out, "freeze", "freeze desc missing")
+}
+
 func TestAgentTabResize(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -667,13 +724,12 @@ func TestCtrlOEntersFreezeMode(t *testing.T) {
 	assert.False(t, at.transcript.Frozen())
 }
 
-func TestHintsShowCtrlOFreezeScroll(t *testing.T) {
+func TestHintsNoCtrlOInIdle(t *testing.T) {
+	// ctrl+o freeze hint moved to StatusLine; Hints() should be empty in idle.
 	at := NewAgentTab("", config.Config{}, nil)
 	at.messages = append(at.messages, ChatMessage{Role: "tool", ToolName: "Read", Done: true})
 	hints := at.Hints()
-	require.NotEmpty(t, hints)
-	assert.Equal(t, "ctrl+o", hints[0].Key)
-	assert.Equal(t, "freeze scroll", hints[0].Desc)
+	assert.Empty(t, hints, "idle hints should be empty, ctrl+o is now in StatusLine")
 }
 
 func TestHintsShowFreezeControls(t *testing.T) {

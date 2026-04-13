@@ -3797,23 +3797,32 @@ func (at AgentTab) renderToolCard(msg ChatMessage, msgIdx int, isLatest bool) st
 	// --- Header line ---
 	header := statusIcon + pill + chevron + primaryArg + secondaryArgs
 
-	// --- Agent dispatch info (key-value pairs for Agent/Task) ---
+	// --- Agent dispatch info (inline, no nested card) ---
 	isAgentTool := msg.ToolName == "Agent" || msg.ToolName == "Task"
 	if isAgentTool && msg.ToolArgs != "" {
-		// Parse agent dispatch info from ToolArgs lines.
-		lines := strings.Split(msg.ToolArgs, "\n")
-		if len(lines) > 1 {
-			var kvParts []string
-			for _, line := range lines[1:] {
-				trimmed := strings.TrimSpace(line)
-				if trimmed != "" {
-					kvParts = append(kvParts, trimmed)
-				}
+		// Try to extract clean agent info from the formatted dispatch card.
+		// formatTaskInput wraps in a bordered card - strip it and show clean key-values.
+		raw := msg.ToolArgs
+		// Extract name + meta from first meaningful lines.
+		cleanLines := []string{}
+		for _, line := range strings.Split(raw, "\n") {
+			trimmed := strings.TrimSpace(line)
+			// Skip border characters, "Agent Dispatched" header, and empty lines.
+			if trimmed == "" || trimmed == "Agent Dispatched" {
+				continue
 			}
-			if len(kvParts) > 0 {
-				kvStyle := lipgloss.NewStyle().Foreground(ColorMuted)
-				header = statusIcon + pill + chevron + lipgloss.NewStyle().Foreground(ColorText).Bold(true).Render(lines[0])
-				header += "\n" + kvStyle.Render("  "+strings.Join(kvParts, "  "))
+			// Skip lines that are just box-drawing characters.
+			if strings.ContainsAny(trimmed, "╭╮╰╯│─┌┐└┘") && !strings.ContainsAny(trimmed, "abcdefghijklmnopqrstuvwxyz") {
+				continue
+			}
+			cleanLines = append(cleanLines, trimmed)
+		}
+		if len(cleanLines) > 0 {
+			nameStyle := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
+			header = statusIcon + pill + chevron + nameStyle.Render(cleanLines[0])
+			if len(cleanLines) > 1 {
+				descStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
+				header += "\n" + descStyle.Render("  "+cleanLines[1])
 			}
 		}
 	}
@@ -3958,7 +3967,7 @@ func (at AgentTab) renderToolMessageLegacy(msg ChatMessage, msgIdx int, isLatest
 			// Summary line (connector style, muted).
 			flavorStyle := lipgloss.NewStyle().Foreground(ColorFrozen).Italic(true)
 			connectorStyle := lipgloss.NewStyle().Foreground(ColorFrozen)
-			bodyLines = append(bodyLines, connectorStyle.Render("  \u2514 ")+flavorStyle.Render(msg.ToolBody+"..."))
+			bodyLines = append(bodyLines, connectorStyle.Render("  \u23BF ")+flavorStyle.Render(msg.ToolBody+"..."))
 		}
 
 		// Expanded tool output (crush-style content lines with subtle bg).
@@ -4018,10 +4027,10 @@ func (at AgentTab) renderToolMessageLegacy(msg ChatMessage, msgIdx int, isLatest
 		} else if msg.ToolStatus == "success" && msg.ToolBody != "" {
 			flavorColor := lipgloss.Color(flameColor(at.flameFrame))
 			flavorStyle := lipgloss.NewStyle().Foreground(flavorColor).Italic(true)
-			resultPrefix := lipgloss.NewStyle().Foreground(flavorColor).Render("  \u2514 ")
+			resultPrefix := lipgloss.NewStyle().Foreground(flavorColor).Render("  \u23BF ")
 			body = "\n" + resultPrefix + flavorStyle.Render(msg.ToolBody+"...")
 		} else if msg.ToolStatus == "error" && msg.ToolBody != "" {
-			resultPrefix := lipgloss.NewStyle().Foreground(ColorError).Render("  \u2514 ")
+			resultPrefix := lipgloss.NewStyle().Foreground(ColorError).Render("  \u23BF ")
 			body = "\n" + resultPrefix + lipgloss.NewStyle().Foreground(ColorError).Italic(true).Render(msg.ToolBody+"...")
 		}
 	}

@@ -741,7 +741,7 @@ func (d *DashboardModel) RenderFilesTab(width, height int) string {
 	return t.View()
 }
 
-// RenderTokensTab renders the token usage panel at full width.
+// RenderTokensTab renders the token usage panel at full width, vertically centered.
 func (d *DashboardModel) RenderTokensTab(width, height int) string {
 	barW := width - 20
 	if barW < 10 {
@@ -754,7 +754,12 @@ func (d *DashboardModel) RenderTokensTab(width, height int) string {
 	} else {
 		label = fmt.Sprintf("  %3.0f%% context", d.TokenPct*100)
 	}
-	return label + "\n  " + d.TokenProgress.ViewAs(d.TokenPct)
+	content := label + "\n  " + d.TokenProgress.ViewAs(d.TokenPct)
+	return lipgloss.NewStyle().
+		Width(width).
+		Height(height).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(content)
 }
 
 // RenderErrorsTab renders the errors panel at full width.

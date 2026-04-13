@@ -3865,25 +3865,21 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 	switch cmd {
 	case "/model":
 		if args == "" {
-			// Build model list as markdown for glamour rendering.
+			// Show model catalog as a system message for reliable display.
 			var b strings.Builder
-			b.WriteString("## Available Models\n\n")
-			b.WriteString("| Model | Alias | Description |\n")
-			b.WriteString("|-------|-------|-------------|\n")
+			b.WriteString("Available Models\n\n")
+			b.WriteString(fmt.Sprintf("  %-40s  %-10s  %s\n", "Model", "Alias", "Description"))
+			b.WriteString(fmt.Sprintf("  %-40s  %-10s  %s\n", strings.Repeat("-", 40), strings.Repeat("-", 10), strings.Repeat("-", 20)))
 			for _, m := range availableModels {
 				alias := ""
 				if len(m.Aliases) > 0 {
 					alias = m.Aliases[0]
 				}
-				b.WriteString(fmt.Sprintf("| %s | %s | %s |\n", m.Name, alias, m.Desc))
+				b.WriteString(fmt.Sprintf("  %-40s  %-10s  %s\n", m.Name, alias, m.Desc))
 			}
-			b.WriteString("\n**Current:** " + at.modelDisplay() + "\n\n")
-			b.WriteString("Use `/model <alias>` to switch (e.g. `/model haiku`)")
-			at.messages = append(at.messages, ChatMessage{
-				Role:    "assistant",
-				Content: b.String(),
-				Done:    true,
-			})
+			b.WriteString("\nCurrent: " + at.modelDisplay())
+			b.WriteString("\nUse /model <name> to switch")
+			at.addSystemMessage(b.String())
 		} else {
 			resolved, ok := resolveModelAlias(args)
 			at.model = resolved
@@ -4390,11 +4386,12 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			return true, nil
 		}
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Discovered Skills (%d found)\n\n", len(skillList)))
+		sb.WriteString(fmt.Sprintf("Discovered Skills (%d found)\n", len(skillList)))
+		sb.WriteString("\n")
 		for _, s := range skillList {
 			desc := s.Description
-			if len(desc) > 60 {
-				desc = desc[:57] + "..."
+			if len(desc) > 40 {
+				desc = desc[:37] + "..."
 			}
 			sb.WriteString(fmt.Sprintf("  %-20s %s\n", s.Name, desc))
 		}

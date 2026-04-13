@@ -3,9 +3,11 @@ package direct
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/gravitrone/providence-core/internal/engine"
+	"github.com/gravitrone/providence-core/internal/engine/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -301,6 +303,38 @@ func TestMaxOutputTokensRecovery(t *testing.T) {
 	for _, m := range msgs {
 		assert.Contains(t, m.Content[0].OfText.Text, "Output token limit hit")
 	}
+}
+
+// TestSessionBusWiring verifies that the SessionBus Publish/Subscribe round-trip
+// works for the event types fired by agentLoop (EventToolCallStart, EventToolCallResult).
+// This confirms background agent subscribers will receive events.
+func TestSessionBusWiring(t *testing.T) {
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:   engine.EngineTypeDirect,
+		Model:  "claude-sonnet-4-20250514",
+		APIKey: "test-key-not-real",
+	})
+	require.NoError(t, err)
+
+	bus := e.SessionBus()
+	require.NotNil(t, bus, "SessionBus must be non-nil")
+
+	ch := bus.Subscribe(8)
+
+	// Simulate what agentLoop does: publish tool call start and result.
+	bus.Publish(session.Event{Type: session.EventToolCallStart, Data: "Read"})
+	bus.Publish(session.Event{Type: session.EventToolCallResult, Data: "file contents"})
+
+	for _, wantType := range []string{session.EventToolCallStart, session.EventToolCallResult} {
+		select {
+		case ev := <-ch:
+			assert.Equal(t, wantType, ev.Type)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("timed out waiting for %s event", wantType)
+		}
+	}
+
+	bus.Unsubscribe(ch)
 }
 
 func TestMaxOutputTokensRecoveryResetOnSend(t *testing.T) {

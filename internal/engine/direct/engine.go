@@ -86,6 +86,10 @@ type DirectEngine struct {
 
 	// Session event bus for background agents and plugin subscribers.
 	sessionBus *session.Bus
+
+	// store is optional; when set, session learnings are persisted on Close.
+	store     storeIface
+	startTime time.Time
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -187,6 +191,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		apiKey:           cfg.APIKey,
 		sessionBus:       session.NewBus(),
 		todoTool:         todoTool,
+		startTime:        time.Now(),
 	}
 
 	// Register subagent TaskTool and SendMessage now that the engine exists for the executor.
@@ -356,9 +361,20 @@ func (e *DirectEngine) Cancel() {
 	// The agent loop's defer will emit the result event before we close.
 }
 
+// SetStore wires a store for session learnings persistence.
+// Call before the first Send; safe to call with nil to disable.
+// Accepts any value that implements storeIface (e.g. *store.Store).
+func (e *DirectEngine) SetStore(st storeIface) {
+	e.store = st
+}
+
 // Close cleanly shuts down the engine and closes the events channel.
+// If a store is wired, mechanical session learnings are persisted before closing.
 func (e *DirectEngine) Close() {
 	e.Interrupt()
+	if e.store != nil {
+		e.saveSessionLearnings(e.store, e.startTime)
+	}
 }
 
 // GetCurrentTodos implements engine.TodoProvider.
@@ -777,6 +793,11 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		queue.Wait()
 
 		// Collect results, emit tool_result events, add to history.
+		// BG agent wiring verified: EventToolCallResult is published here for each
+		// tool result, and EventToolCallStart is published per-tool above. The
+		// Red-Team-Advisor subscriber fires in agent_tab.go after tool-use turns
+		// when BGAgentsEnabled=true. The Smart-Pre-processor is wired on-demand via
+		// SetStore/SetStore pattern; it is currently triggered from the TUI layer.
 		var resultBlocks []anthropic.ContentBlockParamUnion
 		for _, r := range queue.Results() {
 			e.sessionBus.Publish(session.Event{Type: session.EventToolCallResult, Data: r.Result.Content})

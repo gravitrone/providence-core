@@ -26,6 +26,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/mcp"
 	"github.com/gravitrone/providence-core/internal/engine/session"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
+	"github.com/gravitrone/providence-core/internal/engine/teams"
 )
 
 // MaxOutputTokensRecoveryLimit is the maximum number of times the engine will
@@ -154,6 +155,16 @@ type DirectEngine struct {
 	loopHistory   [5]string // ring buffer of "toolName:argsHash" keys
 	loopIdx       int       // next write index into loopHistory
 	loopFillCount int       // how many entries have been written (max 5)
+
+	// Team membership: when set, inbox is polled for teammate messages.
+	teamStore   *teams.Store
+	teamName    string // team this engine belongs to (empty = no team)
+	teamAgentID string // this agent's name within the team
+
+	// Coordinator mode: when true, only coordinator-safe tools are exposed.
+	// The leader gets Agent, SendMessage, TaskStop (Kill), TeamCreate,
+	// TeamDelete, TodoWrite, and brief. Workers get all tools.
+	coordinatorMode bool
 
 	// Caffeinate: prevent macOS sleep while the engine is active.
 	caffeinator *engine.Caffeinator
@@ -311,6 +322,14 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	structuredOutputTool := tools.NewStructuredOutputTool()
 	registry.Register(structuredOutputTool)
 
+	// Team tools: TeamCreate and TeamDelete for agent team coordination.
+	if teamStore, err := teams.DefaultStore(); err == nil {
+		teamCreateTool := tools.NewTeamCreateTool(teamStore)
+		registry.Register(teamCreateTool)
+		teamDeleteTool := tools.NewTeamDeleteTool(teamStore)
+		registry.Register(teamDeleteTool)
+	}
+
 	// MCP server support: load config, connect servers, register tools.
 	mcpHomeDir, _ := os.UserHomeDir()
 	mcpWorkDir := cfg.WorkDir
@@ -454,6 +473,47 @@ func (e *DirectEngine) SessionBus() *session.Bus {
 // SetRegistry replaces the tool registry (for use before first Send).
 func (e *DirectEngine) SetRegistry(r *tools.Registry) {
 	e.registry = r
+}
+
+// JoinTeam assigns this engine to a team for inbox polling.
+// Pass the team name and the agent's identifier within the team.
+func (e *DirectEngine) JoinTeam(store *teams.Store, teamName, agentID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.teamStore = store
+	e.teamName = teamName
+	e.teamAgentID = agentID
+}
+
+// LeaveTeam removes team membership from this engine.
+func (e *DirectEngine) LeaveTeam() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.teamStore = nil
+	e.teamName = ""
+	e.teamAgentID = ""
+}
+
+// TeamInfo returns the current team name and agent ID, or empty strings.
+func (e *DirectEngine) TeamInfo() (string, string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.teamName, e.teamAgentID
+}
+
+// SetCoordinatorMode enables or disables coordinator mode.
+// When active, only orchestration tools are exposed to the model.
+func (e *DirectEngine) SetCoordinatorMode(on bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.coordinatorMode = on
+}
+
+// IsCoordinatorMode returns whether the engine is in coordinator mode.
+func (e *DirectEngine) IsCoordinatorMode() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.coordinatorMode
 }
 
 // SetUnattendedRetry enables or disables unattended retry mode.
@@ -1751,9 +1811,37 @@ func (e *DirectEngine) emitError(err error) {
 	}
 }
 
+// coordinatorToolSet defines which tools are available in coordinator mode.
+// The leader only gets orchestration tools - all actual work goes through agents.
+var coordinatorToolSet = map[string]bool{
+	"Agent":       true,
+	"SendMessage": true,
+	"TeamCreate":  true,
+	"TeamDelete":  true,
+	"TodoWrite":   true,
+	"Brief":       true,
+	"Read":        true,
+	"AskUser":     true,
+}
+
+// filteredTools returns the tool list, optionally filtered for coordinator mode.
+func (e *DirectEngine) filteredTools() []tools.Tool {
+	allTools := e.registry.All()
+	if !e.coordinatorMode {
+		return allTools
+	}
+	filtered := make([]tools.Tool, 0, len(coordinatorToolSet))
+	for _, t := range allTools {
+		if coordinatorToolSet[t.Name()] {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
 // toolParams converts the registry into Anthropic SDK tool params.
 func (e *DirectEngine) toolParams() []anthropic.ToolUnionParam {
-	allTools := e.registry.All()
+	allTools := e.filteredTools()
 	if len(allTools) == 0 {
 		return nil
 	}
@@ -2433,6 +2521,18 @@ func (e *DirectEngine) injectPerTurnContext() {
 				changedFiles = append(changedFiles, c)
 			}
 			parts = append(parts, fmt.Sprintf("Recent file changes: %s", strings.Join(changedFiles, ", ")))
+		}
+	}
+
+	// Team inbox polling: check for unread teammate messages.
+	if e.teamStore != nil && e.teamName != "" && e.teamAgentID != "" {
+		mailbox := teams.NewMailbox(e.teamStore)
+		unread, err := mailbox.ReadUnread(e.teamName, e.teamAgentID)
+		if err == nil && len(unread) > 0 {
+			for _, msg := range unread {
+				parts = append(parts, fmt.Sprintf("<teammate-message from=%q>%s</teammate-message>", msg.From, msg.Text))
+			}
+			_ = mailbox.MarkRead(e.teamName, e.teamAgentID)
 		}
 	}
 

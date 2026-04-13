@@ -38,6 +38,7 @@ import (
 	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
 	"github.com/gravitrone/providence-core/internal/engine/skills"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
+	"github.com/gravitrone/providence-core/internal/engine/teams"
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 	"github.com/gravitrone/providence-core/internal/ui/dashboard"
@@ -217,6 +218,7 @@ var slashCommands = []slashCommand{
 	{"/quit", "Clean exit (alias /exit)"},
 	{"/copy", "Copy last assistant response to clipboard"},
 	{"/context", "Show context usage bar"},
+	{"/team", "Manage agent teams (create, delete, list, info)"},
 	{"/mcp", "List connected MCP servers with status"},
 	{"/btw", "Quick side question (no tools, doesn't interrupt main flow)"},
 	{"/help", "Show available commands"},
@@ -437,6 +439,9 @@ type AgentTab struct {
 	historySearchQuery  string
 	historySearchResult string
 
+	// Team store for /team slash command and TeamCreate/TeamDelete tools.
+	teamStore *teams.Store
+
 	// Context usage tiered warning state: each threshold fires once per session.
 	contextWarned70 bool
 	contextWarned85 bool
@@ -528,6 +533,9 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 	// Load keybinding overrides.
 	keybindings, _ := LoadKeybindings(home)
 
+	// Initialize team store.
+	teamStore, _ := teams.DefaultStore()
+
 	// Initialize file picker for @-mention autocomplete.
 	fp := picker.NewFilePickerModel(cwd, 80)
 
@@ -553,6 +561,7 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		discoveredSkills: discoveredSkills,
 		customAgents:     customAgents,
 		customTools:      customTools,
+		teamStore:        teamStore,
 		filePicker:       fp,
 		keybindings:      keybindings,
 		toolsExpanded:    make(map[int]bool),
@@ -6121,6 +6130,161 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		at.addSystemMessage(bar)
 		at.refreshViewport()
 		return true, nil
+
+	case "/team":
+		if at.teamStore == nil {
+			at.addSystemMessage("Team store unavailable (could not resolve home dir)")
+			at.refreshViewport()
+			return true, nil
+		}
+		if args == "" {
+			// No args: list all teams.
+			names, err := at.teamStore.List()
+			if err != nil {
+				at.addSystemMessage("Error listing teams: " + err.Error())
+				at.refreshViewport()
+				return true, nil
+			}
+			if len(names) == 0 {
+				at.addSystemMessage("No teams. Use /team create <name> to create one.")
+				at.refreshViewport()
+				return true, nil
+			}
+			var b strings.Builder
+			b.WriteString("Teams:\n\n")
+			for _, name := range names {
+				team, err := at.teamStore.Load(name)
+				if err != nil {
+					b.WriteString(fmt.Sprintf("  %s (error loading)\n", name))
+					continue
+				}
+				active := team.ActiveCount()
+				total := len(team.Members)
+				b.WriteString(fmt.Sprintf("  %s - %s (%d/%d active)\n", team.Name, team.Description, active, total))
+			}
+			at.addSystemMessage(b.String())
+			at.refreshViewport()
+			return true, nil
+		}
+
+		subParts := strings.SplitN(args, " ", 2)
+		subCmd := strings.ToLower(subParts[0])
+		subArgs := ""
+		if len(subParts) > 1 {
+			subArgs = strings.TrimSpace(subParts[1])
+		}
+
+		switch subCmd {
+		case "create":
+			if subArgs == "" {
+				at.addSystemMessage("Usage: /team create <name> [description]")
+				at.refreshViewport()
+				return true, nil
+			}
+			nameParts := strings.SplitN(subArgs, " ", 2)
+			teamName := nameParts[0]
+			teamDesc := ""
+			if len(nameParts) > 1 {
+				teamDesc = nameParts[1]
+			}
+			team, err := at.teamStore.CreateTeam(teamName, teamDesc)
+			if err != nil {
+				at.addSystemMessage("Error: " + err.Error())
+				at.refreshViewport()
+				return true, nil
+			}
+			at.addSystemMessage(fmt.Sprintf("Team created: %s (task dir: %s)", team.Name, team.TaskListDir))
+			at.refreshViewport()
+			return true, nil
+
+		case "delete":
+			if subArgs == "" {
+				at.addSystemMessage("Usage: /team delete <name>")
+				at.refreshViewport()
+				return true, nil
+			}
+			team, err := at.teamStore.Load(subArgs)
+			if err != nil {
+				at.addSystemMessage("Error: " + err.Error())
+				at.refreshViewport()
+				return true, nil
+			}
+			if team.HasActiveMember() {
+				at.addSystemMessage(fmt.Sprintf("Cannot delete team %q: %d active members. Deactivate them first.", subArgs, team.ActiveCount()))
+				at.refreshViewport()
+				return true, nil
+			}
+			if err := at.teamStore.Delete(subArgs); err != nil {
+				at.addSystemMessage("Error: " + err.Error())
+				at.refreshViewport()
+				return true, nil
+			}
+			at.addSystemMessage("Team deleted: " + subArgs)
+			at.refreshViewport()
+			return true, nil
+
+		case "list":
+			// Same as /team with no args.
+			names, err := at.teamStore.List()
+			if err != nil {
+				at.addSystemMessage("Error: " + err.Error())
+				at.refreshViewport()
+				return true, nil
+			}
+			if len(names) == 0 {
+				at.addSystemMessage("No teams. Use /team create <name> to create one.")
+			} else {
+				var b strings.Builder
+				b.WriteString("Teams:\n\n")
+				for _, name := range names {
+					team, err := at.teamStore.Load(name)
+					if err != nil {
+						b.WriteString(fmt.Sprintf("  %s (error loading)\n", name))
+						continue
+					}
+					active := team.ActiveCount()
+					total := len(team.Members)
+					b.WriteString(fmt.Sprintf("  %s - %s (%d/%d active)\n", team.Name, team.Description, active, total))
+				}
+				at.addSystemMessage(b.String())
+			}
+			at.refreshViewport()
+			return true, nil
+
+		case "info":
+			if subArgs == "" {
+				at.addSystemMessage("Usage: /team info <name>")
+				at.refreshViewport()
+				return true, nil
+			}
+			team, err := at.teamStore.Load(subArgs)
+			if err != nil {
+				at.addSystemMessage("Error: " + err.Error())
+				at.refreshViewport()
+				return true, nil
+			}
+			var b strings.Builder
+			b.WriteString(fmt.Sprintf("Team: %s\n", team.Name))
+			b.WriteString(fmt.Sprintf("Description: %s\n", team.Description))
+			b.WriteString(fmt.Sprintf("Created: %s\n", team.CreatedAt.Format("2006-01-02 15:04")))
+			b.WriteString(fmt.Sprintf("Lead: %s\n", team.LeadID))
+			b.WriteString(fmt.Sprintf("Members (%d):\n", len(team.Members)))
+			for _, m := range team.Members {
+				status := "inactive"
+				if m.IsActive {
+					status = "active"
+				}
+				b.WriteString(fmt.Sprintf("  %s (%s) - %s, %s\n", m.Name, m.AgentID, m.AgentType, status))
+			}
+			at.addSystemMessage(b.String())
+			at.refreshViewport()
+			return true, nil
+
+		default:
+			at.addSystemMessage("Unknown subcommand: " + subCmd + "\nUsage: /team [create|delete|list|info] [args]")
+			at.refreshViewport()
+			return true, nil
+		}
 
 	case "/mcp":
 		// List connected MCP servers with status.

@@ -94,9 +94,8 @@ type openrouterToolCall struct {
 	RawArgs string
 }
 
-// buildOpenRouterTools converts the tool registry to OpenAI function-calling format.
-func buildOpenRouterTools(registry *tools.Registry) []openrouterTool {
-	allTools := registry.All()
+// buildOpenRouterTools converts the tool list to OpenAI function-calling format.
+func buildOpenRouterTools(allTools []tools.Tool) []openrouterTool {
 	out := make([]openrouterTool, 0, len(allTools))
 	for _, t := range allTools {
 		schema := t.InputSchema()
@@ -258,7 +257,7 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 			Messages:      buildOpenRouterMessagesWithBlocks(e.model, e.blocks, e.system, e.openrouterHistory),
 			Stream:        true,
 			StreamOptions: &openrouterStreamOptions{IncludeUsage: true},
-			Tools:         buildOpenRouterTools(e.registry),
+			Tools:         buildOpenRouterTools(e.filteredTools()),
 		}
 
 		bodyBytes, err := json.Marshal(reqBody)

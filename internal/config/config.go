@@ -22,7 +22,8 @@ type Config struct {
 	ToolUseSummary   bool   `toml:"tool_use_summary" json:"tool_use_summary,omitempty"`
 	DashboardVisible bool   `toml:"dashboard_visible" json:"dashboard_visible,omitempty"`
 	BGAgentsEnabled  bool   `toml:"bg_agents_enabled" json:"bg_agents_enabled,omitempty"`
-	OutputStyle      string `toml:"output_style" json:"output_style,omitempty"`
+	OutputStyle      string   `toml:"output_style" json:"output_style,omitempty"`
+	SpinnerVerbs     []string `toml:"spinner_verbs" json:"spinner_verbs,omitempty"`
 
 	Compact     CompactConfig     `toml:"compact" json:"compact,omitempty"`
 	Hooks       HooksConfig       `toml:"hooks" json:"hooks,omitempty"`
@@ -327,6 +328,9 @@ func mergeConfig(base, override *Config) {
 	}
 	if override.OutputStyle != "" {
 		base.OutputStyle = override.OutputStyle
+	}
+	if len(override.SpinnerVerbs) > 0 {
+		base.SpinnerVerbs = override.SpinnerVerbs
 	}
 	// Compact: merge non-zero fields
 	if override.Compact.Mode != "" {

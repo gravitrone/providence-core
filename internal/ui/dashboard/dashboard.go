@@ -400,7 +400,8 @@ func (d *DashboardModel) SetAgents(agents []AgentInfo) {
 }
 
 // renderAgentTree renders a hierarchical agent tree with status icons,
-// model, elapsed time, and activity lines.
+// model, elapsed time, and activity lines. Fork branches show tree
+// connectors (├── / └──) for parent->child relationships.
 func renderAgentTree(agents []AgentInfo, width int) string {
 	if len(agents) == 0 {
 		return ""
@@ -409,12 +410,29 @@ func renderAgentTree(agents []AgentInfo, width int) string {
 	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeTextColor))
 	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(themeMutedColor))
 	activityStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(themeMutedColor)).Italic(true)
+	branchStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(themeMutedColor))
+
+	// Group agents by parent for tree rendering.
+	topLevel := make([]AgentInfo, 0)
+	childrenOf := make(map[string][]AgentInfo)
+	for _, a := range agents {
+		if a.ParentName == "" {
+			topLevel = append(topLevel, a)
+		} else {
+			childrenOf[a.ParentName] = append(childrenOf[a.ParentName], a)
+		}
+	}
 
 	var lines []string
-	for _, a := range agents {
-		indent := "  "
-		if a.ParentName != "" {
-			indent = "    "
+
+	renderAgent := func(a AgentInfo, indent string, isLast bool) {
+		prefix := indent
+		if indent != "  " {
+			if isLast {
+				prefix = indent + branchStyle.Render("\u2514\u2500\u2500 ") // └──
+			} else {
+				prefix = indent + branchStyle.Render("\u251C\u2500\u2500 ") // ├──
+			}
 		}
 
 		icon := agentStatusIcon(a.Status)
@@ -427,7 +445,7 @@ func renderAgentTree(agents []AgentInfo, width int) string {
 
 		elapsedStr := mutedStyle.Render(a.Elapsed)
 
-		leftPart := indent + icon + " " + nameStyle.Render(truncatePath(a.Name, width-20)) + " " + modelStr
+		leftPart := prefix + icon + " " + nameStyle.Render(truncatePath(a.Name, width-20)) + " " + modelStr
 		leftWidth := lipgloss.Width(leftPart)
 		rightWidth := lipgloss.Width(elapsedStr)
 		gap := width - leftWidth - rightWidth - 2
@@ -435,6 +453,11 @@ func renderAgentTree(agents []AgentInfo, width int) string {
 			gap = 1
 		}
 		lines = append(lines, leftPart+strings.Repeat(" ", gap)+elapsedStr)
+
+		childIndent := indent + "  "
+		if indent != "  " && !isLast {
+			childIndent = indent + branchStyle.Render("\u2502") + " " // │
+		}
 
 		if a.LastActivity != "" {
 			connector := mutedStyle.Render("\u23BF") // ⎿
@@ -446,21 +469,50 @@ func renderAgentTree(agents []AgentInfo, width int) string {
 			if len(activity) > maxLen {
 				activity = activity[:maxLen-3] + "..."
 			}
-			lines = append(lines, indent+"  "+connector+" "+activityStyle.Render(activity))
+			lines = append(lines, childIndent+"  "+connector+" "+activityStyle.Render(activity))
 		}
 
 		if a.ResultPreview != "" {
 			previewLines := strings.SplitN(a.ResultPreview, "\n", 4)
 			for i, pl := range previewLines {
 				if i >= 3 {
-					lines = append(lines, indent+"    "+mutedStyle.Render(fmt.Sprintf("...+more")))
+					lines = append(lines, childIndent+"    "+mutedStyle.Render("...+more"))
 					break
 				}
 				if len(pl) > width-8 {
 					pl = pl[:width-11] + "..."
 				}
-				lines = append(lines, indent+"    "+mutedStyle.Render(pl))
+				lines = append(lines, childIndent+"    "+mutedStyle.Render(pl))
 			}
+		}
+	}
+
+	// Render top-level agents and their children recursively.
+	for _, a := range topLevel {
+		renderAgent(a, "  ", false)
+		children := childrenOf[a.Name]
+		for ci, child := range children {
+			renderAgent(child, "    ", ci == len(children)-1)
+		}
+	}
+
+	// Render orphan children (parent not in agent list, e.g. "main" parent).
+	for parent, children := range childrenOf {
+		found := false
+		for _, a := range topLevel {
+			if a.Name == parent {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		// Show a virtual parent header for fork trees.
+		headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(themeAccentColor)).Bold(true)
+		lines = append(lines, "  "+headerStyle.Render(parent)+" "+mutedStyle.Render("(session)"))
+		for ci, child := range children {
+			renderAgent(child, "    ", ci == len(children)-1)
 		}
 	}
 

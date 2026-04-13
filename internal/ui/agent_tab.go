@@ -192,6 +192,7 @@ var slashCommands = []slashCommand{
 	{"/tag", "Tag current session (usage: /tag <name>)"},
 	{"/review", "Spawn code review agent"},
 	{"/fork", "Fork N background agents from current context"},
+	{"/index", "Index worktree files and write .providence/worktree-index.json"},
 	{"/init", "Create CLAUDE.md in project root with detected project info"},
 	{"/help", "Show available commands"},
 }
@@ -397,6 +398,17 @@ type AgentTab struct {
 	historySearchActive bool
 	historySearchQuery  string
 	historySearchResult string
+
+	// Context usage tiered warning state: each threshold fires once per session.
+	contextWarned70 bool
+	contextWarned85 bool
+	contextWarned95 bool
+
+	// Turn tracking: counts user turns for status bar display.
+	turnCount int
+
+	// Error message expansion: per-message-index toggle for long error messages.
+	errorExpanded map[int]bool
 }
 
 // NewAgentTab creates and returns a new AgentTab.
@@ -460,6 +472,9 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 	customAgents, _ := subagent.LoadCustomAgents(cwd, home)
 	customTools, _ := customtools.LoadCustomTools(cwd, home)
 
+	// Apply user-configured spinner verbs.
+	ApplyCustomSpinnerVerbs(cfg.SpinnerVerbs)
+
 	// Load keybinding overrides.
 	keybindings, _ := LoadKeybindings(home)
 
@@ -490,6 +505,7 @@ func NewAgentTab(engineType engine.EngineType, cfg config.Config, st *store.Stor
 		filePicker:       fp,
 		keybindings:      keybindings,
 		toolsExpanded:    make(map[int]bool),
+		errorExpanded:    make(map[int]bool),
 	}
 }
 
@@ -658,6 +674,27 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 		// No Send here - engine waits for the next user turn. Start the event
 		// pump anyway so system init / later events are drained.
 		return at, at.safeWaitForEvent()
+
+	case indexWorktreeMsg:
+		r := msg.result
+		if r.Err != nil {
+			at.addSystemMessage("Index failed: " + r.Err.Error())
+		} else {
+			at.addSystemMessage(fmt.Sprintf("Indexed %d files -> %s", r.Index.Total, r.Path))
+		}
+		at.refreshViewport()
+		return at, nil
+
+	case fetchModelCatalogMsg:
+		if msg.Err != nil {
+			// Silently ignore fetch failures - the built-in catalog is always shown.
+			return at, nil
+		}
+		if len(msg.Models) > 0 {
+			at.addSystemMessage(formatModelCatalog(msg.Models))
+			at.refreshViewport()
+		}
+		return at, nil
 
 	case authCompleteMsg:
 		at.addSystemMessage(msg.Message)
@@ -1122,6 +1159,7 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			Done:       true,
 			ImageCount: imgCount,
 		})
+		at.turnCount++
 		// Auto-title the session from the first user message (after append so it can find it).
 		at.generateAutoTitle()
 		at.messagesDirty = true
@@ -1502,7 +1540,7 @@ func (at AgentTab) handleTranscriptKey(key string) (AgentTab, tea.Cmd) {
 		return at, nil
 
 	case "e":
-		// Toggle expand/collapse for all tool messages.
+		// Toggle expand/collapse for all tool messages and truncated error messages.
 		hasAny := false
 		for _, v := range at.toolsExpanded {
 			if v {
@@ -1510,12 +1548,23 @@ func (at AgentTab) handleTranscriptKey(key string) (AgentTab, tea.Cmd) {
 				break
 			}
 		}
+		for _, v := range at.errorExpanded {
+			if v {
+				hasAny = true
+				break
+			}
+		}
 		if hasAny {
 			at.toolsExpanded = make(map[int]bool)
+			at.errorExpanded = make(map[int]bool)
 		} else {
 			for i, msg := range at.messages {
 				if msg.Role == "tool" {
 					at.toolsExpanded[i] = true
+				}
+				if msg.Role == "system" && len(msg.Content) > 500 &&
+					(strings.HasPrefix(msg.Content, "error:") || strings.HasPrefix(msg.Content, "event error:")) {
+					at.errorExpanded[i] = true
 				}
 			}
 		}
@@ -1577,6 +1626,20 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 			// Wire to dashboard TOKENS panel.
 			ctxWindow := engine.ContextWindowFor(at.model)
 			at.dashboard.SetTokens(usage.TotalTokens, ctxWindow)
+			// Context usage tiered warnings (fire once per threshold per session).
+			if ctxWindow > 0 {
+				pct := usage.TotalTokens * 100 / ctxWindow
+				if pct >= 95 && !at.contextWarned95 {
+					at.contextWarned95 = true
+					at.addSystemMessage("Context 95% - compaction imminent")
+				} else if pct >= 85 && !at.contextWarned85 {
+					at.contextWarned85 = true
+					at.addSystemMessage("Context 85% - compaction recommended")
+				} else if pct >= 70 && !at.contextWarned70 {
+					at.contextWarned70 = true
+					at.addSystemMessage("Context 70% - consider compacting")
+				}
+			}
 		}
 		return at, at.safeWaitForEvent()
 
@@ -2230,8 +2293,24 @@ func (at AgentTab) renderChatPane(paneWidth, height int) string {
 		vpPadded.WriteString(leftPad + line)
 	}
 
-	// Gradient divider at content width, padded.
-	divider := leftPad + gradientDivider(contentW)
+	// Gradient divider at content width with turn counter, padded.
+	turnLabel := ""
+	if at.turnCount > 0 {
+		turnLabel = fmt.Sprintf(" turn %d ", at.turnCount)
+	}
+	divW := contentW
+	if turnLabel != "" {
+		divW = contentW - len(turnLabel)
+		if divW < 4 {
+			divW = 4
+		}
+	}
+	dividerLine := gradientDivider(divW)
+	if turnLabel != "" {
+		turnStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
+		dividerLine += turnStyle.Render(turnLabel)
+	}
+	divider := leftPad + dividerLine
 
 	// Command preview, padded.
 	previewSection := ""
@@ -2683,6 +2762,10 @@ func (at *AgentTab) addMessage(role, content string, done bool) {
 		Done:    done,
 	})
 	at.messagesDirty = true
+	// Track user turns.
+	if role == "user" {
+		at.turnCount++
+	}
 	// Persist done messages to DB.
 	if done {
 		at.persistLastMessage()
@@ -3289,8 +3372,51 @@ func (at AgentTab) renderSystemMessage(msg ChatMessage) string {
 		style := lipgloss.NewStyle().Foreground(c).Italic(true)
 		return style.Render("  "+msg.Content) + "\n"
 	}
+	content := msg.Content
+
+	// Actionable error hints: detect specific error patterns and append suggestions.
+	content = appendErrorHint(content)
+
 	style := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
-	return style.Render("  "+msg.Content) + "\n"
+
+	// Error message truncation: long error messages (>500 chars) truncate
+	// with a hint unless expanded. Find the message index for expansion state.
+	if strings.HasPrefix(content, "error:") || strings.HasPrefix(content, "event error:") {
+		if len(content) > 500 {
+			msgIdx := at.findMessageIndex(msg)
+			if msgIdx >= 0 && !at.errorExpanded[msgIdx] {
+				truncated := content[:497] + "... (press e to expand)"
+				return style.Render("  "+truncated) + "\n"
+			}
+		}
+	}
+
+	return style.Render("  "+content) + "\n"
+}
+
+// findMessageIndex returns the index of msg in at.messages, or -1 if not found.
+func (at AgentTab) findMessageIndex(msg ChatMessage) int {
+	for i := len(at.messages) - 1; i >= 0; i-- {
+		if at.messages[i].Content == msg.Content && at.messages[i].Role == msg.Role {
+			return i
+		}
+	}
+	return -1
+}
+
+// appendErrorHint adds actionable hints for specific error patterns.
+func appendErrorHint(content string) string {
+	lower := strings.ToLower(content)
+	if strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") || strings.Contains(lower, "deadline exceeded") {
+		return content + "\n  Hint: Set PROVIDENCE_API_TIMEOUT_MS for longer timeouts"
+	}
+	if strings.Contains(lower, "unauthorized") || strings.Contains(lower, "401") || strings.Contains(lower, "authentication") || strings.Contains(lower, "invalid api key") {
+		return content + "\n  Hint: Run /auth to re-authenticate"
+	}
+	if strings.Contains(lower, "model not found") || strings.Contains(lower, "unknown model") || strings.Contains(lower, "does not exist") {
+		return content + "\n  Hint: Run /model to see available models"
+	}
+	return content
 }
 
 // renderQueuedMessages renders each queued message as its own mini-box.
@@ -3313,6 +3439,28 @@ func (at AgentTab) renderQueuedMessages(contentW int) string {
 	}
 
 	var result strings.Builder
+
+	// Queue header: "[Q1] first line | [Q2] first line"
+	if len(at.queue) > 0 {
+		queueStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
+		var previews []string
+		for i, msg := range at.queue {
+			firstLine := msg.Text
+			if idx := strings.Index(firstLine, "\n"); idx != -1 {
+				firstLine = firstLine[:idx]
+			}
+			if len(firstLine) > 40 {
+				firstLine = firstLine[:37] + "..."
+			}
+			previews = append(previews, fmt.Sprintf("[Q%d] %s", i+1, firstLine))
+		}
+		header := fmt.Sprintf("  %d messages queued: %s", len(at.queue), strings.Join(previews, " | "))
+		if len(header) > contentW-2 {
+			header = header[:contentW-5] + "..."
+		}
+		result.WriteString(queueStyle.Render(header) + "\n")
+	}
+
 	for i, msg := range at.queue {
 		isSelected := (at.queueCursor == i)
 		wrapped := wordWrap(msg.Text, wrapW)
@@ -4165,6 +4313,16 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			b.WriteString("\nCurrent: " + at.modelDisplay())
 			b.WriteString("\nUse /model <name> to switch")
 			at.addSystemMessage(b.String())
+			// Also fetch OpenRouter catalog in background.
+			apiKey := os.Getenv("OPENROUTER_API_KEY")
+			if apiKey == "" {
+				apiKey = at.cfg.OpenRouterAPIKey
+			}
+			at.refreshViewport()
+			return true, func() tea.Msg {
+				models, err := fetchModelCatalog(apiKey)
+				return fetchModelCatalogMsg{Models: models, Err: err}
+			}
 		} else {
 			resolved, ok := resolveModelAlias(args)
 			at.model = resolved
@@ -4848,9 +5006,25 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				continue
 			}
 			at.addSystemMessage(fmt.Sprintf("Fork %d spawned: %s (with full context)", i+1, agentID))
+			// Register the fork in the dashboard agents panel with parent relationship.
+			at.dashboard.Agents = append(at.dashboard.Agents, dashboard.AgentInfo{
+				Name:       fmt.Sprintf("fork-%d", i+1),
+				Model:      at.model,
+				Status:     "running",
+				Elapsed:    "0s",
+				ParentName: "main",
+			})
 		}
+		at.dashboard.SetAgents(at.dashboard.Agents)
 		at.refreshViewport()
 		return true, nil
+
+	case "/index":
+		at.addSystemMessage("Indexing worktree files...")
+		at.refreshViewport()
+		return true, func() tea.Msg {
+			return indexWorktreeMsg{result: runWorktreeIndex()}
+		}
 
 	case "/init":
 		cwd, err := os.Getwd()

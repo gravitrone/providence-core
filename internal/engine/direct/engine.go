@@ -694,35 +694,49 @@ func (e *DirectEngine) drainEngineEvents(ctx context.Context, child engine.Engin
 		maxTurns = 100 // safety cap
 	}
 
+	// Wall-clock timeout: 5 minutes per subagent to prevent infinite hangs.
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
 	var result strings.Builder
-	for ev := range child.Events() {
-		if ctx.Err() != nil {
+	events := child.Events()
+	for {
+		select {
+		case <-timeoutCtx.Done():
 			child.Interrupt()
-			return "", ctx.Err()
-		}
-		switch ev.Type {
-		case "assistant":
-			if ae, ok := ev.Data.(*engine.AssistantEvent); ok {
-				for _, part := range ae.Message.Content {
-					if part.Type == "text" {
-						result.WriteString(part.Text)
-					}
-				}
+			if ctx.Err() != nil {
+				return "", ctx.Err()
 			}
-		case "result":
-			if re, ok := ev.Data.(*engine.ResultEvent); ok && re.IsError {
-				return "", fmt.Errorf("sub-engine error: %s", re.Result)
-			}
-			turnCount++
-			if turnCount >= maxTurns {
-				child.Interrupt()
-				result.WriteString("\n[max turns reached]")
+			result.WriteString("\n[subagent timed out after 5 minutes]")
+			return result.String(), nil
+		case ev, ok := <-events:
+			if !ok {
+				// Channel closed - engine finished.
 				return result.String(), nil
 			}
-			return result.String(), nil
+			switch ev.Type {
+			case "assistant":
+				if ae, ok := ev.Data.(*engine.AssistantEvent); ok {
+					for _, part := range ae.Message.Content {
+						if part.Type == "text" {
+							result.WriteString(part.Text)
+						}
+					}
+				}
+			case "result":
+				if re, ok := ev.Data.(*engine.ResultEvent); ok && re.IsError {
+					return "", fmt.Errorf("sub-engine error: %s", re.Result)
+				}
+				turnCount++
+				if turnCount >= maxTurns {
+					child.Interrupt()
+					result.WriteString("\n[max turns reached]")
+					return result.String(), nil
+				}
+				return result.String(), nil
+			}
 		}
 	}
-	return result.String(), nil
 }
 
 // subagentContextExecutor creates a child DirectEngine, restores conversation

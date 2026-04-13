@@ -4828,25 +4828,43 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			at.refreshViewport()
 			return true, nil
 		}
-		var sb strings.Builder
-		maxShow := 20
-		showAll := strings.TrimSpace(args) == "-v"
-		if showAll {
-			maxShow = len(skillList)
-			sb.WriteString(fmt.Sprintf("All Skills (%d)\n\n", len(skillList)))
-		} else {
-			sb.WriteString(fmt.Sprintf("Discovered Skills (%d found)\n\n", len(skillList)))
+		// Group by source (CC-style: project, user, plugin, mcp).
+		groups := map[string][]skills.SkillDefinition{}
+		groupOrder := []string{"project", "user", "builtin"}
+		for _, s := range skillList {
+			src := s.Source
+			if src == "" {
+				src = "user"
+			}
+			groups[src] = append(groups[src], s)
 		}
-		for i, s := range skillList {
-			if i >= maxShow {
-				sb.WriteString(fmt.Sprintf("\n  ... and %d more. Use /skills -v to see all.", len(skillList)-maxShow))
-				break
+		var sb strings.Builder
+		skillWord := "skills"
+		if len(skillList) == 1 {
+			skillWord = "skill"
+		}
+		sb.WriteString(fmt.Sprintf("Skills - %d %s\n", len(skillList), skillWord))
+		for _, src := range groupOrder {
+			grp, ok := groups[src]
+			if !ok || len(grp) == 0 {
+				continue
 			}
-			desc := s.Description
-			if len(desc) > 40 {
-				desc = desc[:37] + "..."
+			// Group header with source path.
+			label := strings.ToUpper(src[:1]) + src[1:]
+			sb.WriteString(fmt.Sprintf("\n  %s skills\n", label))
+			if len(grp) > 0 && grp[0].FilePath != "" {
+				dir := filepath.Dir(grp[0].FilePath)
+				sb.WriteString(fmt.Sprintf("  %s\n", MutedStyle.Render(dir)))
 			}
-			sb.WriteString(fmt.Sprintf("  %-20s %s\n", s.Name, desc))
+			sb.WriteString("\n")
+			for _, s := range grp {
+				tokens := len(s.Prompt) / 4
+				tokenStr := fmt.Sprintf("%d", tokens)
+				if tokens >= 1000 {
+					tokenStr = fmt.Sprintf("%.1fK", float64(tokens)/1000)
+				}
+				sb.WriteString(fmt.Sprintf("  %s · ~%s tokens\n", s.Name, tokenStr))
+			}
 		}
 		at.addSystemMessage(sb.String())
 		at.refreshViewport()

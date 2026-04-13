@@ -26,6 +26,12 @@ import (
 // automatically retry after hitting max_tokens before surfacing the error.
 const MaxOutputTokensRecoveryLimit = 3
 
+// DefaultMaxOutputTokens is the standard output token limit per API call.
+const DefaultMaxOutputTokens = 16384
+
+// EscalatedMaxOutputTokens is the higher limit tried before multi-turn recovery.
+const EscalatedMaxOutputTokens = 64000
+
 func init() {
 	engine.RegisterFactory(engine.EngineTypeDirect, func(cfg engine.EngineConfig) (engine.Engine, error) {
 		return NewDirectEngine(cfg)
@@ -68,6 +74,10 @@ type DirectEngine struct {
 	// fallbackActive is true when we've already fallen back to a fast model
 	// for this turn, preventing infinite fallback loops.
 	fallbackActive bool
+
+	// outputTokensEscalated is true when we've already tried EscalatedMaxOutputTokens
+	// for this turn. Prevents re-escalation on subsequent max_tokens hits.
+	outputTokensEscalated bool
 
 	// Structured system prompt blocks (preferred over e.system).
 	blocks []engine.SystemBlock
@@ -411,6 +421,7 @@ func (e *DirectEngine) Send(text string) error {
 	e.status = engine.StatusRunning
 	e.maxOutputRecoveryCount = 0
 	e.fallbackActive = false
+	e.outputTokensEscalated = false
 	// Reset context for this turn.
 	e.ctx, e.cancel = context.WithCancel(context.Background())
 	e.mu.Unlock()
@@ -941,9 +952,15 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			}
 		}
 
+		// Use escalated output token limit if a previous turn hit max_tokens.
+		maxTokens := int64(DefaultMaxOutputTokens)
+		if e.outputTokensEscalated {
+			maxTokens = int64(EscalatedMaxOutputTokens)
+		}
+
 		apiParams := anthropic.MessageNewParams{
 			Model:     anthropic.Model(e.model),
-			MaxTokens: 16384,
+			MaxTokens: maxTokens,
 			System:    e.systemBlocks(),
 			Messages:  msgs,
 			Tools:     toolParams,
@@ -1017,9 +1034,27 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		e.emitAssistant(accumulated)
 
-		// Max output tokens recovery: inject a recovery prompt and retry up to
-		// MaxOutputTokensRecoveryLimit times.
+		// Max output tokens recovery: first try escalating to 64k, then
+		// fall through to multi-turn resume with recovery prompts.
 		if accumulated.StopReason == anthropic.StopReasonMaxTokens {
+			// Step 1: Escalate output tokens from 16k to 64k and retry
+			// the SAME request (no recovery prompt injection).
+			if !e.outputTokensEscalated {
+				e.outputTokensEscalated = true
+				e.events <- engine.ParsedEvent{
+					Type: "system_message",
+					Data: &engine.SystemMessageEvent{
+						Type:    "system_message",
+						Content: fmt.Sprintf("Max output tokens hit at %d. Escalating to %d and retrying...", DefaultMaxOutputTokens, EscalatedMaxOutputTokens),
+					},
+				}
+				// Remove the partial assistant message from history since we're
+				// retrying the same request with a higher limit.
+				e.history.RemoveLastAssistant()
+				continue
+			}
+
+			// Step 2: Already at 64k, fall through to multi-turn recovery.
 			if e.maxOutputRecoveryCount < MaxOutputTokensRecoveryLimit {
 				e.maxOutputRecoveryCount++
 				e.history.AddUser("Output token limit hit. Resume directly - no apology, no recap. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.")
@@ -1027,12 +1062,12 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 					Type: "system_message",
 					Data: &engine.SystemMessageEvent{
 						Type:    "system_message",
-						Content: fmt.Sprintf("Max output tokens hit (%d/%d), auto-resuming.", e.maxOutputRecoveryCount, MaxOutputTokensRecoveryLimit),
+						Content: fmt.Sprintf("Max output tokens hit at %d (%d/%d), auto-resuming.", EscalatedMaxOutputTokens, e.maxOutputRecoveryCount, MaxOutputTokensRecoveryLimit),
 					},
 				}
 				continue
 			}
-			e.emitError(fmt.Errorf("max output tokens hit %d times, giving up", MaxOutputTokensRecoveryLimit))
+			e.emitError(fmt.Errorf("max output tokens hit %d times at %d, giving up", MaxOutputTokensRecoveryLimit, EscalatedMaxOutputTokens))
 			return
 		}
 

@@ -71,6 +71,17 @@ func (h *ConversationHistory) AddAssistantText(text string) {
 	))
 }
 
+// RemoveLastAssistant removes the last message from history if it is an
+// assistant message. Used when retrying the same request with escalated
+// output tokens - the partial response should not remain in history.
+func (h *ConversationHistory) RemoveLastAssistant() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.messages) > 0 && h.messages[len(h.messages)-1].Role == anthropic.MessageParamRoleAssistant {
+		h.messages = h.messages[:len(h.messages)-1]
+	}
+}
+
 // AddToolResults appends a user message containing tool result blocks.
 func (h *ConversationHistory) AddToolResults(results []anthropic.ContentBlockParamUnion) {
 	h.mu.Lock()

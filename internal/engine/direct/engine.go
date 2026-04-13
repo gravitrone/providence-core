@@ -127,6 +127,19 @@ type DirectEngine struct {
 	preExecResults map[string]tools.ToolResult
 	preExecMu      sync.Mutex
 	preExecWg      sync.WaitGroup
+
+	// Content replacement tracking: maps toolUseID -> original content for
+	// tool results that were compressed or cleared by microcompact/budget passes.
+	// Allows future restore if context re-expansion is needed.
+	contentReplacements   map[string]string
+	contentReplacementsMu sync.Mutex
+
+	// Task budget tracking: total token budget for the session. When non-zero,
+	// each API call's usage is deducted. Warnings fire near exhaustion, and
+	// the session stops when the budget is fully consumed.
+	tokenBudget    int
+	tokensConsumed int
+	budgetMu       sync.Mutex
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -237,29 +250,30 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	hooksRunner := hooks.NewRunner(hooksMap)
 
 	e := &DirectEngine{
-		client:           client,
-		model:            model,
-		system:           sysFlat,
-		blocks:           sysBlocks,
-		events:           make(chan engine.ParsedEvent, 64),
-		history:          history,
-		registry:         registry,
-		permissions:      NewPermissionHandler(),
-		workDir:          cfg.WorkDir,
-		sessionID:        uuid.New().String(),
-		status:           engine.StatusIdle,
-		ctx:              ctx,
-		cancel:           cancel,
-		provider:         providerName,
-		codexMode:        isCodex,
-		openrouterMode:   isOpenRouter,
-		openrouterAPIKey: openrouterKey,
-		subagentRunner:   subagent.NewRunnerWithWorkDir(cfg.WorkDir),
-		apiKey:           cfg.APIKey,
-		sessionBus:       session.NewBus(),
-		todoTool:         todoTool,
-		startTime:        time.Now(),
-		hooksRunner:      hooksRunner,
+		client:              client,
+		model:               model,
+		system:              sysFlat,
+		blocks:              sysBlocks,
+		events:              make(chan engine.ParsedEvent, 64),
+		history:             history,
+		registry:            registry,
+		permissions:         NewPermissionHandler(),
+		workDir:             cfg.WorkDir,
+		sessionID:           uuid.New().String(),
+		status:              engine.StatusIdle,
+		ctx:                 ctx,
+		cancel:              cancel,
+		provider:            providerName,
+		codexMode:           isCodex,
+		openrouterMode:      isOpenRouter,
+		openrouterAPIKey:    openrouterKey,
+		subagentRunner:      subagent.NewRunnerWithWorkDir(cfg.WorkDir),
+		apiKey:              cfg.APIKey,
+		sessionBus:          session.NewBus(),
+		todoTool:            todoTool,
+		startTime:           time.Now(),
+		hooksRunner:         hooksRunner,
+		contentReplacements: make(map[string]string),
 	}
 
 	taskTool := tools.NewTaskTool(e.subagentRunner, e.subagentExecutor)
@@ -998,6 +1012,19 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			}
 		}
 
+		// Per-turn context injection: inject dynamic context as a system-reminder
+		// block before each API call (recent file changes, time since last message, etc).
+		e.injectPerTurnContext()
+
+		// Attachment injection: check for pending file change attachments, memory
+		// results, or skill discovery results between tool results and next API call.
+		e.injectPendingAttachments()
+
+		// MCP tool refresh: pick up newly-connected MCP servers mid-conversation.
+		if e.mcpManager != nil {
+			e.mcpManager.RefreshTools()
+		}
+
 		// Snip: drop old message pairs as a cheap first pass.
 		msgs := e.history.Messages()
 		msgs = compact.SnipOldMessages(msgs, 0)
@@ -1007,6 +1034,20 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		// Microcompact: prune old tool results before the API call (zero cost).
 		msgs, _ = compact.Microcompact(msgs)
+
+		// Context collapse: before full autocompact, try a cheaper "collapse"
+		// pass that summarizes groups of old tool turns into 1-line stubs.
+		// Only trigger full compaction if collapse doesn't get under threshold.
+		msgs, collapsed := compact.ContextCollapse(msgs)
+		if collapsed > 0 {
+			e.events <- engine.ParsedEvent{
+				Type: "system_message",
+				Data: &engine.SystemMessageEvent{
+					Type:    "system_message",
+					Content: fmt.Sprintf("Collapsed %d old tool results to save context.", collapsed),
+				},
+			}
+		}
 
 		toolParams := e.toolParams()
 
@@ -1068,6 +1109,22 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			}
 		}
 
+		// Image error classification: detect image-specific API errors and
+		// show user-friendly messages with resize hints.
+		if streamErr != nil {
+			if imgMsg := classifyImageError(streamErr); imgMsg != "" {
+				e.events <- engine.ParsedEvent{
+					Type: "system_message",
+					Data: &engine.SystemMessageEvent{
+						Type:    "system_message",
+						Content: imgMsg,
+					},
+				}
+				e.emitError(fmt.Errorf("image error: %s", imgMsg))
+				return
+			}
+		}
+
 		if streamErr != nil {
 			if isFallbackTriggerable(streamErr) && !e.fallbackActive {
 				fallback := engine.FastForProvider(e.provider)
@@ -1113,12 +1170,32 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			int(accumulated.Usage.CacheCreationInputTokens),
 		)
 
+		// Task budget tracking: deduct tokens and stop if exhausted.
+		if e.deductBudget(int(accumulated.Usage.InputTokens), int(accumulated.Usage.OutputTokens)) {
+			e.history.AddAssistant(accumulated)
+			e.emitAssistant(accumulated)
+			e.events <- engine.ParsedEvent{
+				Type: "system_message",
+				Data: &engine.SystemMessageEvent{
+					Type:    "system_message",
+					Content: "Token budget exhausted. Stopping session.",
+				},
+			}
+			return
+		}
+
 		e.history.AddAssistant(accumulated)
 		if e.compactor != nil {
 			e.compactor.TriggerIfNeeded(ctx)
 		}
 
 		e.emitAssistant(accumulated)
+
+		// Fire PostSampling hook after each model response completes.
+		e.fireHookAsync(hooks.PostSampling, hooks.HookInput{
+			ToolName:  e.model,
+			ToolInput: accumulated.StopReason,
+		})
 
 		// Max output tokens recovery: first try escalating to 64k, then
 		// fall through to multi-turn resume with recovery prompts.
@@ -1250,6 +1327,9 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		var resultBlocks []anthropic.ContentBlockParamUnion
 		for _, r := range queue.Results() {
+			// Normalize tool result before adding to history.
+			r.Result.Content = normalizeToolResult(r.Result.Content, maxToolResultSize)
+
 			e.sessionBus.Publish(session.Event{Type: session.EventToolCallResult, Data: r.Result.Content})
 
 			// Fire PostToolUse or PostToolUseFailure hook.
@@ -1719,6 +1799,212 @@ func (e *DirectEngine) generateToolSummary(results []ToolCallResult) {
 
 	// Inject as a system note in the conversation history.
 	e.history.AddUser(fmt.Sprintf("[Tool summary: %s]", summary))
+}
+
+// --- Task budget tracking ---
+
+// SetTokenBudget sets the total token budget for this session. When non-zero,
+// each API call's total tokens (input + output) are deducted from the budget.
+// Warnings fire when 80% consumed, and the session stops when exhausted.
+func (e *DirectEngine) SetTokenBudget(budget int) {
+	e.budgetMu.Lock()
+	defer e.budgetMu.Unlock()
+	e.tokenBudget = budget
+	e.tokensConsumed = 0
+}
+
+// deductBudget records token usage and returns true if the budget is exhausted.
+// Also emits warnings when approaching the limit.
+func (e *DirectEngine) deductBudget(inputTokens, outputTokens int) bool {
+	e.budgetMu.Lock()
+	defer e.budgetMu.Unlock()
+
+	if e.tokenBudget <= 0 {
+		return false // no budget set, never exhausted
+	}
+
+	e.tokensConsumed += inputTokens + outputTokens
+
+	// Warn at 80%.
+	threshold80 := e.tokenBudget * 80 / 100
+	if e.tokensConsumed >= threshold80 && (e.tokensConsumed-inputTokens-outputTokens) < threshold80 {
+		remaining := e.tokenBudget - e.tokensConsumed
+		e.events <- engine.ParsedEvent{
+			Type: "system_message",
+			Data: &engine.SystemMessageEvent{
+				Type:    "system_message",
+				Content: fmt.Sprintf("Token budget warning: %d/%d consumed (%d remaining).", e.tokensConsumed, e.tokenBudget, remaining),
+			},
+		}
+	}
+
+	return e.tokensConsumed >= e.tokenBudget
+}
+
+// BudgetRemaining returns the remaining token budget, or -1 if no budget is set.
+func (e *DirectEngine) BudgetRemaining() int {
+	e.budgetMu.Lock()
+	defer e.budgetMu.Unlock()
+	if e.tokenBudget <= 0 {
+		return -1
+	}
+	remaining := e.tokenBudget - e.tokensConsumed
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining
+}
+
+// --- Per-turn context injection ---
+
+// injectPerTurnContext adds dynamic per-turn context before each API call.
+// Includes time since last message and active todo count as system-reminder blocks.
+func (e *DirectEngine) injectPerTurnContext() {
+	var parts []string
+
+	// Time since session start.
+	elapsed := time.Since(e.startTime)
+	if elapsed > 1*time.Minute {
+		parts = append(parts, fmt.Sprintf("Session uptime: %s", elapsed.Truncate(time.Second)))
+	}
+
+	// Active todo count.
+	todos := e.todoTool.GetCurrentTodos()
+	activeTodos := 0
+	for _, t := range todos {
+		if t.Status == "in_progress" || t.Status == "pending" {
+			activeTodos++
+		}
+	}
+	if activeTodos > 0 {
+		parts = append(parts, fmt.Sprintf("Active todos: %d", activeTodos))
+	}
+
+	// File watcher: recent changes.
+	if e.fileWatcher != nil {
+		changes := e.fileWatcher.RecentChanges()
+		if len(changes) > 0 {
+			var changedFiles []string
+			for _, c := range changes {
+				if len(changedFiles) >= 3 {
+					changedFiles = append(changedFiles, fmt.Sprintf("and %d more", len(changes)-3))
+					break
+				}
+				changedFiles = append(changedFiles, c)
+			}
+			parts = append(parts, fmt.Sprintf("Recent file changes: %s", strings.Join(changedFiles, ", ")))
+		}
+	}
+
+	if len(parts) == 0 {
+		return
+	}
+
+	// Inject as the last block in the system blocks (non-cacheable since it's dynamic).
+	contextBlock := engine.SystemBlock{
+		Text:      "<system-reminder>\n" + strings.Join(parts, "\n") + "\n</system-reminder>",
+		Cacheable: false,
+	}
+
+	// Replace any previous per-turn context block (identified by prefix).
+	replaced := false
+	for i, b := range e.blocks {
+		if strings.HasPrefix(b.Text, "<system-reminder>\nSession uptime:") || strings.HasPrefix(b.Text, "<system-reminder>\nActive todos:") {
+			e.blocks[i] = contextBlock
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		e.blocks = append(e.blocks, contextBlock)
+	}
+	e.system = engine.FlattenBlocks(e.blocks)
+}
+
+// --- Attachment injection ---
+
+// injectPendingAttachments checks for pending context that should be injected
+// between tool results and the next API call. This includes file change
+// notifications and steered messages that arrived during tool execution.
+func (e *DirectEngine) injectPendingAttachments() {
+	// Drain any steered messages that arrived during tool execution.
+	e.drainSteeredMessages()
+}
+
+// --- Content replacement tracking ---
+
+// TrackContentReplacement records that a tool result's content was replaced
+// (e.g. by compression or budget enforcement), storing the original for
+// potential future restoration.
+func (e *DirectEngine) TrackContentReplacement(toolUseID, originalContent string) {
+	e.contentReplacementsMu.Lock()
+	defer e.contentReplacementsMu.Unlock()
+	e.contentReplacements[toolUseID] = originalContent
+}
+
+// GetReplacedContent returns the original content for a replaced tool result,
+// or empty string if not tracked.
+func (e *DirectEngine) GetReplacedContent(toolUseID string) (string, bool) {
+	e.contentReplacementsMu.Lock()
+	defer e.contentReplacementsMu.Unlock()
+	content, ok := e.contentReplacements[toolUseID]
+	return content, ok
+}
+
+// ContentReplacementCount returns the number of tracked replacements.
+func (e *DirectEngine) ContentReplacementCount() int {
+	e.contentReplacementsMu.Lock()
+	defer e.contentReplacementsMu.Unlock()
+	return len(e.contentReplacements)
+}
+
+// --- Message normalization ---
+
+// normalizeToolResult cleans a tool result string before adding to history:
+// trims trailing whitespace, caps at maxResultSize, and ensures valid UTF-8.
+func normalizeToolResult(content string, maxResultSize int) string {
+	// Trim trailing whitespace.
+	content = strings.TrimRight(content, " \t\n\r")
+
+	// Ensure valid UTF-8 by replacing invalid sequences.
+	content = strings.ToValidUTF8(content, "\uFFFD")
+
+	// Cap at maxResultSize.
+	if maxResultSize > 0 && len(content) > maxResultSize {
+		content = content[:maxResultSize] + "\n[truncated: exceeded " + fmt.Sprintf("%d", maxResultSize) + " bytes]"
+	}
+
+	return content
+}
+
+// maxToolResultSize is the ceiling for individual tool result content.
+const maxToolResultSize = 512_000 // 512KB
+
+// --- Image error classification ---
+
+// classifyImageError checks if an API error is image-related and returns
+// a user-friendly message with resize hints. Returns empty string if not
+// an image error.
+func classifyImageError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+
+	if strings.Contains(msg, "image_too_large") || strings.Contains(msg, "ImageSizeError") {
+		return "Image too large for the API. Resize to under 5MB or 8000x8000px before retrying."
+	}
+	if strings.Contains(msg, "invalid_image") || strings.Contains(msg, "ImageResizeError") {
+		return "Image could not be processed. Ensure it is a valid PNG, JPEG, GIF, or WebP file."
+	}
+	if strings.Contains(msg, "image_resize") || strings.Contains(msg, "image dimensions") {
+		return "Image dimensions exceed limits. Try resizing to 2048x2048 or smaller."
+	}
+	if strings.Contains(msg, "unsupported_image") || strings.Contains(msg, "image_content_type") {
+		return "Unsupported image format. Use PNG, JPEG, GIF, or WebP."
+	}
+
+	return ""
 }
 
 // computerUseToolNames lists the CU tools that may leave macOS state dirty.

@@ -108,6 +108,23 @@ func (m *Manager) ServerCount() int {
 	return len(m.clients)
 }
 
+// RefreshTools re-queries all connected MCP servers for their current tool lists.
+// This picks up newly-connected servers or tools that appeared mid-conversation.
+// Errors are silently ignored - stale tool lists are better than crashes.
+func (m *Manager) RefreshTools() {
+	m.mu.RLock()
+	clients := make(map[string]*Client, len(m.clients))
+	for k, v := range m.clients {
+		clients[k] = v
+	}
+	m.mu.RUnlock()
+
+	for _, client := range clients {
+		// Re-list tools from each server, updating the client's cached tool list.
+		_, _ = client.ListTools()
+	}
+}
+
 // CloseAll shuts down all connected MCP server subprocesses.
 func (m *Manager) CloseAll() {
 	m.mu.Lock()

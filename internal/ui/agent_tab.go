@@ -191,7 +191,7 @@ var slashCommands = []slashCommand{
 	{"/rename", "Rename current session"},
 	{"/skills", "List discovered skills"},
 	{"/agents", "List built-in agent types"},
-	{"/permissions", "Show current permission mode"},
+	{"/permissions", "Manage permission rules (allow/deny/ask/reset)"},
 	{"/hooks", "Show hook configuration info"},
 	{"/diff", "Show git diff --stat"},
 	{"/plan", "Toggle plan mode (read-only tools)"},
@@ -380,6 +380,8 @@ type AgentTab struct {
 	planModeActive bool
 	// planPrevPermMode stores the permission mode before /plan toggled on.
 	planPrevPermMode string
+	// sessionRules holds permission rules added via /permissions during this session.
+	sessionRules []config.PermissionRule
 
 	// Discovered skills, custom agents, and custom tools loaded at startup.
 	discoveredSkills []skills.SkillDefinition
@@ -4959,24 +4961,97 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 
 	case "/permissions":
 		if args == "" {
+			// Show current mode + all active rules.
 			mode := at.permissionMode
 			if mode == "" {
 				mode = "default"
 			}
-			at.addSystemMessage(fmt.Sprintf("Permission mode: %s\n\nUsage: /permissions <mode>\nModes: default, acceptEdits, plan, bypassPermissions, dontAsk\n\nSwitch mode: shift+tab", mode))
+			var out strings.Builder
+			out.WriteString("Permission mode: " + mode + "\n")
+			out.WriteString("Switch mode: shift+tab or /permissions <mode>\n")
+			out.WriteString("Modes: default, acceptEdits, plan, bypassPermissions, dontAsk\n\n")
+
+			// Collect all rules: config + session.
+			type labeledRule struct {
+				Behavior string
+				Pattern  string
+				Source   string
+			}
+			var allRules []labeledRule
+			for _, r := range at.cfg.Permissions.AllowRules("config") {
+				allRules = append(allRules, labeledRule{"allow", r.Pattern, "config"})
+			}
+			for _, r := range at.cfg.Permissions.DenyRules("config") {
+				allRules = append(allRules, labeledRule{"deny", r.Pattern, "config"})
+			}
+			for _, r := range at.cfg.Permissions.AskRules("config") {
+				allRules = append(allRules, labeledRule{"ask", r.Pattern, "config"})
+			}
+			for _, r := range at.sessionRules {
+				allRules = append(allRules, labeledRule{r.Behavior, r.Pattern, "session"})
+			}
+
+			if len(allRules) == 0 {
+				out.WriteString("No permission rules configured.\n")
+			} else {
+				out.WriteString("Active rules:\n")
+				for _, r := range allRules {
+					out.WriteString(fmt.Sprintf("  %-5s  %-30s  [%s]\n", r.Behavior, r.Pattern, r.Source))
+				}
+			}
+			out.WriteString("\nUsage:\n")
+			out.WriteString("  /permissions allow Bash(git *)   - add allow rule\n")
+			out.WriteString("  /permissions deny Bash(rm -rf *)  - add deny rule\n")
+			out.WriteString("  /permissions ask Write(*)         - add ask rule\n")
+			out.WriteString("  /permissions reset                - clear session rules\n")
+
+			at.addSystemMessage(out.String())
 			at.refreshViewport()
 			return true, nil
 		}
-		validModes := map[string]bool{"default": true, "acceptEdits": true, "plan": true, "bypassPermissions": true, "dontAsk": true}
-		if !validModes[args] {
-			at.addSystemMessage("Invalid mode: " + args + "\nValid: default, acceptEdits, plan, bypassPermissions, dontAsk")
+
+		// Parse subcommand.
+		parts := strings.SplitN(args, " ", 2)
+		subCmd := parts[0]
+
+		switch subCmd {
+		case "reset":
+			count := len(at.sessionRules)
+			at.sessionRules = nil
+			at.addSystemMessage(fmt.Sprintf("Cleared %d session permission rules.", count))
+			at.refreshViewport()
+			return true, nil
+
+		case "allow", "deny", "ask":
+			if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+				at.addSystemMessage("Usage: /permissions " + subCmd + " <pattern>\nExample: /permissions " + subCmd + " Bash(git *)")
+				at.refreshViewport()
+				return true, nil
+			}
+			pattern := strings.TrimSpace(parts[1])
+			rule := config.PermissionRule{
+				Pattern:  pattern,
+				Behavior: subCmd,
+				Source:   "session",
+			}
+			at.sessionRules = append(at.sessionRules, rule)
+			at.addSystemMessage(fmt.Sprintf("Added %s rule: %s [session]", subCmd, pattern))
+			at.refreshViewport()
+			return true, nil
+
+		default:
+			// Check if it's a mode name.
+			validModes := map[string]bool{"default": true, "acceptEdits": true, "plan": true, "bypassPermissions": true, "dontAsk": true}
+			if validModes[subCmd] {
+				at.permissionMode = subCmd
+				at.addSystemMessage("Permission mode set to: " + subCmd)
+				at.refreshViewport()
+				return true, nil
+			}
+			at.addSystemMessage("Unknown subcommand: " + subCmd + "\nUsage: /permissions [allow|deny|ask|reset|<mode>]")
 			at.refreshViewport()
 			return true, nil
 		}
-		at.permissionMode = args
-		at.addSystemMessage("Permission mode set to: " + args)
-		at.refreshViewport()
-		return true, nil
 
 	case "/plan":
 		if at.planModeActive {

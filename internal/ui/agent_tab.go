@@ -192,6 +192,7 @@ var slashCommands = []slashCommand{
 	{"/tag", "Tag current session (usage: /tag <name>)"},
 	{"/review", "Spawn code review agent"},
 	{"/fork", "Fork N background agents from current context"},
+	{"/index", "Index worktree files and write .providence/worktree-index.json"},
 	{"/init", "Create CLAUDE.md in project root with detected project info"},
 	{"/help", "Show available commands"},
 }
@@ -673,6 +674,27 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 		// No Send here - engine waits for the next user turn. Start the event
 		// pump anyway so system init / later events are drained.
 		return at, at.safeWaitForEvent()
+
+	case indexWorktreeMsg:
+		r := msg.result
+		if r.Err != nil {
+			at.addSystemMessage("Index failed: " + r.Err.Error())
+		} else {
+			at.addSystemMessage(fmt.Sprintf("Indexed %d files -> %s", r.Index.Total, r.Path))
+		}
+		at.refreshViewport()
+		return at, nil
+
+	case fetchModelCatalogMsg:
+		if msg.Err != nil {
+			// Silently ignore fetch failures - the built-in catalog is always shown.
+			return at, nil
+		}
+		if len(msg.Models) > 0 {
+			at.addSystemMessage(formatModelCatalog(msg.Models))
+			at.refreshViewport()
+		}
+		return at, nil
 
 	case authCompleteMsg:
 		at.addSystemMessage(msg.Message)
@@ -4291,6 +4313,16 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			b.WriteString("\nCurrent: " + at.modelDisplay())
 			b.WriteString("\nUse /model <name> to switch")
 			at.addSystemMessage(b.String())
+			// Also fetch OpenRouter catalog in background.
+			apiKey := os.Getenv("OPENROUTER_API_KEY")
+			if apiKey == "" {
+				apiKey = at.cfg.OpenRouterAPIKey
+			}
+			at.refreshViewport()
+			return true, func() tea.Msg {
+				models, err := fetchModelCatalog(apiKey)
+				return fetchModelCatalogMsg{Models: models, Err: err}
+			}
 		} else {
 			resolved, ok := resolveModelAlias(args)
 			at.model = resolved
@@ -4974,9 +5006,25 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				continue
 			}
 			at.addSystemMessage(fmt.Sprintf("Fork %d spawned: %s (with full context)", i+1, agentID))
+			// Register the fork in the dashboard agents panel with parent relationship.
+			at.dashboard.Agents = append(at.dashboard.Agents, dashboard.AgentInfo{
+				Name:       fmt.Sprintf("fork-%d", i+1),
+				Model:      at.model,
+				Status:     "running",
+				Elapsed:    "0s",
+				ParentName: "main",
+			})
 		}
+		at.dashboard.SetAgents(at.dashboard.Agents)
 		at.refreshViewport()
 		return true, nil
+
+	case "/index":
+		at.addSystemMessage("Indexing worktree files...")
+		at.refreshViewport()
+		return true, func() tea.Msg {
+			return indexWorktreeMsg{result: runWorktreeIndex()}
+		}
 
 	case "/init":
 		cwd, err := os.Getwd()

@@ -132,6 +132,12 @@ var (
 	ToolErrorMsgStyle    lipgloss.Style
 	ToolTruncationStyle  lipgloss.Style
 
+	// Tool card gradient colors for frozen borders.
+	ToolCardSuccessEdge color.Color
+	ToolCardSuccessMid  color.Color
+	ToolCardErrorEdge   color.Color
+	ToolCardErrorMid    color.Color
+
 	// Button styles for permission dialog.
 	ButtonFocusStyle lipgloss.Style
 	ButtonBlurStyle  lipgloss.Style
@@ -326,6 +332,12 @@ func reapplyStyles() {
 		Padding(0, 1)
 	ToolErrorMsgStyle   = lipgloss.NewStyle().Foreground(ColorMuted)
 	ToolTruncationStyle = lipgloss.NewStyle().Foreground(ColorMuted).Background(ToolContentBgColor)
+
+	// Tool card frozen border gradient colors.
+	ToolCardSuccessEdge = c(darkenHex("#50C878", 0.4))
+	ToolCardSuccessMid = c("#50C878")
+	ToolCardErrorEdge = c(darkenHex("#e05050", 0.4))
+	ToolCardErrorMid = c("#e05050")
 
 	// Button styles for permission dialog.
 	ButtonFocusStyle = lipgloss.NewStyle().

@@ -3711,11 +3711,209 @@ func (at AgentTab) renderPermissionMessage(msg ChatMessage, contentW int) string
 	}
 }
 
-// renderToolMessage renders a tool call with crush-style header + content body.
+// renderToolMessage routes tool rendering to the new card style (Read, Agent, Task)
+// or the legacy flat style for all other tools.
+func (at AgentTab) renderToolMessage(msg ChatMessage, msgIdx int, isLatest bool) string {
+	if msg.ToolName == "Read" || msg.ToolName == "Agent" || msg.ToolName == "Task" {
+		return at.renderToolCard(msg, msgIdx, isLatest)
+	}
+	return at.renderToolMessageLegacy(msg, msgIdx, isLatest)
+}
+
+// renderToolCard renders Read/Agent/Task tools with a double-gradient border
+// and pill keycap, matching the queued message visual style.
+func (at AgentTab) renderToolCard(msg ChatMessage, msgIdx int, isLatest bool) string {
+	frozen := !at.streaming || !isLatest
+
+	// --- Build border style ---
+	var boxStyle lipgloss.Style
+
+	if frozen {
+		switch msg.ToolStatus {
+		case "success":
+			boxStyle = lipgloss.NewStyle().
+				Border(lipgloss.DoubleBorder()).
+				BorderForegroundBlend(ToolCardSuccessEdge, ToolCardSuccessMid, ToolCardSuccessEdge).
+				Padding(0, 1)
+		case "error":
+			boxStyle = lipgloss.NewStyle().
+				Border(lipgloss.DoubleBorder()).
+				BorderForegroundBlend(ToolCardErrorEdge, ToolCardErrorMid, ToolCardErrorEdge).
+				Padding(0, 1)
+		default:
+			frozenEdge := lipgloss.Color(darkenHex(ActiveTheme.Primary, 0.4))
+			boxStyle = lipgloss.NewStyle().
+				Border(lipgloss.DoubleBorder()).
+				BorderForegroundBlend(frozenEdge, ColorFrozen, frozenEdge).
+				Padding(0, 1)
+		}
+	} else {
+		// Animated: rotating 3-color gradient from flameGradientStops.
+		offset := at.flameFrame % len(flameGradientStops)
+		a := flameGradientStops[offset]
+		b := flameGradientStops[(offset+2)%len(flameGradientStops)]
+		cEdge := flameGradientStops[(offset+4)%len(flameGradientStops)]
+		boxStyle = lipgloss.NewStyle().
+			Border(lipgloss.DoubleBorder()).
+			BorderForegroundBlend(a, b, cEdge).
+			Padding(0, 1)
+	}
+
+	// --- Build status icon (frozen only) ---
+	var statusIcon string
+	if frozen {
+		switch msg.ToolStatus {
+		case "success":
+			statusIcon = ToolIconSuccessStyle.Render("✓") + " "
+		case "error":
+			statusIcon = ToolIconErrorStyle.Render("×") + " "
+		default:
+			statusIcon = ToolIconPendingStyle.Render("●") + " "
+		}
+	}
+
+	// --- Build pill keycap ---
+	var pillBg color.Color
+	if frozen {
+		pillBg = ColorFrozen
+	} else {
+		pillBg = lipgloss.Color(flameColor(at.flameFrame))
+	}
+	pill := lipgloss.NewStyle().
+		Foreground(ColorBackground).
+		Background(pillBg).
+		Bold(true).
+		Padding(0, 1).
+		Render(msg.ToolName)
+
+	// --- Build chevron ---
+	var chevronColor color.Color
+	if frozen {
+		chevronColor = ColorFrozen
+	} else {
+		chevronColor = lipgloss.Color(flameColor(at.flameFrame))
+	}
+	chevron := lipgloss.NewStyle().Foreground(chevronColor).Bold(true).Render(" \u276F ")
+
+	// --- Build args ---
+	var primaryArg, secondaryArgs string
+	if msg.ToolArgs != "" {
+		lines := strings.SplitN(msg.ToolArgs, "\n", 2)
+		primaryArg = lipgloss.NewStyle().Foreground(ColorText).Bold(true).Render(lines[0])
+		if len(lines) > 1 {
+			secondaryArgs = "\n" + lipgloss.NewStyle().Foreground(ColorMuted).Render("  "+lines[1])
+		}
+	}
+
+	// --- Header line ---
+	header := statusIcon + pill + chevron + primaryArg + secondaryArgs
+
+	// --- Agent dispatch info (key-value pairs for Agent/Task) ---
+	isAgentTool := msg.ToolName == "Agent" || msg.ToolName == "Task"
+	if isAgentTool && msg.ToolArgs != "" {
+		// Parse agent dispatch info from ToolArgs lines.
+		lines := strings.Split(msg.ToolArgs, "\n")
+		if len(lines) > 1 {
+			var kvParts []string
+			for _, line := range lines[1:] {
+				trimmed := strings.TrimSpace(line)
+				if trimmed != "" {
+					kvParts = append(kvParts, trimmed)
+				}
+			}
+			if len(kvParts) > 0 {
+				kvStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+				header = statusIcon + pill + chevron + lipgloss.NewStyle().Foreground(ColorText).Bold(true).Render(lines[0])
+				header += "\n" + kvStyle.Render("  "+strings.Join(kvParts, "  "))
+			}
+		}
+	}
+
+	// --- Body ---
+	var body string
+	if frozen {
+		var bodyLines []string
+
+		if msg.ToolStatus == "error" && msg.ToolBody != "" {
+			errTag := ToolErrorTagStyle.Render("ERROR")
+			errMsg := ToolErrorMsgStyle.Render(msg.ToolBody)
+			bodyLines = append(bodyLines, errTag+" "+errMsg)
+		} else if msg.ToolBody != "" {
+			connectorStyle := lipgloss.NewStyle().Foreground(ColorFrozen)
+			flavorStyle := lipgloss.NewStyle().Foreground(ColorFrozen).Italic(true)
+			bodyLines = append(bodyLines, connectorStyle.Render("\u23BF ")+flavorStyle.Render(msg.ToolBody+"..."))
+		}
+
+		// Expandable tool output: reuse existing expand logic.
+		if at.toolsExpanded[msgIdx] && msg.ToolOutput != "" {
+			outputLines := strings.Split(msg.ToolOutput, "\n")
+			const maxLines = 400
+			isDiffLike := (msg.ToolName == "Edit" || msg.ToolName == "Write") && looksLikeDiff(msg.ToolOutput)
+			addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700")).Background(ToolContentBgColor)
+			delStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#e05050")).Background(ToolContentBgColor)
+
+			for j, line := range outputLines {
+				if j >= maxLines {
+					bodyLines = append(bodyLines, ToolTruncationStyle.Render(
+						fmt.Sprintf("... +%d lines", len(outputLines)-maxLines)))
+					break
+				}
+				if isDiffLike && strings.HasPrefix(line, "+") {
+					bodyLines = append(bodyLines, addStyle.Render(line))
+				} else if isDiffLike && strings.HasPrefix(line, "-") {
+					bodyLines = append(bodyLines, delStyle.Render(line))
+				} else {
+					bodyLines = append(bodyLines, ToolContentLineStyle.Render(line))
+				}
+			}
+			vpH := at.height - 6
+			if vpH < 10 {
+				vpH = 10
+			}
+			if len(outputLines) > vpH {
+				bodyLines = append(bodyLines, lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render(
+					fmt.Sprintf("scroll: %d lines total", len(outputLines))))
+			}
+		}
+
+		if len(bodyLines) > 0 {
+			body = "\n" + strings.Join(bodyLines, "\n")
+		}
+	} else {
+		// Streaming body.
+		if isAgentTool {
+			var connectorColor color.Color = lipgloss.Color(flameColor(at.flameFrame))
+			connector := lipgloss.NewStyle().Foreground(connectorColor).Render("\u23BF ")
+			activity := msg.ToolBody
+			if activity == "" {
+				activity = "Running agent..."
+			}
+			activityText := renderToolShimmer(activity, at.flameFrame)
+			elapsed := ""
+			if !msg.Timestamp.IsZero() {
+				dur := time.Since(msg.Timestamp)
+				elapsed = " " + lipgloss.NewStyle().Foreground(ColorMuted).Render(FormatDuration(dur))
+			}
+			body = "\n" + connector + activityText + elapsed
+		} else if msg.ToolStatus == "success" && msg.ToolBody != "" {
+			fc := lipgloss.Color(flameColor(at.flameFrame))
+			flavorStyle := lipgloss.NewStyle().Foreground(fc).Italic(true)
+			resultPrefix := lipgloss.NewStyle().Foreground(fc).Render("\u23BF ")
+			body = "\n" + resultPrefix + flavorStyle.Render(msg.ToolBody+"...")
+		} else if msg.ToolStatus == "error" && msg.ToolBody != "" {
+			resultPrefix := lipgloss.NewStyle().Foreground(ColorError).Render("\u23BF ")
+			body = "\n" + resultPrefix + lipgloss.NewStyle().Foreground(ColorError).Italic(true).Render(msg.ToolBody+"...")
+		}
+	}
+
+	return boxStyle.Render(header+body) + "\n"
+}
+
+// renderToolMessageLegacy renders a tool call with crush-style header + content body.
 //
 // Active/streaming state keeps the shimmer/scramble animation.
-// Frozen/completed state uses crush-style: ● ToolName params + indented content body.
-func (at AgentTab) renderToolMessage(msg ChatMessage, msgIdx int, isLatest bool) string {
+// Frozen/completed state uses crush-style: icon ToolName params + indented content body.
+func (at AgentTab) renderToolMessageLegacy(msg ChatMessage, msgIdx int, isLatest bool) string {
 	frozen := !at.streaming || !isLatest
 
 	var icon string

@@ -482,11 +482,13 @@ func findAppBundle(binPath string) string {
 		return binPath[:idx+len(".app")]
 	}
 
-	// Case 2: shim script - read + look for .app path reference.
+	// Case 2: shim script - read + look for a quoted .app path reference.
+	// Only scan back for quote chars (not whitespace) because the .app's
+	// display name may contain spaces ("Providence Overlay.app").
 	if data, err := os.ReadFile(binPath); err == nil {
 		content := string(data)
 		if idx := strings.Index(content, ".app/Contents/MacOS/"); idx != -1 {
-			start := strings.LastIndexAny(content[:idx], "\"' \t\n")
+			start := strings.LastIndexAny(content[:idx], "\"'")
 			if start >= 0 {
 				candidate := content[start+1 : idx+len(".app")]
 				if strings.Contains(candidate, "$HOME") {

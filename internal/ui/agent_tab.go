@@ -138,6 +138,12 @@ type btwResultMsg struct {
 	Err      error
 }
 
+// overlayStartResultMsg carries the result of an /overlay start command.
+type overlayStartResultMsg struct{ err error }
+
+// overlayStopResultMsg carries the result of an /overlay stop command.
+type overlayStopResultMsg struct{ err error }
+
 // --- Chat Message ---
 
 // ChatMessage represents a single message in the agent chat history.
@@ -190,6 +196,7 @@ var slashCommands = []slashCommand{
 	{"/permissions", "Manage permission rules (allow/deny/ask/reset)"},
 	{"/hooks", "Show hook configuration"},
 	{"/bridge", "Manage native macOS bridge (stats|setup|info)"},
+	{"/overlay", "Manage overlay process (start|stop|status)"},
 	{"/diff", "Show files changed this session (--git for git diff)"},
 	{"/plan", "Toggle plan mode (read-only tools)"},
 	{"/branch", "Fork conversation into a new session"},
@@ -435,6 +442,10 @@ type AgentTab struct {
 
 	// Error message expansion: per-message-index toggle for long error messages.
 	errorExpanded map[int]bool
+
+	// Overlay process manager and bridge (may be nil if not configured).
+	overlayMgr    overlayManager
+	overlayBridge overlayBridge
 }
 
 // TurnDiff records a file modification that happened during a conversation turn.
@@ -820,6 +831,28 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 			at.addSystemMessage(fmt.Sprintf("/btw error: %s", msg.Err))
 		} else {
 			at.addSystemMessage(fmt.Sprintf("/btw: %s\n\n%s", msg.Question, msg.Answer))
+		}
+		at.refreshViewport()
+		return at, nil
+
+	case overlayStartResultMsg:
+		if msg.err != nil {
+			hint := msg.err.Error()
+			if strings.Contains(hint, "not found") {
+				hint += "\n\nHint: build and install the overlay app at ~/.providence/bin/providence-overlay"
+			}
+			at.addSystemMessage("Overlay start failed: " + hint)
+		} else {
+			at.addSystemMessage("Overlay started")
+		}
+		at.refreshViewport()
+		return at, nil
+
+	case overlayStopResultMsg:
+		if msg.err != nil {
+			at.addSystemMessage("Overlay stop failed: " + msg.err.Error())
+		} else {
+			at.addSystemMessage("Overlay stopped")
 		}
 		at.refreshViewport()
 		return at, nil
@@ -5498,6 +5531,63 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			return true, nil
 		}
 		at.addSystemMessage("Usage: /bridge [stats|setup|info]")
+		at.refreshViewport()
+		return true, nil
+
+	case "/overlay":
+		subCmd := strings.TrimSpace(args)
+		switch subCmd {
+		case "", "status":
+			if at.overlayMgr == nil {
+				at.addSystemMessage("Overlay not configured. Add [overlay] enable = true to ~/.providence/config.toml")
+				at.refreshViewport()
+				return true, nil
+			}
+			info := at.overlayMgr.StatusInfo()
+			var sb strings.Builder
+			sb.WriteString("Overlay status:\n\n")
+			keys := []string{"state", "pid", "socket_path", "binary_path", "connected_clients", "last_hello_age"}
+			for _, k := range keys {
+				if v, ok := info[k]; ok {
+					sb.WriteString(fmt.Sprintf("  %-20s  %v\n", k, v))
+				}
+			}
+			at.addSystemMessage(sb.String())
+
+		case "start":
+			if at.overlayMgr == nil {
+				at.addSystemMessage("Overlay not configured. Add [overlay] enable = true to ~/.providence/config.toml")
+				at.refreshViewport()
+				return true, nil
+			}
+			if at.overlayBridge == nil {
+				at.addSystemMessage("Overlay bridge not available")
+				at.refreshViewport()
+				return true, nil
+			}
+			ctx := context.Background()
+			at.addSystemMessage("Starting overlay...")
+			at.refreshViewport()
+			return true, func() tea.Msg {
+				return overlayStartResultMsg{err: at.overlayMgr.Start(ctx, at.overlayBridge)}
+			}
+
+		case "stop":
+			if at.overlayMgr == nil {
+				at.addSystemMessage("Overlay not configured")
+				at.refreshViewport()
+				return true, nil
+			}
+			ctx := context.Background()
+			at.addSystemMessage("Stopping overlay...")
+			at.refreshViewport()
+			return true, func() tea.Msg {
+				return overlayStopResultMsg{err: at.overlayMgr.Stop(ctx)}
+			}
+
+		default:
+			at.addSystemMessage("Usage: /overlay [status|start|stop]")
+		}
 		at.refreshViewport()
 		return true, nil
 

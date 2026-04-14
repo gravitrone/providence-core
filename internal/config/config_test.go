@@ -485,3 +485,203 @@ swift_path = "$BRIDGE_BIN"
 	c := LoadFromTOML(path)
 	assert.Equal(t, "/custom/bin/bridge", c.Bridge.SwiftPath)
 }
+
+// --- OverlayConfig tests ---
+
+func TestOverlayConfigDefaults(t *testing.T) {
+	d := overlayDefaults()
+	assert.False(t, d.Enable)
+	assert.Equal(t, "system_reminder", d.ContextInjection)
+	assert.Equal(t, "Hey Providence", d.WakeWord)
+	assert.Equal(t, "right-sidebar", d.Position)
+	assert.True(t, d.AdaptiveFPS)
+	assert.Contains(t, d.ExcludeApps, "com.1password.1password")
+	assert.Contains(t, d.ExcludeApps, "com.apple.keychainaccess")
+}
+
+func TestOverlayConfigTOMLRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	original := Config{
+		Overlay: OverlayConfig{
+			Enable:           true,
+			SocketPath:       "/tmp/overlay.sock",
+			BinaryPath:       "/usr/local/bin/providence-overlay",
+			AutoStart:        true,
+			ExcludeApps:      []string{"com.example.app"},
+			AdaptiveFPS:      true,
+			TTSEnabled:       false,
+			ContextInjection: "synthetic_user",
+			WakeWord:         "Hey Flame",
+			Position:         "bottom-bar",
+		},
+	}
+
+	require.NoError(t, original.SaveTo(path))
+	loaded := LoadFromTOML(path)
+
+	assert.True(t, loaded.Overlay.Enable)
+	assert.Equal(t, "/tmp/overlay.sock", loaded.Overlay.SocketPath)
+	assert.Equal(t, "/usr/local/bin/providence-overlay", loaded.Overlay.BinaryPath)
+	assert.True(t, loaded.Overlay.AutoStart)
+	assert.Equal(t, []string{"com.example.app"}, loaded.Overlay.ExcludeApps)
+	assert.True(t, loaded.Overlay.AdaptiveFPS)
+	assert.False(t, loaded.Overlay.TTSEnabled)
+	assert.Equal(t, "synthetic_user", loaded.Overlay.ContextInjection)
+	assert.Equal(t, "Hey Flame", loaded.Overlay.WakeWord)
+	assert.Equal(t, "bottom-bar", loaded.Overlay.Position)
+}
+
+func TestOverlayConfigMerge(t *testing.T) {
+	base := Config{
+		Overlay: OverlayConfig{
+			Enable:           false,
+			ContextInjection: "system_reminder",
+			WakeWord:         "Hey Providence",
+			Position:         "right-sidebar",
+		},
+	}
+	override := Config{
+		Overlay: OverlayConfig{
+			Enable:           true,
+			WakeWord:         "Hey Flame",
+			ExcludeApps:      []string{"com.example.secrets"},
+			ContextInjection: "synthetic_user",
+		},
+	}
+	mergeConfig(&base, &override)
+
+	assert.True(t, base.Overlay.Enable)
+	assert.Equal(t, "Hey Flame", base.Overlay.WakeWord)
+	assert.Equal(t, []string{"com.example.secrets"}, base.Overlay.ExcludeApps)
+	assert.Equal(t, "synthetic_user", base.Overlay.ContextInjection)
+	// Position was not in override - should keep base value.
+	assert.Equal(t, "right-sidebar", base.Overlay.Position)
+}
+
+func TestOverlayConfigMergePreservesBase(t *testing.T) {
+	base := Config{
+		Overlay: OverlayConfig{
+			Enable:      true,
+			SocketPath:  "/run/overlay.sock",
+			BinaryPath:  "/usr/bin/overlay",
+			Position:    "bottom-bar",
+			AdaptiveFPS: true,
+			TTSEnabled:  true,
+		},
+	}
+	// Empty override should not overwrite base.
+	override := Config{}
+	mergeConfig(&base, &override)
+
+	assert.True(t, base.Overlay.Enable)
+	assert.Equal(t, "/run/overlay.sock", base.Overlay.SocketPath)
+	assert.Equal(t, "/usr/bin/overlay", base.Overlay.BinaryPath)
+	assert.Equal(t, "bottom-bar", base.Overlay.Position)
+	assert.True(t, base.Overlay.AdaptiveFPS)
+	assert.True(t, base.Overlay.TTSEnabled)
+}
+
+func TestOverlayConfigValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{
+			name:    "valid system_reminder",
+			cfg:     Config{Overlay: OverlayConfig{ContextInjection: "system_reminder"}},
+			wantErr: false,
+		},
+		{
+			name:    "valid synthetic_user",
+			cfg:     Config{Overlay: OverlayConfig{ContextInjection: "synthetic_user"}},
+			wantErr: false,
+		},
+		{
+			name:    "valid empty (uses default)",
+			cfg:     Config{Overlay: OverlayConfig{ContextInjection: ""}},
+			wantErr: false,
+		},
+		{
+			name:    "invalid context_injection",
+			cfg:     Config{Overlay: OverlayConfig{ContextInjection: "turbo"}},
+			wantErr: true,
+		},
+		{
+			name:    "valid right-sidebar",
+			cfg:     Config{Overlay: OverlayConfig{Position: "right-sidebar"}},
+			wantErr: false,
+		},
+		{
+			name:    "valid bottom-bar",
+			cfg:     Config{Overlay: OverlayConfig{Position: "bottom-bar"}},
+			wantErr: false,
+		},
+		{
+			name:    "invalid position",
+			cfg:     Config{Overlay: OverlayConfig{Position: "floating"}},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "overlay")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestOverlayConfigEnvExpansion(t *testing.T) {
+	t.Setenv("OVERLAY_SOCK", "/tmp/my-overlay.sock")
+	t.Setenv("OVERLAY_BIN", "/usr/local/bin/overlay")
+	t.Setenv("OVERLAY_WAKE", "Yo Providence")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	content := `[overlay]
+socket_path = "$OVERLAY_SOCK"
+binary_path = "$OVERLAY_BIN"
+wake_word = "$OVERLAY_WAKE"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	c := LoadFromTOML(path)
+	assert.Equal(t, "/tmp/my-overlay.sock", c.Overlay.SocketPath)
+	assert.Equal(t, "/usr/local/bin/overlay", c.Overlay.BinaryPath)
+	assert.Equal(t, "Yo Providence", c.Overlay.WakeWord)
+}
+
+func TestOverlayConfigJSONRoundtrip(t *testing.T) {
+	cfg := OverlayConfig{
+		Enable:           true,
+		SocketPath:       "/tmp/overlay.sock",
+		ContextInjection: "system_reminder",
+		WakeWord:         "Hey Providence",
+		Position:         "right-sidebar",
+		AdaptiveFPS:      true,
+		ExcludeApps:      []string{"com.1password.1password"},
+	}
+
+	data, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	var got OverlayConfig
+	require.NoError(t, json.Unmarshal(data, &got))
+
+	assert.Equal(t, cfg.Enable, got.Enable)
+	assert.Equal(t, cfg.SocketPath, got.SocketPath)
+	assert.Equal(t, cfg.ContextInjection, got.ContextInjection)
+	assert.Equal(t, cfg.WakeWord, got.WakeWord)
+	assert.Equal(t, cfg.Position, got.Position)
+	assert.Equal(t, cfg.AdaptiveFPS, got.AdaptiveFPS)
+	assert.Equal(t, cfg.ExcludeApps, got.ExcludeApps)
+}

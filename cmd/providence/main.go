@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,8 +17,10 @@ import (
 	_ "github.com/gravitrone/providence-core/internal/engine/claude"
 	_ "github.com/gravitrone/providence-core/internal/engine/codex_headless"
 	_ "github.com/gravitrone/providence-core/internal/engine/direct"
+	"github.com/gravitrone/providence-core/internal/engine/ember"
 	"github.com/gravitrone/providence-core/internal/engine/headless"
 	"github.com/gravitrone/providence-core/internal/engine/plugin"
+	"github.com/gravitrone/providence-core/internal/overlay"
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui"
 )
@@ -163,7 +166,46 @@ func runTUI(engineType string, cfg config.Config, resumeQuery string, continueSe
 		fmt.Fprintf(os.Stderr, "warning: plugin load: %v\n", err)
 	}
 
-	app := ui.NewApp(engineType, cfg, st, resume)
+	// Wire overlay manager + bridge if overlay is enabled in config.
+	var appOpts []ui.AppOption
+	if cfg.Overlay.Enable {
+		emberState := ember.New()
+		logger := slog.Default()
+
+		overlayCfg := overlay.Config{
+			SocketPath:  cfg.Overlay.SocketPath,
+			BinaryPath:  cfg.Overlay.BinaryPath,
+			AutoStart:   cfg.Overlay.AutoStart,
+			ExcludeApps: cfg.Overlay.ExcludeApps,
+		}
+		overlayMgr := overlay.NewManager(overlayCfg, logger)
+		overlayBridge := overlay.NewBridge(nil, emberState, nil, overlayMgr, logger)
+
+		overlayMgr.SetCallbacks(
+			func() {
+				if !emberState.Active {
+					emberState.Activate()
+				}
+			},
+			func() {
+				// Symmetric cleanup on overlay stop.
+			},
+		)
+
+		appOpts = append(appOpts, ui.WithOverlay(overlayMgr, overlayBridge))
+
+		if cfg.Overlay.AutoStart {
+			go func() {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if err := overlayMgr.Start(ctx, overlayBridge); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: overlay auto-start: %v\n", err)
+				}
+			}()
+		}
+	}
+
+	app := ui.NewApp(engineType, cfg, st, resume, appOpts...)
 	if err := runBubbleTUI(app); err != nil {
 		return fmt.Errorf("tui error: %w", err)
 	}

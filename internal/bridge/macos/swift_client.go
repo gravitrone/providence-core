@@ -294,24 +294,26 @@ func (c *swiftClient) Close(ctx context.Context) error {
 		return shutdownCtx.Err()
 	}
 
-	if c.waitForDone(ctx, 500*time.Millisecond) {
+	// Wait for the process to exit after acknowledging shutdown. Use
+	// waitForDoneBg (not waitForDone(ctx,...)) so the grace period is not
+	// cut short by an already-nearly-expired caller ctx. 1.5s accommodates
+	// race-instrumented subprocesses that flush the race detector on exit.
+	if c.waitForDoneBg(1500 * time.Millisecond) {
 		return nil
 	}
 
+	// Escalate to SIGTERM then SIGKILL, each with a fresh timeout.
 	if c.cmd.Process != nil {
 		_ = c.cmd.Process.Signal(syscall.SIGTERM)
 	}
-	if c.waitForDone(ctx, 500*time.Millisecond) {
+	if c.waitForDoneBg(500 * time.Millisecond) {
 		return nil
 	}
 
 	if c.cmd.Process != nil {
 		_ = c.cmd.Process.Kill()
 	}
-
-	if c.waitForDone(ctx, 500*time.Millisecond) {
-		return nil
-	}
+	_ = c.waitForDoneBg(500 * time.Millisecond)
 
 	return nil
 }
@@ -441,6 +443,20 @@ func (c *swiftClient) waitForDone(ctx context.Context, timeout time.Duration) bo
 		return true
 	case <-ctx.Done():
 		return false
+	case <-timer.C:
+		return false
+	}
+}
+
+// waitForDoneBg waits for done without a caller context, used during
+// escalation (SIGTERM/SIGKILL) where the original ctx may have expired.
+func (c *swiftClient) waitForDoneBg(timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-c.done:
+		return true
 	case <-timer.C:
 		return false
 	}

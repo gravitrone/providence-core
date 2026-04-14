@@ -253,9 +253,14 @@ func (m *Manager) MarkHello() {
 // then sends SIGKILL if it hasn't terminated.
 func (m *Manager) Stop(ctx context.Context) error {
 	m.stateMu.Lock()
-	if m.state != StateRunning {
+	state := m.state
+	if state == StateStopped {
 		m.stateMu.Unlock()
-		return fmt.Errorf("overlay: cannot stop in state %s", m.state)
+		return nil // idempotent: already stopped, no error
+	}
+	if state != StateRunning {
+		m.stateMu.Unlock()
+		return fmt.Errorf("overlay: cannot stop in state %s", state)
 	}
 	m.state = StateStopping
 	m.stateMu.Unlock()

@@ -497,6 +497,33 @@ func TestBridgeRuntimePrefsSnapshotIsCopy(t *testing.T) {
 	assert.Equal(t, []string{"com.example.a"}, got, "bridge must hold its own copy")
 }
 
+// TestBridgeSetEngineWiresWelcome verifies that SetEngine wires a new engine
+// and that OnHello includes Model and EngineType from the updated engine.
+func TestBridgeSetEngineWiresWelcome(t *testing.T) {
+	// Start with no engine.
+	bridge := NewBridge(nil, ember.New(), nil, nil, nil)
+
+	eng := newFakeEngine()
+	eng.model = "opus"
+	eng.engineType = "claude"
+	bridge.SetEngine(eng)
+
+	w := bridge.OnHello(nil, Hello{ClientVersion: "1.0", PID: 42})
+	assert.Equal(t, "opus", w.Model)
+	assert.Equal(t, "claude", w.Engine)
+}
+
+// TestBridgeSetEngineNilSafe verifies that a nil engine produces empty
+// engine/model fields in Welcome without panicking.
+func TestBridgeSetEngineNilSafe(t *testing.T) {
+	bridge := NewBridge(nil, ember.New(), nil, nil, nil)
+	bridge.SetEngine(nil)
+
+	w := bridge.OnHello(nil, Hello{ClientVersion: "1.0", PID: 1})
+	assert.Empty(t, w.Engine)
+	assert.Empty(t, w.Model)
+}
+
 // TestContextUpdateOriginField verifies the Origin field is present in
 // ContextUpdate and round-trips through JSON.
 func TestContextUpdateOriginField(t *testing.T) {

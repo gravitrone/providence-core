@@ -654,3 +654,16 @@ func TestRestoreHistory_CodexMode(t *testing.T) {
 		Content: "[Tool: ReadFile(cmd/main.go) -> package main\n\nfunc main() {}]",
 	}, e.codexHistory[1])
 }
+
+// TestDirectEngineModelAndEngineType verifies both accessor methods return
+// the values set at construction time.
+func TestDirectEngineModelAndEngineType(t *testing.T) {
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:   engine.EngineTypeDirect,
+		Model:  "claude-sonnet-4-20250514",
+		APIKey: "test-key-not-real",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "claude-sonnet-4-20250514", e.Model())
+	assert.Equal(t, "direct", e.EngineType())
+}

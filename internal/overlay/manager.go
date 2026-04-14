@@ -171,12 +171,15 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 	var spawnedPID int
 
 	if appPath != "" {
-		// open -n (new instance) -a (app path) --args ... passes the flags to
-		// the launched binary. `open` itself returns as soon as the app is
-		// launched; we then pgrep to find the actual PID for signaling.
-		openArgs := []string{"-n", "-a", appPath, "--args"}
-		openArgs = append(openArgs, args...)
-		openCmd := exec.CommandContext(ctx, "open", openArgs...)
+		// `launchctl asuser <uid> -- open -n -a <app> --args ...` launches the
+		// app in the user's launchd session, fully detached from providence's
+		// TCC responsibility chain. Without `asuser`, macOS attributes TCC
+		// requests back to providence and ScreenCaptureKit hangs indefinitely
+		// when providence itself isn't granted Screen Recording. With asuser
+		// the overlay's TCC identity is its own bundle ID.
+		launchArgs := []string{"asuser", strconv.Itoa(os.Getuid()), "--", "open", "-n", "-a", appPath, "--args"}
+		launchArgs = append(launchArgs, args...)
+		openCmd := exec.CommandContext(ctx, "launchctl", launchArgs...)
 		if logFile != nil {
 			openCmd.Stdout = logFile
 			openCmd.Stderr = logFile

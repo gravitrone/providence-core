@@ -467,12 +467,34 @@ func TestBridgeDefaultModeFallsBackToSystemReminder(t *testing.T) {
 // Phase 10.
 func TestBridgeRuntimePrefsAdvertisedInWelcome(t *testing.T) {
 	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
-	bridge.SetRuntimePrefs(true, "bottom-bar", []string{"com.1password.1password", "com.apple.keychainaccess"})
+	bridge.SetRuntimePrefs(true, "bottom-bar", []string{"com.1password.1password", "com.apple.keychainaccess"}, "", 0, 0, "")
 
 	w := bridge.OnHello(nil, Hello{ClientVersion: "1.0", PID: 100})
 	assert.True(t, w.TTSEnabled)
 	assert.Equal(t, "bottom-bar", w.Position)
 	assert.Equal(t, []string{"com.1password.1password", "com.apple.keychainaccess"}, w.ExcludedApps)
+}
+
+// TestBridgeWelcomeChatDefaults verifies Welcome carries default ui_mode="ghost"
+// and chat_history_limit=50 when SetRuntimePrefs has not been called.
+// Phase A (chat overlay).
+func TestBridgeWelcomeChatDefaults(t *testing.T) {
+	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
+	w := bridge.OnHello(nil, Hello{PID: 1})
+	assert.Equal(t, "ghost", w.UIMode)
+	assert.Equal(t, 50, w.ChatHistoryLimit)
+}
+
+// TestBridgeWelcomeChatConfigured verifies Welcome reflects chat-mode config
+// after SetRuntimePrefs passes non-default values.
+// Phase A (chat overlay).
+func TestBridgeWelcomeChatConfigured(t *testing.T) {
+	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
+	bridge.SetRuntimePrefs(false, "right-sidebar", nil, "chat", 100, 0.9, "right")
+
+	w := bridge.OnHello(nil, Hello{PID: 2})
+	assert.Equal(t, "chat", w.UIMode)
+	assert.Equal(t, 100, w.ChatHistoryLimit)
 }
 
 // TestBridgeRuntimePrefsDefaultEmpty verifies a bridge with no SetRuntimePrefs
@@ -490,7 +512,7 @@ func TestBridgeRuntimePrefsDefaultEmpty(t *testing.T) {
 func TestBridgeRuntimePrefsSnapshotIsCopy(t *testing.T) {
 	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
 	apps := []string{"com.example.a"}
-	bridge.SetRuntimePrefs(false, "right-sidebar", apps)
+	bridge.SetRuntimePrefs(false, "right-sidebar", apps, "", 0, 0, "")
 	apps[0] = "com.example.mutated"
 
 	_, _, got := bridge.RuntimePrefs()

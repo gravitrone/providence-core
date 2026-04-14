@@ -497,6 +497,57 @@ func TestOverlayConfigDefaults(t *testing.T) {
 	assert.True(t, d.AdaptiveFPS)
 	assert.Contains(t, d.ExcludeApps, "com.1password.1password")
 	assert.Contains(t, d.ExcludeApps, "com.apple.keychainaccess")
+	assert.Equal(t, "ghost", d.UIMode)
+	assert.Equal(t, 50, d.ChatHistoryLimit)
+	assert.InDelta(t, 0.92, d.ChatAlpha, 0.0001)
+	assert.Equal(t, "right", d.ChatPosition)
+}
+
+func TestOverlayConfigChatTOMLRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	original := Config{
+		Overlay: OverlayConfig{
+			UIMode:           "chat",
+			ChatHistoryLimit: 120,
+			ChatAlpha:        0.8,
+			ChatPosition:     "left",
+		},
+	}
+
+	require.NoError(t, original.SaveTo(path))
+	loaded := LoadFromTOML(path)
+
+	assert.Equal(t, "chat", loaded.Overlay.UIMode)
+	assert.Equal(t, 120, loaded.Overlay.ChatHistoryLimit)
+	assert.InDelta(t, 0.8, loaded.Overlay.ChatAlpha, 0.0001)
+	assert.Equal(t, "left", loaded.Overlay.ChatPosition)
+}
+
+func TestOverlayConfigChatMerge(t *testing.T) {
+	base := Config{
+		Overlay: OverlayConfig{
+			UIMode:           "ghost",
+			ChatHistoryLimit: 50,
+			ChatAlpha:        0.92,
+			ChatPosition:     "right",
+		},
+	}
+	override := Config{
+		Overlay: OverlayConfig{
+			UIMode:           "both",
+			ChatHistoryLimit: 200,
+			ChatAlpha:        0.75,
+		},
+	}
+	mergeConfig(&base, &override)
+
+	assert.Equal(t, "both", base.Overlay.UIMode)
+	assert.Equal(t, 200, base.Overlay.ChatHistoryLimit)
+	assert.InDelta(t, 0.75, base.Overlay.ChatAlpha, 0.0001)
+	// ChatPosition not overridden, keep base.
+	assert.Equal(t, "right", base.Overlay.ChatPosition)
 }
 
 func TestOverlayConfigTOMLRoundtrip(t *testing.T) {
@@ -623,6 +674,66 @@ func TestOverlayConfigValidation(t *testing.T) {
 			name:    "invalid position",
 			cfg:     Config{Overlay: OverlayConfig{Position: "floating"}},
 			wantErr: true,
+		},
+		{
+			name:    "valid ui_mode ghost",
+			cfg:     Config{Overlay: OverlayConfig{UIMode: "ghost"}},
+			wantErr: false,
+		},
+		{
+			name:    "valid ui_mode chat",
+			cfg:     Config{Overlay: OverlayConfig{UIMode: "chat"}},
+			wantErr: false,
+		},
+		{
+			name:    "valid ui_mode both",
+			cfg:     Config{Overlay: OverlayConfig{UIMode: "both"}},
+			wantErr: false,
+		},
+		{
+			name:    "invalid ui_mode",
+			cfg:     Config{Overlay: OverlayConfig{UIMode: "holographic"}},
+			wantErr: true,
+		},
+		{
+			name:    "chat_history_limit too low",
+			cfg:     Config{Overlay: OverlayConfig{ChatHistoryLimit: 0}},
+			wantErr: false, // zero means "use default"
+		},
+		{
+			name:    "chat_history_limit negative",
+			cfg:     Config{Overlay: OverlayConfig{ChatHistoryLimit: -5}},
+			wantErr: true,
+		},
+		{
+			name:    "chat_history_limit too high",
+			cfg:     Config{Overlay: OverlayConfig{ChatHistoryLimit: 1000}},
+			wantErr: true,
+		},
+		{
+			name:    "chat_alpha in range",
+			cfg:     Config{Overlay: OverlayConfig{ChatAlpha: 0.92}},
+			wantErr: false,
+		},
+		{
+			name:    "chat_alpha too low",
+			cfg:     Config{Overlay: OverlayConfig{ChatAlpha: 0.1}},
+			wantErr: true,
+		},
+		{
+			name:    "chat_alpha too high",
+			cfg:     Config{Overlay: OverlayConfig{ChatAlpha: 1.5}},
+			wantErr: true,
+		},
+		{
+			name:    "invalid chat_position",
+			cfg:     Config{Overlay: OverlayConfig{ChatPosition: "diagonal"}},
+			wantErr: true,
+		},
+		{
+			name:    "valid chat_position left",
+			cfg:     Config{Overlay: OverlayConfig{ChatPosition: "left"}},
+			wantErr: false,
 		},
 	}
 

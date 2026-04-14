@@ -42,6 +42,12 @@ type OverlayConfig struct {
 	ContextInjection string   `toml:"context_injection" json:"context_injection,omitempty"` // "system_reminder"|"synthetic_user"
 	WakeWord         string   `toml:"wake_word" json:"wake_word,omitempty"`
 	Position         string   `toml:"position" json:"position,omitempty"` // "right-sidebar"|"bottom-bar"
+
+	// Phase A (chat overlay): persistent chat window rendering config.
+	UIMode           string  `toml:"ui_mode" json:"ui_mode,omitempty"`                         // "ghost"|"chat"|"both"
+	ChatHistoryLimit int     `toml:"chat_history_limit" json:"chat_history_limit,omitempty"`   // default 50
+	ChatAlpha        float64 `toml:"chat_alpha" json:"chat_alpha,omitempty"`                   // 0.3-1.0, default 0.92
+	ChatPosition     string  `toml:"chat_position" json:"chat_position,omitempty"`             // "right"|"left"|"center"
 }
 
 // SpawnEnabled returns true if the overlay subprocess should be spawned
@@ -199,6 +205,10 @@ func overlayDefaults() OverlayConfig {
 		Position:         "right-sidebar",
 		AdaptiveFPS:      true,
 		ExcludeApps:      []string{"com.1password.1password", "com.apple.keychainaccess"},
+		UIMode:           "ghost",
+		ChatHistoryLimit: 50,
+		ChatAlpha:        0.92,
+		ChatPosition:     "right",
 	}
 }
 
@@ -282,6 +292,8 @@ func expandConfigEnvVars(c *Config) {
 	c.Overlay.WakeWord = expandEnvVars(c.Overlay.WakeWord)
 	c.Overlay.ContextInjection = expandEnvVars(c.Overlay.ContextInjection)
 	c.Overlay.Position = expandEnvVars(c.Overlay.Position)
+	c.Overlay.UIMode = expandEnvVars(c.Overlay.UIMode)
+	c.Overlay.ChatPosition = expandEnvVars(c.Overlay.ChatPosition)
 	c.Compact.Mode = expandEnvVars(c.Compact.Mode)
 	c.Compact.Trigger = expandEnvVars(c.Compact.Trigger)
 	c.Compact.FastTierModel = expandEnvVars(c.Compact.FastTierModel)
@@ -505,6 +517,18 @@ func mergeConfig(base, override *Config) {
 	}
 	if override.Overlay.Position != "" {
 		base.Overlay.Position = override.Overlay.Position
+	}
+	if override.Overlay.UIMode != "" {
+		base.Overlay.UIMode = override.Overlay.UIMode
+	}
+	if override.Overlay.ChatHistoryLimit != 0 {
+		base.Overlay.ChatHistoryLimit = override.Overlay.ChatHistoryLimit
+	}
+	if override.Overlay.ChatAlpha != 0 {
+		base.Overlay.ChatAlpha = override.Overlay.ChatAlpha
+	}
+	if override.Overlay.ChatPosition != "" {
+		base.Overlay.ChatPosition = override.Overlay.ChatPosition
 	}
 
 	// Hooks: override replaces entire event lists (not additive).
@@ -750,6 +774,31 @@ func (c *Config) Validate() error {
 	}
 	if !validOverlayPosition[c.Overlay.Position] {
 		errs = append(errs, fmt.Sprintf("overlay.position %q is not valid (allowed: right-sidebar, bottom-bar)", c.Overlay.Position))
+	}
+
+	validUIMode := map[string]bool{
+		"":      true,
+		"ghost": true,
+		"chat":  true,
+		"both":  true,
+	}
+	if !validUIMode[c.Overlay.UIMode] {
+		errs = append(errs, fmt.Sprintf("overlay.ui_mode %q is not valid (allowed: ghost, chat, both)", c.Overlay.UIMode))
+	}
+	if c.Overlay.ChatHistoryLimit != 0 && (c.Overlay.ChatHistoryLimit < 1 || c.Overlay.ChatHistoryLimit > 500) {
+		errs = append(errs, fmt.Sprintf("overlay.chat_history_limit %d out of range (1-500)", c.Overlay.ChatHistoryLimit))
+	}
+	if c.Overlay.ChatAlpha != 0 && (c.Overlay.ChatAlpha < 0.3 || c.Overlay.ChatAlpha > 1.0) {
+		errs = append(errs, fmt.Sprintf("overlay.chat_alpha %.2f out of range (0.3-1.0)", c.Overlay.ChatAlpha))
+	}
+	validChatPosition := map[string]bool{
+		"":       true,
+		"right":  true,
+		"left":   true,
+		"center": true,
+	}
+	if !validChatPosition[c.Overlay.ChatPosition] {
+		errs = append(errs, fmt.Sprintf("overlay.chat_position %q is not valid (allowed: right, left, center)", c.Overlay.ChatPosition))
 	}
 
 	if len(errs) > 0 {

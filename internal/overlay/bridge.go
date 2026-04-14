@@ -71,6 +71,12 @@ type Bridge struct {
 	ttsEnabled   bool
 	position     string
 	excludedApps []string
+
+	// Phase A (chat overlay): persistent chat window rendering config.
+	uiMode           string
+	chatHistoryLimit int
+	chatAlpha        float64
+	chatPosition     string
 }
 
 // NewBridge creates a Bridge connecting the engine and ember state to the
@@ -129,7 +135,7 @@ func (b *Bridge) SetEngine(eng Engine) {
 // SetRuntimePrefs records TUI-side preferences that are advertised to the
 // overlay client in each Welcome envelope. Safe to call at any time; takes
 // effect on the next hello exchange. Phase 10.
-func (b *Bridge) SetRuntimePrefs(tts bool, position string, excludedApps []string) {
+func (b *Bridge) SetRuntimePrefs(tts bool, position string, excludedApps []string, uiMode string, chatHistoryLimit int, chatAlpha float64, chatPosition string) {
 	b.prefsMu.Lock()
 	b.ttsEnabled = tts
 	b.position = position
@@ -139,6 +145,10 @@ func (b *Bridge) SetRuntimePrefs(tts bool, position string, excludedApps []strin
 	} else {
 		b.excludedApps = nil
 	}
+	b.uiMode = uiMode
+	b.chatHistoryLimit = chatHistoryLimit
+	b.chatAlpha = chatAlpha
+	b.chatPosition = chatPosition
 	b.prefsMu.Unlock()
 }
 
@@ -222,6 +232,16 @@ func (b *Bridge) OnHello(c *client, h Hello) Welcome {
 	w.Position = b.position
 	if len(b.excludedApps) > 0 {
 		w.ExcludedApps = append([]string(nil), b.excludedApps...)
+	}
+	if b.uiMode != "" {
+		w.UIMode = b.uiMode
+	} else {
+		w.UIMode = "ghost"
+	}
+	if b.chatHistoryLimit > 0 {
+		w.ChatHistoryLimit = b.chatHistoryLimit
+	} else {
+		w.ChatHistoryLimit = 50
 	}
 	b.prefsMu.RUnlock()
 

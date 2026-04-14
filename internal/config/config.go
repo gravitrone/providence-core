@@ -24,6 +24,20 @@ type BridgeConfig struct {
 	SpawnTimeoutMS    int    `toml:"spawn_timeout_ms" json:"spawn_timeout_ms,omitempty"`       // default 1500
 }
 
+// OverlayConfig configures the providence-overlay companion process.
+type OverlayConfig struct {
+	Enable           bool     `toml:"enable" json:"enable,omitempty"`
+	SocketPath       string   `toml:"socket_path" json:"socket_path,omitempty"`
+	BinaryPath       string   `toml:"binary_path" json:"binary_path,omitempty"`
+	AutoStart        bool     `toml:"auto_start" json:"auto_start,omitempty"`
+	ExcludeApps      []string `toml:"exclude_apps" json:"exclude_apps,omitempty"`
+	AdaptiveFPS      bool     `toml:"adaptive_fps" json:"adaptive_fps,omitempty"`
+	TTSEnabled       bool     `toml:"tts_enabled" json:"tts_enabled,omitempty"`
+	ContextInjection string   `toml:"context_injection" json:"context_injection,omitempty"` // "system_reminder"|"synthetic_user"
+	WakeWord         string   `toml:"wake_word" json:"wake_word,omitempty"`
+	Position         string   `toml:"position" json:"position,omitempty"` // "right-sidebar"|"bottom-bar"
+}
+
 // Config holds user preferences persisted to ~/.providence/config.toml.
 type Config struct {
 	Engine           string `toml:"engine" json:"engine,omitempty"`
@@ -43,6 +57,7 @@ type Config struct {
 	Compact     CompactConfig     `toml:"compact" json:"compact,omitempty"`
 	Hooks       HooksConfig       `toml:"hooks" json:"hooks,omitempty"`
 	Permissions PermissionsConfig `toml:"permissions" json:"permissions,omitempty"`
+	Overlay     OverlayConfig     `toml:"overlay" json:"overlay,omitempty"`
 }
 
 // PermissionsConfig holds permission rules from config files.
@@ -160,12 +175,25 @@ func defaultJSONPath() string {
 	return filepath.Join(home, ".providence", "config.json")
 }
 
+// overlayDefaults returns the default OverlayConfig.
+func overlayDefaults() OverlayConfig {
+	return OverlayConfig{
+		Enable:           false,
+		ContextInjection: "system_reminder",
+		WakeWord:         "Hey Providence",
+		Position:         "right-sidebar",
+		AdaptiveFPS:      true,
+		ExcludeApps:      []string{"com.1password.1password", "com.apple.keychainaccess"},
+	}
+}
+
 // Defaults returns a Config with sensible default values.
 func Defaults() Config {
 	return Config{
 		Engine:           "claude",
 		Theme:            "flame",
 		DashboardVisible: true,
+		Overlay:          overlayDefaults(),
 		Bridge: BridgeConfig{
 			Mode:              "auto",
 			WarmStreamFPS:     2,
@@ -234,6 +262,11 @@ func expandConfigEnvVars(c *Config) {
 	c.OutputStyle = expandEnvVars(c.OutputStyle)
 	c.Bridge.Mode = expandEnvVars(c.Bridge.Mode)
 	c.Bridge.SwiftPath = expandEnvVars(c.Bridge.SwiftPath)
+	c.Overlay.SocketPath = expandEnvVars(c.Overlay.SocketPath)
+	c.Overlay.BinaryPath = expandEnvVars(c.Overlay.BinaryPath)
+	c.Overlay.WakeWord = expandEnvVars(c.Overlay.WakeWord)
+	c.Overlay.ContextInjection = expandEnvVars(c.Overlay.ContextInjection)
+	c.Overlay.Position = expandEnvVars(c.Overlay.Position)
 	c.Compact.Mode = expandEnvVars(c.Compact.Mode)
 	c.Compact.Trigger = expandEnvVars(c.Compact.Trigger)
 	c.Compact.FastTierModel = expandEnvVars(c.Compact.FastTierModel)
@@ -425,6 +458,38 @@ func mergeConfig(base, override *Config) {
 	}
 	if len(override.Permissions.Ask) > 0 {
 		base.Permissions.Ask = override.Permissions.Ask
+	}
+
+	// Overlay: merge non-zero/non-false fields.
+	if override.Overlay.Enable {
+		base.Overlay.Enable = true
+	}
+	if override.Overlay.SocketPath != "" {
+		base.Overlay.SocketPath = override.Overlay.SocketPath
+	}
+	if override.Overlay.BinaryPath != "" {
+		base.Overlay.BinaryPath = override.Overlay.BinaryPath
+	}
+	if override.Overlay.AutoStart {
+		base.Overlay.AutoStart = true
+	}
+	if len(override.Overlay.ExcludeApps) > 0 {
+		base.Overlay.ExcludeApps = override.Overlay.ExcludeApps
+	}
+	if override.Overlay.AdaptiveFPS {
+		base.Overlay.AdaptiveFPS = true
+	}
+	if override.Overlay.TTSEnabled {
+		base.Overlay.TTSEnabled = true
+	}
+	if override.Overlay.ContextInjection != "" {
+		base.Overlay.ContextInjection = override.Overlay.ContextInjection
+	}
+	if override.Overlay.WakeWord != "" {
+		base.Overlay.WakeWord = override.Overlay.WakeWord
+	}
+	if override.Overlay.Position != "" {
+		base.Overlay.Position = override.Overlay.Position
 	}
 
 	// Hooks: override replaces entire event lists (not additive).
@@ -653,6 +718,23 @@ func (c *Config) Validate() error {
 	}
 	if c.Bridge.SpawnTimeoutMS < 0 {
 		errs = append(errs, fmt.Sprintf("bridge.spawn_timeout_ms %d must be > 0", c.Bridge.SpawnTimeoutMS))
+	}
+
+	validContextInjection := map[string]bool{
+		"":                 true, // empty = use default
+		"system_reminder":  true,
+		"synthetic_user":   true,
+	}
+	if !validContextInjection[c.Overlay.ContextInjection] {
+		errs = append(errs, fmt.Sprintf("overlay.context_injection %q is not valid (allowed: system_reminder, synthetic_user)", c.Overlay.ContextInjection))
+	}
+	validOverlayPosition := map[string]bool{
+		"":              true, // empty = use default
+		"right-sidebar": true,
+		"bottom-bar":    true,
+	}
+	if !validOverlayPosition[c.Overlay.Position] {
+		errs = append(errs, fmt.Sprintf("overlay.position %q is not valid (allowed: right-sidebar, bottom-bar)", c.Overlay.Position))
 	}
 
 	if len(errs) > 0 {

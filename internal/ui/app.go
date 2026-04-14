@@ -29,10 +29,14 @@ type App struct {
 	agentTab AgentTab
 }
 
+// AppOption is a functional option for NewApp.
+type AppOption func(*AgentTab)
+
 // NewApp creates and returns a new App model.
 // engineType sets the initial AI backend; pass "" for the default (claude).
 // resume may be nil; when set the TUI restores that session on startup.
-func NewApp(engineType string, cfg config.Config, st *store.Store, resume *ResumeData) App {
+// opts are applied to the underlying AgentTab after construction.
+func NewApp(engineType string, cfg config.Config, st *store.Store, resume *ResumeData, opts ...AppOption) App {
 	// Restore persisted theme before constructing the agent tab so the
 	// renderer picks up the correct palette on first paint.
 	switch cfg.Theme {
@@ -46,9 +50,13 @@ func NewApp(engineType string, cfg config.Config, st *store.Store, resume *Resum
 		}
 		ApplyTheme(name)
 	}
+	tab := NewAgentTab(engine.EngineType(engineType), cfg, st, resume)
+	for _, opt := range opts {
+		opt(&tab)
+	}
 	return App{
 		keys:     DefaultKeyMap(),
-		agentTab: NewAgentTab(engine.EngineType(engineType), cfg, st, resume),
+		agentTab: tab,
 	}
 }
 

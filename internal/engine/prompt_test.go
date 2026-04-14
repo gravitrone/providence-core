@@ -276,3 +276,96 @@ func TestNoCoAuthorTag(t *testing.T) {
 	// Git safety section should prohibit co-author tags.
 	assert.Contains(t, prompt, "Never add Co-Authored-By")
 }
+
+// --- Ambient Observer Protocol tests ---
+
+// findAmbientBlock returns the ambient observer block from blocks, or "" if absent.
+// The ambient block is identified by the "# Ambient mode" header.
+func findAmbientBlock(blocks []SystemBlock) (SystemBlock, bool) {
+	for _, b := range blocks {
+		if strings.Contains(b.Text, "# Ambient mode") {
+			return b, true
+		}
+	}
+	return SystemBlock{}, false
+}
+
+func TestAmbientObserverProtocol_EmptyWhenInactive(t *testing.T) {
+	cfg := &PromptConfig{OverlayActive: false}
+	blocks := BuildSystemBlocks(cfg)
+
+	_, found := findAmbientBlock(blocks)
+	assert.False(t, found, "ambient block should be absent when OverlayActive=false")
+
+	// Also verify nil config produces no ambient block.
+	nilBlocks := BuildSystemBlocks(nil)
+	_, foundNil := findAmbientBlock(nilBlocks)
+	assert.False(t, foundNil, "ambient block should be absent for nil config")
+}
+
+func TestAmbientObserverProtocol_PresentWhenActive(t *testing.T) {
+	cfg := &PromptConfig{OverlayActive: true}
+	blocks := BuildSystemBlocks(cfg)
+
+	block, found := findAmbientBlock(blocks)
+	require.True(t, found, "ambient block should be present when OverlayActive=true")
+	assert.NotEmpty(t, block.Text)
+}
+
+func TestAmbientObserverProtocol_Cacheable(t *testing.T) {
+	cfg := &PromptConfig{OverlayActive: true}
+	blocks := BuildSystemBlocks(cfg)
+
+	block, found := findAmbientBlock(blocks)
+	require.True(t, found)
+	assert.True(t, block.Cacheable, "ambient block should be cacheable")
+}
+
+func TestAmbientObserverProtocol_ContainsThreeModes(t *testing.T) {
+	cfg := &PromptConfig{OverlayActive: true}
+	blocks := BuildSystemBlocks(cfg)
+
+	block, found := findAmbientBlock(blocks)
+	require.True(t, found)
+
+	// Mode names in source are title-case; compare case-insensitively to
+	// tolerate future normalization (e.g. ALLCAPS headers).
+	upper := strings.ToUpper(block.Text)
+	assert.Contains(t, upper, "SILENT OBSERVER", "must describe silent observer mode")
+	assert.Contains(t, upper, "PROACTIVE COACH", "must describe proactive coach mode")
+	assert.Contains(t, upper, "TAKE-OVER ACTOR", "must describe take-over actor mode")
+}
+
+func TestAmbientObserverProtocol_IndependentFromEmber(t *testing.T) {
+	// Ambient ON, Ember OFF: ambient present, ember content marked inactive.
+	cfgA := &PromptConfig{OverlayActive: true, EmberActive: false}
+	blocksA := BuildSystemBlocks(cfgA)
+	_, ambientFoundA := findAmbientBlock(blocksA)
+	assert.True(t, ambientFoundA, "ambient must be present when OverlayActive=true")
+
+	var emberA string
+	for _, b := range blocksA {
+		if strings.Contains(b.Text, "Ember") && !strings.Contains(b.Text, "# Ambient mode") {
+			emberA = b.Text
+			break
+		}
+	}
+	require.NotEmpty(t, emberA)
+	assert.Contains(t, emberA, "currently inactive", "ember must be inactive when EmberActive=false")
+
+	// Ember ON, Ambient OFF: ambient absent, ember content active.
+	cfgB := &PromptConfig{OverlayActive: false, EmberActive: true}
+	blocksB := BuildSystemBlocks(cfgB)
+	_, ambientFoundB := findAmbientBlock(blocksB)
+	assert.False(t, ambientFoundB, "ambient must be absent when OverlayActive=false")
+
+	var emberB string
+	for _, b := range blocksB {
+		if strings.Contains(b.Text, "Ember") {
+			emberB = b.Text
+			break
+		}
+	}
+	require.NotEmpty(t, emberB)
+	assert.NotContains(t, emberB, "currently inactive", "ember must be active when EmberActive=true")
+}

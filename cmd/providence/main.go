@@ -180,6 +180,13 @@ func runTUI(engineType string, cfg config.Config, resumeQuery string, continueSe
 		}
 		overlayMgr := overlay.NewManager(overlayCfg, logger)
 		overlayBridge := overlay.NewBridgeWithMode(nil, emberState, nil, overlayMgr, logger, cfg.Overlay.ContextInjection)
+		// Phase 10: advertise runtime prefs (TTS, panel position, excluded apps)
+		// to the overlay in each Welcome.
+		overlayBridge.SetRuntimePrefs(
+			cfg.Overlay.TTSEnabled,
+			cfg.Overlay.Position,
+			cfg.Overlay.ExcludeApps,
+		)
 
 		overlayMgr.SetCallbacks(
 			func() {

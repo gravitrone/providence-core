@@ -62,6 +62,12 @@ type Bridge struct {
 	// <system-reminder> block. Consumed once by PendingSystemReminder.
 	pendingMu       sync.Mutex
 	pendingReminder string
+
+	// Phase 10: runtime prefs forwarded to the overlay in Welcome.
+	prefsMu      sync.RWMutex
+	ttsEnabled   bool
+	position     string
+	excludedApps []string
 }
 
 // NewBridge creates a Bridge connecting the engine and ember state to the
@@ -107,6 +113,34 @@ func (b *Bridge) SetServer(srv *Server) { b.server = srv }
 
 // SetSessionID sets the session ID to include in Welcome messages.
 func (b *Bridge) SetSessionID(id string) { b.sessionID = id }
+
+// SetRuntimePrefs records TUI-side preferences that are advertised to the
+// overlay client in each Welcome envelope. Safe to call at any time; takes
+// effect on the next hello exchange. Phase 10.
+func (b *Bridge) SetRuntimePrefs(tts bool, position string, excludedApps []string) {
+	b.prefsMu.Lock()
+	b.ttsEnabled = tts
+	b.position = position
+	// Copy to avoid the caller mutating our internal slice.
+	if len(excludedApps) > 0 {
+		b.excludedApps = append([]string(nil), excludedApps...)
+	} else {
+		b.excludedApps = nil
+	}
+	b.prefsMu.Unlock()
+}
+
+// RuntimePrefs returns a snapshot of the TUI-side runtime preferences. Phase 10.
+func (b *Bridge) RuntimePrefs() (tts bool, position string, excludedApps []string) {
+	b.prefsMu.RLock()
+	defer b.prefsMu.RUnlock()
+	tts = b.ttsEnabled
+	position = b.position
+	if len(b.excludedApps) > 0 {
+		excludedApps = append([]string(nil), b.excludedApps...)
+	}
+	return
+}
 
 // Start subscribes to the session bus and forwards events to connected
 // overlays. It runs until ctx is cancelled.
@@ -170,6 +204,14 @@ func (b *Bridge) OnHello(c *client, h Hello) Welcome {
 	if b.ember != nil {
 		w.EmberActive = b.ember.ShouldTick()
 	}
+
+	b.prefsMu.RLock()
+	w.TTSEnabled = b.ttsEnabled
+	w.Position = b.position
+	if len(b.excludedApps) > 0 {
+		w.ExcludedApps = append([]string(nil), b.excludedApps...)
+	}
+	b.prefsMu.RUnlock()
 
 	return w
 }

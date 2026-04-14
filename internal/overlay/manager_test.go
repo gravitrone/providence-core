@@ -112,7 +112,30 @@ func TestManagerCannotStartWhenAlreadyRunning(t *testing.T) {
 
 func TestManagerCannotStopWhenNotRunning(t *testing.T) {
 	mgr := NewManager(Config{}, nil)
-	// Stopped state.
+	// Starting state - not stopped, not running: should error.
+	mgr.state = StateStarting
+	err := mgr.Stop(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot stop")
+}
+
+// TestManagerStopIdempotentAlreadyStopped verifies Stop from StateStopped
+// returns nil (idempotent - no double-stop error).
+func TestManagerStopIdempotentAlreadyStopped(t *testing.T) {
+	mgr := NewManager(Config{}, nil)
+	// Initial state is StateStopped.
+	require.Equal(t, StateStopped, mgr.State())
+
+	err := mgr.Stop(context.Background())
+	assert.NoError(t, err, "Stop from StateStopped must be idempotent")
+}
+
+// TestManagerStopErrorsFromStarting verifies Stop from StateStarting
+// still returns an error (only StateStopped and StateRunning are handled).
+func TestManagerStopErrorsFromStarting(t *testing.T) {
+	mgr := NewManager(Config{}, nil)
+	mgr.state = StateStarting
+
 	err := mgr.Stop(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot stop")

@@ -58,6 +58,9 @@ type Bridge struct {
 
 	tracker *TokenTracker
 
+	// engineMu guards late-wire of engine via SetEngine.
+	engineMu sync.RWMutex
+
 	// pendingReminder holds the latest ContextUpdate formatted as a
 	// <system-reminder> block. Consumed once by PendingSystemReminder.
 	pendingMu       sync.Mutex
@@ -113,6 +116,15 @@ func (b *Bridge) SetServer(srv *Server) { b.server = srv }
 
 // SetSessionID sets the session ID to include in Welcome messages.
 func (b *Bridge) SetSessionID(id string) { b.sessionID = id }
+
+// SetEngine attaches the engine after construction. Used by the TUI to wire
+// the engine reference after both the bridge and engine are initialized.
+// Nil-safe: a nil engine means Welcome responses include empty engine/model.
+func (b *Bridge) SetEngine(eng Engine) {
+	b.engineMu.Lock()
+	defer b.engineMu.Unlock()
+	b.engine = eng
+}
 
 // SetRuntimePrefs records TUI-side preferences that are advertised to the
 // overlay client in each Welcome envelope. Safe to call at any time; takes

@@ -39,6 +39,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/skills"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
 	"github.com/gravitrone/providence-core/internal/engine/teams"
+	"github.com/gravitrone/providence-core/internal/overlay"
 	"github.com/gravitrone/providence-core/internal/store"
 	"github.com/gravitrone/providence-core/internal/ui/components"
 	"github.com/gravitrone/providence-core/internal/ui/dashboard"
@@ -6892,6 +6893,14 @@ func (at *AgentTab) handleEngineCreated(msg engineCreatedMsg) tea.Cmd {
 	if at.overlayBridge != nil {
 		if de, ok := at.engine.(*direct.DirectEngine); ok {
 			de.SetContextInjector(at.overlayBridge)
+		}
+		if setter, ok := at.overlayBridge.(interface{ SetEngine(overlay.Engine) }); ok {
+			if oe, ok2 := at.engine.(overlay.Engine); ok2 {
+				setter.SetEngine(oe)
+			}
+		}
+		if sid, ok := at.overlayBridge.(interface{ SetSessionID(string) }); ok {
+			sid.SetSessionID(at.sessionID)
 		}
 	}
 	// Transfer any pending images to the newly created engine.

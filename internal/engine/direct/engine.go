@@ -484,6 +484,12 @@ func (e *DirectEngine) SessionBus() *session.Bus {
 	return e.sessionBus
 }
 
+// Model returns the active model identifier.
+func (e *DirectEngine) Model() string { return e.model }
+
+// EngineType returns the engine registry key.
+func (e *DirectEngine) EngineType() string { return "direct" }
+
 // SetRegistry replaces the tool registry (for use before first Send).
 func (e *DirectEngine) SetRegistry(r *tools.Registry) {
 	e.registry = r

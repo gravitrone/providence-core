@@ -54,8 +54,21 @@ type Config struct {
 	SocketPath  string
 	BinaryPath  string
 	AutoStart   bool
+	// Spawn controls whether Start spawns the overlay subprocess.
+	// Zero value (nil) means "default true" for backwards compat.
+	Spawn       *bool
 	ExcludeApps []string
 	LogPath     string // default ~/.providence/log/overlay.log
+}
+
+// spawnEnabled returns true if the manager should spawn the overlay
+// subprocess (default). False => only run the UDS server; the user is
+// expected to launch the overlay manually from a fresh shell.
+func (c Config) spawnEnabled() bool {
+	if c.Spawn == nil {
+		return true
+	}
+	return *c.Spawn
 }
 
 // --- Manager ---
@@ -159,12 +172,28 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 		logFile = nil
 	}
 
+	args := []string{"--socket=" + srv.SocketPath()}
+
+	// Optionally skip the subprocess spawn entirely and wait for an
+	// externally-launched overlay to connect. This sidesteps macOS TCC
+	// "responsible process" attribution which causes SCShareableContent to
+	// hang when spawned from providence on some macOS versions.
+	if !m.config.spawnEnabled() {
+		m.logger.Info("overlay: server running, spawn disabled - launch overlay manually")
+		m.setStateSafe(StateRunning)
+		if m.onStart != nil {
+			m.onStart()
+		}
+		// No subprocess PID to monitor; the serve goroutine handles client
+		// connect/disconnect and Stop will close the server cleanly.
+		return nil
+	}
+
 	// Spawn the overlay. On macOS, if an .app bundle exists we MUST launch it
 	// via `open -n -a` so LaunchServices owns the process. A direct exec.Command
 	// subprocess inherits the parent's TCC responsibility chain, which causes
 	// ScreenCaptureKit requests to hang indefinitely when providence itself
 	// doesn't have Screen Recording permission.
-	args := []string{"--socket=" + srv.SocketPath()}
 	appPath := findAppBundle(binPath)
 
 	var cmd *exec.Cmd
@@ -392,11 +421,16 @@ func (m *Manager) StatusInfo() map[string]any {
 	helloAt := m.helloAt
 	m.helloMu.Unlock()
 
+	socketPath := m.config.SocketPath
+	if m.server != nil {
+		socketPath = m.server.SocketPath()
+	}
 	info := map[string]any{
-		"state":       state.String(),
-		"socket_path": m.config.SocketPath,
-		"binary_path": resolveBinaryPath(m.config.BinaryPath),
-		"pid":         m.cmdPID,
+		"state":          state.String(),
+		"socket_path":    socketPath,
+		"binary_path":    resolveBinaryPath(m.config.BinaryPath),
+		"pid":            m.cmdPID,
+		"spawn_disabled": !m.config.spawnEnabled(),
 	}
 
 	if !helloAt.IsZero() {

@@ -844,7 +844,15 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 			}
 			at.addSystemMessage("Overlay start failed: " + hint)
 		} else {
-			at.addSystemMessage("Overlay started")
+			// Detect if we're in spawn=false mode (server-only) and print the
+			// manual-launch one-liner so the user knows what to do next.
+			info := at.overlayMgr.StatusInfo()
+			if info["spawn_disabled"] == true {
+				at.addSystemMessage("Overlay server listening (spawn disabled). Launch the overlay from a fresh shell:\n" +
+					"  open -n -a ~/Applications/\"Providence Overlay.app\" --args --socket=" + fmt.Sprint(info["socket_path"]))
+			} else {
+				at.addSystemMessage("Overlay started")
+			}
 		}
 		at.refreshViewport()
 		return at, nil

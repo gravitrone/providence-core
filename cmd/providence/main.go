@@ -176,6 +176,7 @@ func runTUI(engineType string, cfg config.Config, resumeQuery string, continueSe
 			SocketPath:  cfg.Overlay.SocketPath,
 			BinaryPath:  cfg.Overlay.BinaryPath,
 			AutoStart:   cfg.Overlay.AutoStart,
+			Spawn:       cfg.Overlay.Spawn,
 			ExcludeApps: cfg.Overlay.ExcludeApps,
 		}
 		overlayMgr := overlay.NewManager(overlayCfg, logger)

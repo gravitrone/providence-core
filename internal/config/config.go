@@ -26,16 +26,31 @@ type BridgeConfig struct {
 
 // OverlayConfig configures the providence-overlay companion process.
 type OverlayConfig struct {
-	Enable           bool     `toml:"enable" json:"enable,omitempty"`
-	SocketPath       string   `toml:"socket_path" json:"socket_path,omitempty"`
-	BinaryPath       string   `toml:"binary_path" json:"binary_path,omitempty"`
-	AutoStart        bool     `toml:"auto_start" json:"auto_start,omitempty"`
+	Enable     bool   `toml:"enable" json:"enable,omitempty"`
+	SocketPath string `toml:"socket_path" json:"socket_path,omitempty"`
+	BinaryPath string `toml:"binary_path" json:"binary_path,omitempty"`
+	AutoStart  bool   `toml:"auto_start" json:"auto_start,omitempty"`
+	// Spawn controls whether /overlay start forks the overlay subprocess.
+	// Default true. Set false to only run the UDS server and let the user
+	// launch the overlay manually from a fresh shell (works around macOS
+	// TCC "responsible process" attribution that hangs ScreenCaptureKit
+	// when the overlay is spawned from providence).
+	Spawn            *bool    `toml:"spawn,omitempty" json:"spawn,omitempty"`
 	ExcludeApps      []string `toml:"exclude_apps" json:"exclude_apps,omitempty"`
 	AdaptiveFPS      bool     `toml:"adaptive_fps" json:"adaptive_fps,omitempty"`
 	TTSEnabled       bool     `toml:"tts_enabled" json:"tts_enabled,omitempty"`
 	ContextInjection string   `toml:"context_injection" json:"context_injection,omitempty"` // "system_reminder"|"synthetic_user"
 	WakeWord         string   `toml:"wake_word" json:"wake_word,omitempty"`
 	Position         string   `toml:"position" json:"position,omitempty"` // "right-sidebar"|"bottom-bar"
+}
+
+// SpawnEnabled returns true if the overlay subprocess should be spawned
+// automatically. Defaults to true for backwards compatibility.
+func (c *OverlayConfig) SpawnEnabled() bool {
+	if c.Spawn == nil {
+		return true
+	}
+	return *c.Spawn
 }
 
 // Config holds user preferences persisted to ~/.providence/config.toml.

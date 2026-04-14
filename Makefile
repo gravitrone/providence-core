@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: help build vet lint fmt test coverage changelog hooks clean install setup
+.PHONY: help build vet lint fmt test coverage changelog hooks clean install setup bench-bridge
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -37,6 +37,9 @@ hooks: ## Install git hooks
 	else \
 		echo "no .git directory found"; \
 	fi
+
+bench-bridge: ## Run latency benchmarks for the macOS bridge
+	go test -bench=Benchmark -benchmem -benchtime=3s ./internal/bridge/macos/...
 
 clean: ## Clean build artifacts
 	rm -f providence coverage.out

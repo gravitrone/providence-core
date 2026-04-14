@@ -10,6 +10,20 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// BridgeConfig configures the macOS native bridge (providence-mac-bridge) and
+// its CU tool behavior.
+type BridgeConfig struct {
+	Mode              string `toml:"mode" json:"mode,omitempty"`                               // auto|swift|shell; default auto
+	SwiftPath         string `toml:"swift_path" json:"swift_path,omitempty"`                   // override binary lookup
+	WarmStreamFPS     int    `toml:"warm_stream_fps" json:"warm_stream_fps,omitempty"`         // default 2
+	BurstStreamFPS    int    `toml:"burst_stream_fps" json:"burst_stream_fps,omitempty"`       // default 30
+	ActionBatch       bool   `toml:"action_batch" json:"action_batch,omitempty"`               // default true
+	ScreenDiffEnabled bool   `toml:"screen_diff_enabled" json:"screen_diff_enabled,omitempty"` // default true
+	AXMaxDepth        int    `toml:"ax_max_depth" json:"ax_max_depth,omitempty"`               // default 12
+	AXMaxNodes        int    `toml:"ax_max_nodes" json:"ax_max_nodes,omitempty"`               // default 2000
+	SpawnTimeoutMS    int    `toml:"spawn_timeout_ms" json:"spawn_timeout_ms,omitempty"`       // default 1500
+}
+
 // Config holds user preferences persisted to ~/.providence/config.toml.
 type Config struct {
 	Engine           string `toml:"engine" json:"engine,omitempty"`
@@ -25,6 +39,7 @@ type Config struct {
 	OutputStyle      string   `toml:"output_style" json:"output_style,omitempty"`
 	SpinnerVerbs     []string `toml:"spinner_verbs" json:"spinner_verbs,omitempty"`
 
+	Bridge      BridgeConfig      `toml:"bridge" json:"bridge,omitempty"`
 	Compact     CompactConfig     `toml:"compact" json:"compact,omitempty"`
 	Hooks       HooksConfig       `toml:"hooks" json:"hooks,omitempty"`
 	Permissions PermissionsConfig `toml:"permissions" json:"permissions,omitempty"`
@@ -151,6 +166,16 @@ func Defaults() Config {
 		Engine:           "claude",
 		Theme:            "flame",
 		DashboardVisible: true,
+		Bridge: BridgeConfig{
+			Mode:              "auto",
+			WarmStreamFPS:     2,
+			BurstStreamFPS:    30,
+			ActionBatch:       true,
+			ScreenDiffEnabled: true,
+			AXMaxDepth:        12,
+			AXMaxNodes:        2000,
+			SpawnTimeoutMS:    1500,
+		},
 		Compact: CompactConfig{
 			Mode:          "both",
 			Trigger:       "hybrid",
@@ -207,6 +232,8 @@ func expandConfigEnvVars(c *Config) {
 	c.Effort = expandEnvVars(c.Effort)
 	c.OpenRouterAPIKey = expandEnvVars(c.OpenRouterAPIKey)
 	c.OutputStyle = expandEnvVars(c.OutputStyle)
+	c.Bridge.Mode = expandEnvVars(c.Bridge.Mode)
+	c.Bridge.SwiftPath = expandEnvVars(c.Bridge.SwiftPath)
 	c.Compact.Mode = expandEnvVars(c.Compact.Mode)
 	c.Compact.Trigger = expandEnvVars(c.Compact.Trigger)
 	c.Compact.FastTierModel = expandEnvVars(c.Compact.FastTierModel)
@@ -357,6 +384,35 @@ func mergeConfig(base, override *Config) {
 	if override.Compact.CircuitBreaker != 0 {
 		base.Compact.CircuitBreaker = override.Compact.CircuitBreaker
 	}
+	// Bridge: merge non-zero/non-empty fields.
+	if override.Bridge.Mode != "" {
+		base.Bridge.Mode = override.Bridge.Mode
+	}
+	if override.Bridge.SwiftPath != "" {
+		base.Bridge.SwiftPath = override.Bridge.SwiftPath
+	}
+	if override.Bridge.WarmStreamFPS != 0 {
+		base.Bridge.WarmStreamFPS = override.Bridge.WarmStreamFPS
+	}
+	if override.Bridge.BurstStreamFPS != 0 {
+		base.Bridge.BurstStreamFPS = override.Bridge.BurstStreamFPS
+	}
+	if override.Bridge.ActionBatch {
+		base.Bridge.ActionBatch = true
+	}
+	if override.Bridge.ScreenDiffEnabled {
+		base.Bridge.ScreenDiffEnabled = true
+	}
+	if override.Bridge.AXMaxDepth != 0 {
+		base.Bridge.AXMaxDepth = override.Bridge.AXMaxDepth
+	}
+	if override.Bridge.AXMaxNodes != 0 {
+		base.Bridge.AXMaxNodes = override.Bridge.AXMaxNodes
+	}
+	if override.Bridge.SpawnTimeoutMS != 0 {
+		base.Bridge.SpawnTimeoutMS = override.Bridge.SpawnTimeoutMS
+	}
+
 	// Permissions: merge non-empty fields.
 	if override.Permissions.Mode != "" {
 		base.Permissions.Mode = override.Permissions.Mode
@@ -575,6 +631,28 @@ func (c *Config) Validate() error {
 	}
 	if !validEffort[c.Effort] {
 		errs = append(errs, fmt.Sprintf("effort %q is not valid (allowed: low, medium, high)", c.Effort))
+	}
+
+	validBridgeModes := map[string]bool{
+		"":      true,
+		"auto":  true,
+		"swift": true,
+		"shell": true,
+	}
+	if !validBridgeModes[c.Bridge.Mode] {
+		errs = append(errs, fmt.Sprintf("bridge.mode %q is not valid (allowed: auto, swift, shell)", c.Bridge.Mode))
+	}
+	if c.Bridge.WarmStreamFPS < 0 || c.Bridge.WarmStreamFPS > 60 {
+		errs = append(errs, fmt.Sprintf("bridge.warm_stream_fps %d out of range (0-60)", c.Bridge.WarmStreamFPS))
+	}
+	if c.Bridge.BurstStreamFPS < 0 || c.Bridge.BurstStreamFPS > 60 {
+		errs = append(errs, fmt.Sprintf("bridge.burst_stream_fps %d out of range (0-60)", c.Bridge.BurstStreamFPS))
+	}
+	if c.Bridge.AXMaxNodes < 0 || c.Bridge.AXMaxNodes > 10000 {
+		errs = append(errs, fmt.Sprintf("bridge.ax_max_nodes %d out of range (0-10000)", c.Bridge.AXMaxNodes))
+	}
+	if c.Bridge.SpawnTimeoutMS < 0 {
+		errs = append(errs, fmt.Sprintf("bridge.spawn_timeout_ms %d must be > 0", c.Bridge.SpawnTimeoutMS))
 	}
 
 	if len(errs) > 0 {

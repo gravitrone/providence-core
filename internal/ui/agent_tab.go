@@ -189,6 +189,7 @@ var slashCommands = []slashCommand{
 	{"/agents", "List built-in agent types"},
 	{"/permissions", "Manage permission rules (allow/deny/ask/reset)"},
 	{"/hooks", "Show hook configuration"},
+	{"/bridge", "Manage native macOS bridge (stats|setup|info)"},
 	{"/diff", "Show files changed this session (--git for git diff)"},
 	{"/plan", "Toggle plan mode (read-only tools)"},
 	{"/branch", "Fork conversation into a new session"},
@@ -235,6 +236,7 @@ type AgentTab struct {
 	messages      []ChatMessage
 	engine        engine.Engine
 	engineType    engine.EngineType
+	bridge        bridgeProvider
 	streaming     bool
 	streamBuffer  string
 	pendingPerm   *engine.PermissionRequestEvent
@@ -5401,6 +5403,101 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			}
 		}
 		at.addSystemMessage(hooksOut.String())
+		at.refreshViewport()
+		return true, nil
+
+	case "/bridge":
+		subCmd := strings.TrimSpace(args)
+		if subCmd == "" || subCmd == "stats" {
+			if at.bridge == nil {
+				at.addSystemMessage("Bridge not available (macOS only).")
+				at.refreshViewport()
+				return true, nil
+			}
+			snap := at.bridge.Metrics().Snapshot()
+			if len(snap) == 0 {
+				at.addSystemMessage("Bridge stats: no ops recorded yet.")
+				at.refreshViewport()
+				return true, nil
+			}
+			var sb strings.Builder
+			sb.WriteString("Bridge metrics:\n\n")
+			sb.WriteString(fmt.Sprintf("  %-20s  %8s  %8s  %8s  %8s  %6s\n", "OP", "P50", "P95", "P99", "MAX", "ERRS"))
+			sb.WriteString(fmt.Sprintf("  %-20s  %8s  %8s  %8s  %8s  %6s\n",
+				strings.Repeat("-", 20), strings.Repeat("-", 8), strings.Repeat("-", 8),
+				strings.Repeat("-", 8), strings.Repeat("-", 8), strings.Repeat("-", 6),
+			))
+			ops := make([]string, 0, len(snap))
+			for op := range snap {
+				ops = append(ops, op)
+			}
+			sort.Strings(ops)
+			for _, op := range ops {
+				s := snap[op]
+				sb.WriteString(fmt.Sprintf("  %-20s  %8s  %8s  %8s  %8s  %6d\n",
+					op,
+					s.P50.Round(time.Millisecond),
+					s.P95.Round(time.Millisecond),
+					s.P99.Round(time.Millisecond),
+					s.Max.Round(time.Millisecond),
+					s.ErrorCount,
+				))
+			}
+			at.addSystemMessage(sb.String())
+			at.refreshViewport()
+			return true, nil
+		}
+		if subCmd == "setup" {
+			if at.bridge == nil {
+				at.addSystemMessage("Bridge not available (macOS only).")
+				at.refreshViewport()
+				return true, nil
+			}
+			statuses, err := at.bridge.Preflight(context.Background())
+			if err != nil {
+				at.addSystemMessage(fmt.Sprintf("Bridge preflight failed: %v", err))
+				at.refreshViewport()
+				return true, nil
+			}
+			var sb strings.Builder
+			sb.WriteString("Bridge permission status:\n\n")
+			for _, s := range statuses {
+				status := "granted"
+				if !s.Granted {
+					status = "NOT GRANTED"
+				}
+				sb.WriteString(fmt.Sprintf("  %-20s  %s\n", s.Permission.String(), status))
+				if !s.Granted {
+					if s.Hint != "" {
+						sb.WriteString(fmt.Sprintf("    Hint: %s\n", s.Hint))
+					}
+					if s.SettingsURL != "" {
+						sb.WriteString(fmt.Sprintf("    Settings: %s\n", s.SettingsURL))
+					}
+				}
+			}
+			at.addSystemMessage(sb.String())
+			at.refreshViewport()
+			return true, nil
+		}
+		if subCmd == "info" {
+			cfg := at.cfg.Bridge
+			var sb strings.Builder
+			sb.WriteString("Bridge config:\n\n")
+			sb.WriteString(fmt.Sprintf("  mode:               %s\n", cfg.Mode))
+			sb.WriteString(fmt.Sprintf("  swift_path:         %s\n", cfg.SwiftPath))
+			sb.WriteString(fmt.Sprintf("  warm_stream_fps:    %d\n", cfg.WarmStreamFPS))
+			sb.WriteString(fmt.Sprintf("  burst_stream_fps:   %d\n", cfg.BurstStreamFPS))
+			sb.WriteString(fmt.Sprintf("  action_batch:       %v\n", cfg.ActionBatch))
+			sb.WriteString(fmt.Sprintf("  screen_diff:        %v\n", cfg.ScreenDiffEnabled))
+			sb.WriteString(fmt.Sprintf("  ax_max_depth:       %d\n", cfg.AXMaxDepth))
+			sb.WriteString(fmt.Sprintf("  ax_max_nodes:       %d\n", cfg.AXMaxNodes))
+			sb.WriteString(fmt.Sprintf("  spawn_timeout_ms:   %d\n", cfg.SpawnTimeoutMS))
+			at.addSystemMessage(sb.String())
+			at.refreshViewport()
+			return true, nil
+		}
+		at.addSystemMessage("Usage: /bridge [stats|setup|info]")
 		at.refreshViewport()
 		return true, nil
 

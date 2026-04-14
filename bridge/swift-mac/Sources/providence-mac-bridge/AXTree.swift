@@ -166,13 +166,17 @@ func axActionNames(_ el: AXUIElement) -> [String] {
 // MARK: - AX walker
 
 enum AXTreeWalker {
+    /// Runtime-configurable defaults, set via the `configure` RPC.
+    static var configuredMaxDepth: Int = 12
+    static var configuredMaxNodes: Int = 2000
+
     /// Walk the AX tree for the target app. Respects depth / node budget /
     /// visibility filters. Returns a serialized tree plus a `truncated` flag.
     static func walk(_ params: AXTreeParams) throws -> AXTreeResult {
         let targetPID = try resolveTargetPID(app: params.app, pid: params.pid)
         let appName = NSRunningApplication(processIdentifier: pid_t(targetPID))?.localizedName
-        let maxDepth = max(0, params.max_depth ?? 12)
-        let maxNodes = max(1, params.max_nodes ?? 2000)
+        let maxDepth = max(0, params.max_depth ?? configuredMaxDepth)
+        let maxNodes = max(1, params.max_nodes ?? configuredMaxNodes)
         let includeInvisible = params.include_invisible ?? false
         let rootEl = AXUIElementCreateApplication(pid_t(targetPID))
 

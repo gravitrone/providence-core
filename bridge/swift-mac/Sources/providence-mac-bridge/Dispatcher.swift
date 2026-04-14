@@ -16,7 +16,7 @@ final class Dispatcher {
     private let captureEngine: Any?  // typed as Any because CaptureEngine is gated on macOS 12.3+.
 
     static let protocolVersion = "1"
-    static let bridgeVersion = "0.1.0-phase4"
+    static let bridgeVersion = "0.1.0-phase5"
 
     private let batchQueue = DispatchQueue(label: "bridge.batch", qos: .userInitiated)
 
@@ -41,6 +41,11 @@ final class Dispatcher {
         case "preflight":
             metaQueue.async { [weak self] in
                 self?.handlePreflight(req)
+                self?.ioLoop?.workDidFinish()
+            }
+        case "configure":
+            metaQueue.async { [weak self] in
+                self?.handleConfigure(req)
                 self?.ioLoop?.workDidFinish()
             }
         case "shutdown":
@@ -223,6 +228,35 @@ final class Dispatcher {
             ok: true,
             result: AnyCodable(["permissions": AnyCodable(encoded)])
         ))
+    }
+
+    private func handleConfigure(_ req: Request) {
+        do {
+            let p: ConfigureParams = try Dispatcher.decode(req.params)
+            if let depth = p.ax_max_depth {
+                AXTreeWalker.configuredMaxDepth = max(1, depth)
+            }
+            if let nodes = p.ax_max_nodes {
+                AXTreeWalker.configuredMaxNodes = max(1, nodes)
+            }
+            // CaptureEngine FPS configuration is advisory; the stream is
+            // re-started on next capture if FPS changes.
+            if let fps = p.warm_stream_fps {
+                BridgeConfig.warmStreamFPS = max(1, min(60, fps))
+            }
+            if let fps = p.burst_stream_fps {
+                BridgeConfig.burstStreamFPS = max(1, min(60, fps))
+            }
+            ioLoop?.emitResponse(Response(
+                id: req.id, ok: true, result: AnyCodable(["ok": AnyCodable(true)])
+            ))
+        } catch {
+            respondError(
+                id: req.id,
+                code: ErrorCode.badRequest,
+                message: "configure: decode failed: \(error.localizedDescription)"
+            )
+        }
     }
 
     private func handleShutdown(_ req: Request) {

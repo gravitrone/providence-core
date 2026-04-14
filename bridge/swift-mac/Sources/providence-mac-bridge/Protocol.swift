@@ -97,6 +97,23 @@ enum ErrorCode {
     static let `internal` = "internal"
 }
 
+// MARK: - Configure params
+
+struct ConfigureParams: Codable {
+    let warm_stream_fps: Int?
+    let burst_stream_fps: Int?
+    let ax_max_depth: Int?
+    let ax_max_nodes: Int?
+}
+
+// MARK: - BridgeConfig (mutable runtime config)
+
+/// Mutable runtime configuration for the bridge, set via the `configure` RPC.
+enum BridgeConfig {
+    static var warmStreamFPS: Int = 2
+    static var burstStreamFPS: Int = 30
+}
+
 // MARK: - AnyCodable
 
 /// Type-erased JSON value wrapper.

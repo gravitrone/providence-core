@@ -187,6 +187,10 @@ func runTUI(engineType string, cfg config.Config, resumeQuery string, continueSe
 			cfg.Overlay.TTSEnabled,
 			cfg.Overlay.Position,
 			cfg.Overlay.ExcludeApps,
+			cfg.Overlay.UIMode,
+			cfg.Overlay.ChatHistoryLimit,
+			cfg.Overlay.ChatAlpha,
+			cfg.Overlay.ChatPosition,
 		)
 
 		overlayMgr.SetCallbacks(

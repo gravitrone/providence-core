@@ -52,6 +52,10 @@ type Welcome struct {
 	TTSEnabled   bool     `json:"tts_enabled,omitempty"`
 	Position     string   `json:"position,omitempty"`
 	ExcludedApps []string `json:"excluded_apps,omitempty"`
+
+	// Phase A (chat overlay): persistent chat window rendering config.
+	UIMode           string `json:"ui_mode,omitempty"`
+	ChatHistoryLimit int    `json:"chat_history_limit,omitempty"`
 }
 
 // Hello is sent Overlay -> TUI as the first message on connect to identify

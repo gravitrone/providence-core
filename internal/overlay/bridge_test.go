@@ -64,7 +64,7 @@ func TestBridgeContextUpdateStoresPendingReminder(t *testing.T) {
 
 	reminder := bridge.PendingSystemReminder()
 	assert.NotEmpty(t, reminder)
-	assert.Contains(t, reminder, "<system-reminder>")
+	assert.Contains(t, reminder, `<system-reminder origin="overlay">`)
 	assert.Contains(t, reminder, "</system-reminder>")
 	assert.Contains(t, reminder, "com.microsoft.VSCode")
 	assert.Contains(t, reminder, "coding")
@@ -258,7 +258,7 @@ func TestFormatContextReminder(t *testing.T) {
 				ChangeKind:  "pattern",
 			},
 			wantContain: []string{
-				"<system-reminder>",
+				`<system-reminder origin="overlay">`,
 				"</system-reminder>",
 				"14:32:10",
 				"VS Code",  // ActiveApp
@@ -276,7 +276,7 @@ func TestFormatContextReminder(t *testing.T) {
 				ChangeKind: "heartbeat",
 			},
 			wantContain: []string{
-				"<system-reminder>",
+				`<system-reminder origin="overlay">`,
 				"Finder",
 				"idle",
 				"(silent)",
@@ -306,5 +306,47 @@ func TestFormatContextReminder(t *testing.T) {
 // TestBridgeSatisfiesInjector verifies Bridge implements the Injector interface.
 func TestBridgeSatisfiesInjector(t *testing.T) {
 	var _ Injector = (*Bridge)(nil)
+}
+
+// TestFormatContextReminderOriginAttribute verifies the origin="overlay" attribute
+// is present in every formatted reminder for loopback suppression.
+func TestFormatContextReminderOriginAttribute(t *testing.T) {
+	u := ContextUpdate{
+		ActiveApp:  "Safari",
+		Activity:   "browsing",
+		ChangeKind: "heartbeat",
+	}
+	out := formatContextReminder(u)
+	assert.Contains(t, out, `origin="overlay"`, "reminder must carry origin attribute")
+}
+
+// TestFormatContextReminderOCRAndDeltaFields verifies OCRText and ChangeKind
+// are included in the output when set.
+func TestFormatContextReminderOCRAndDeltaFields(t *testing.T) {
+	u := ContextUpdate{
+		ActiveApp:  "Notes",
+		Activity:   "writing",
+		OCRText:    "buy milk",
+		ChangeKind: "user-invoked",
+	}
+	out := formatContextReminder(u)
+	assert.Contains(t, out, "buy milk", "OCR text must appear in reminder")
+	assert.Contains(t, out, "user-invoked", "ChangeKind must appear as Delta line")
+}
+
+// TestContextUpdateOriginField verifies the Origin field is present in
+// ContextUpdate and round-trips through JSON.
+func TestContextUpdateOriginField(t *testing.T) {
+	u := ContextUpdate{
+		ActiveApp: "Terminal",
+		Origin:    "overlay",
+	}
+	b, err := json.Marshal(u)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"origin":"overlay"`)
+
+	var u2 ContextUpdate
+	require.NoError(t, json.Unmarshal(b, &u2))
+	assert.Equal(t, "overlay", u2.Origin)
 }
 

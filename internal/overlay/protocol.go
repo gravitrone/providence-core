@@ -69,6 +69,7 @@ type ContextUpdate struct {
 	Transcript  string    `json:"transcript,omitempty"`
 	PixelHash   string    `json:"pixel_hash,omitempty"`
 	ChangeKind  string    `json:"change_kind"` // "pattern"|"heartbeat"|"user-invoked"|"error"
+	Origin      string    `json:"origin,omitempty"` // e.g. "overlay" - for loopback suppression
 }
 
 // UserQuery is sent Overlay -> TUI when the user initiates a message through

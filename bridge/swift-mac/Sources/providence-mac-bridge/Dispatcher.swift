@@ -1,4 +1,5 @@
 import Foundation
+import ApplicationServices
 
 /// Routes RPC method names to handlers. Per-capability serial queues so that,
 /// for example, two screenshot requests serialize but a screenshot and an
@@ -15,7 +16,7 @@ final class Dispatcher {
     private let captureEngine: Any?  // typed as Any because CaptureEngine is gated on macOS 12.3+.
 
     static let protocolVersion = "1"
-    static let bridgeVersion = "0.1.0-phase1"
+    static let bridgeVersion = "0.1.0-phase3"
 
     init() {
         if #available(macOS 12.3, *) {
@@ -99,6 +100,37 @@ final class Dispatcher {
             handleOnInput(req) { params -> AnyCodable in
                 let p: KeyComboParams = try Dispatcher.decode(params)
                 try Input.keyCombo(p)
+                return AnyCodable(["ok": AnyCodable(true)])
+            }
+        case "ax_tree":
+            handleOnAX(req) { params -> AnyCodable in
+                let p: AXTreeParams = try Dispatcher.decode(params)
+                let result = try AXTreeWalker.walk(p)
+                return try Dispatcher.encodeToAnyCodable(result)
+            }
+        case "ax_find":
+            handleOnAX(req) { params -> AnyCodable in
+                let q: AXQueryParams = try Dispatcher.decode(params)
+                let result = try AXQuerier.find(q)
+                return try Dispatcher.encodeToAnyCodable(result)
+            }
+        case "ax_perform":
+            handleOnAX(req) { params -> AnyCodable in
+                let p: AXPerformParams = try Dispatcher.decode(params)
+                guard let el = AXCache.shared.lookup(p.element_id) else {
+                    throw BridgeError(
+                        code: ErrorCode.elementNotFound,
+                        message: "no element: \(p.element_id) (possibly stale after cache invalidation)"
+                    )
+                }
+                AXUIElementSetMessagingTimeout(el, 1.5)
+                let err = AXUIElementPerformAction(el, p.action as CFString)
+                if err != .success {
+                    throw BridgeError(
+                        code: ErrorCode.captureFailed,
+                        message: "AXPerform failed: \(err.rawValue)"
+                    )
+                }
                 return AnyCodable(["ok": AnyCodable(true)])
             }
         default:
@@ -281,6 +313,37 @@ final class Dispatcher {
         }
     }
 
+    /// Run `body` on the AX serial queue. Same error-mapping contract as
+    /// `handleOnInput`, but routes BridgeError codes straight through so
+    /// element_not_found / bad_request stay distinct.
+    private func handleOnAX(_ req: Request,
+                            body: @escaping (AnyCodable?) throws -> AnyCodable) {
+        axQueue.async { [weak self] in
+            guard let self = self else { return }
+            defer { self.ioLoop?.workDidFinish() }
+            do {
+                let result = try body(req.params)
+                self.ioLoop?.emitResponse(Response(
+                    id: req.id, ok: true, result: result
+                ))
+            } catch let err as BridgeError {
+                self.respondError(
+                    id: req.id,
+                    code: err.code,
+                    message: err.message,
+                    url: err.url,
+                    remediable: err.remediable
+                )
+            } catch {
+                self.respondError(
+                    id: req.id,
+                    code: ErrorCode.badRequest,
+                    message: "decode failed: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
     /// Decode a typed params object out of the request's AnyCodable params.
     /// Re-encodes to JSON then decodes to T; good enough for the small
     /// param shapes we use and keeps the call sites one-liner clean.
@@ -289,6 +352,17 @@ final class Dispatcher {
         let dec = JSONDecoder()
         let data = try enc.encode(params ?? AnyCodable([String: AnyCodable]()))
         return try dec.decode(T.self, from: data)
+    }
+
+    /// Round-trip a Codable value through JSON to produce an AnyCodable
+    /// wrapper. Used by handlers that return typed structs (AX tree / find
+    /// results) since AnyCodable can't encode arbitrary Codable types
+    /// directly - it handles JSON-primitive shapes only.
+    static func encodeToAnyCodable<T: Encodable>(_ value: T) throws -> AnyCodable {
+        let enc = JSONEncoder()
+        let data = try enc.encode(value)
+        let dec = JSONDecoder()
+        return try dec.decode(AnyCodable.self, from: data)
     }
 
     /// Parse a CGRect from `params.region` with shape:

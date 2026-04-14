@@ -40,6 +40,18 @@ func (s *swiftInputStub) KeyCombo(_ context.Context, combo KeyCombo) error {
 	return s.keyErr
 }
 
+func (s *swiftInputStub) AXTree(_ context.Context, _ AXTreeParams) (AXTreeResult, error) {
+	return AXTreeResult{}, nil
+}
+
+func (s *swiftInputStub) AXFind(_ context.Context, _ AXQuery) (AXFindResult, error) {
+	return AXFindResult{}, nil
+}
+
+func (s *swiftInputStub) AXPerform(_ context.Context, _, _ string) error {
+	return nil
+}
+
 func (s *swiftInputStub) Close(context.Context) error {
 	return nil
 }

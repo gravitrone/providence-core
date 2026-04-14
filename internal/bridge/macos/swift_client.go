@@ -64,6 +64,38 @@ func (c *swiftClient) TypeText(ctx context.Context, text string) error {
 	return c.callAction(ctx, "type_text", typeTextParams{Text: text})
 }
 
+// AXTree requests the Accessibility tree for the given app/PID.
+func (c *swiftClient) AXTree(ctx context.Context, p AXTreeParams) (AXTreeResult, error) {
+	raw, err := c.call(ctx, "ax_tree", p)
+	if err != nil {
+		return AXTreeResult{}, err
+	}
+	var result AXTreeResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return AXTreeResult{}, fmt.Errorf("ax_tree: decode result: %w", err)
+	}
+	return result, nil
+}
+
+// AXFind searches for elements matching the given query.
+func (c *swiftClient) AXFind(ctx context.Context, q AXQuery) (AXFindResult, error) {
+	raw, err := c.call(ctx, "ax_find", q)
+	if err != nil {
+		return AXFindResult{}, err
+	}
+	var result AXFindResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return AXFindResult{}, fmt.Errorf("ax_find: decode result: %w", err)
+	}
+	return result, nil
+}
+
+// AXPerform triggers an accessibility action on an element.
+func (c *swiftClient) AXPerform(ctx context.Context, elementID, action string) error {
+	params := AXPerformParams{ElementID: elementID, Action: action}
+	return c.callAction(ctx, "ax_perform", params)
+}
+
 func (c *swiftClient) KeyCombo(ctx context.Context, combo KeyCombo) error {
 	return c.callAction(ctx, "key_combo", keyComboParams{
 		Key:         combo.Key,

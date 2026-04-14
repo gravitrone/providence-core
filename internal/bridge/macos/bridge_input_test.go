@@ -52,6 +52,14 @@ func (s *swiftInputStub) AXPerform(_ context.Context, _, _ string) error {
 	return nil
 }
 
+func (s *swiftInputStub) ScreenDiff(_ context.Context, _ ScreenDiffParams) (ScreenDiffResult, error) {
+	return ScreenDiffResult{}, nil
+}
+
+func (s *swiftInputStub) ActionBatch(_ context.Context, _ ActionBatchParams) (ActionBatchResult, error) {
+	return ActionBatchResult{}, nil
+}
+
 func (s *swiftInputStub) Close(context.Context) error {
 	return nil
 }

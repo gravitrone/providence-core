@@ -110,6 +110,68 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         return try writeJPEG(ciImage: ci, region: region, startNs: startNs)
     }
 
+    /// Capture a single CGImage (for diff / hash pipelines that need raw
+    /// pixels instead of a JPEG on disk). Uses the same permission check +
+    /// one-shot / warm-stream path selection as `captureOnce`.
+    func captureCGImage() async throws -> CGImage {
+        if !CGPreflightScreenCaptureAccess() {
+            throw BridgeError(
+                code: ErrorCode.permissionDenied,
+                message: "Screen Recording permission not granted for this process.",
+                url: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+                remediable: true
+            )
+        }
+
+        if #available(macOS 14.0, *) {
+            if let cg = try? await captureOneShotCGImage() {
+                return cg
+            }
+        }
+
+        try await ensureWarm()
+        var sample: CMSampleBuffer?
+        var retries = 0
+        while sample == nil && retries < 20 {
+            sample = self.readLatest()
+            if sample != nil { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+            retries += 1
+        }
+        guard let sb = sample, let px = CMSampleBufferGetImageBuffer(sb) else {
+            throw BridgeError(code: ErrorCode.captureFailed,
+                              message: "no frames yet from warm stream")
+        }
+        let ci = CIImage(cvPixelBuffer: px)
+        let colorspace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        guard let cg = ciContext.createCGImage(ci, from: ci.extent,
+                                               format: .RGBA8, colorSpace: colorspace) else {
+            throw BridgeError(code: ErrorCode.captureFailed, message: "CIContext createCGImage failed")
+        }
+        return cg
+    }
+
+    @available(macOS 14.0, *)
+    private func captureOneShotCGImage() async throws -> CGImage {
+        let content = try await SCShareableContent.excludingDesktopWindows(false,
+                                                                           onScreenWindowsOnly: true)
+        guard let display = content.displays.first else {
+            throw BridgeError(code: ErrorCode.captureFailed, message: "no displays available")
+        }
+        let filter = SCContentFilter(
+            display: display,
+            excludingApplications: selfApps(content: content),
+            exceptingWindows: []
+        )
+        let cfg = SCStreamConfiguration()
+        cfg.width = display.width * Int(NSScreen.main?.backingScaleFactor ?? 1)
+        cfg.height = display.height * Int(NSScreen.main?.backingScaleFactor ?? 1)
+        cfg.pixelFormat = kCVPixelFormatType_32BGRA
+        cfg.showsCursor = true
+        return try await SCScreenshotManager.captureImage(contentFilter: filter,
+                                                          configuration: cfg)
+    }
+
     private func readLatest() -> CMSampleBuffer? {
         var out: CMSampleBuffer?
         bufferQ.sync { out = self.latest }

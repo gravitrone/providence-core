@@ -40,6 +40,14 @@ func (s *stubSwiftAX) AXPerform(_ context.Context, _, _ string) error {
 	return s.axPerformErr
 }
 
+func (s *stubSwiftAX) ScreenDiff(_ context.Context, _ ScreenDiffParams) (ScreenDiffResult, error) {
+	return ScreenDiffResult{}, nil
+}
+
+func (s *stubSwiftAX) ActionBatch(_ context.Context, _ ActionBatchParams) (ActionBatchResult, error) {
+	return ActionBatchResult{}, nil
+}
+
 func (s *stubSwiftAX) Close(_ context.Context) error { return nil }
 
 // --- AXTree ---

@@ -90,6 +90,32 @@ func (c *swiftClient) AXFind(ctx context.Context, q AXQuery) (AXFindResult, erro
 	return result, nil
 }
 
+// ScreenDiff requests a perceptual hash diff against the last captured frame.
+func (c *swiftClient) ScreenDiff(ctx context.Context, p ScreenDiffParams) (ScreenDiffResult, error) {
+	raw, err := c.call(ctx, "screen_diff", p)
+	if err != nil {
+		return ScreenDiffResult{}, err
+	}
+	var result ScreenDiffResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return ScreenDiffResult{}, fmt.Errorf("screen_diff: decode result: %w", err)
+	}
+	return result, nil
+}
+
+// ActionBatch executes multiple actions server-side in a single RPC.
+func (c *swiftClient) ActionBatch(ctx context.Context, p ActionBatchParams) (ActionBatchResult, error) {
+	raw, err := c.call(ctx, "action_batch", p)
+	if err != nil {
+		return ActionBatchResult{}, err
+	}
+	var result ActionBatchResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return ActionBatchResult{}, fmt.Errorf("action_batch: decode result: %w", err)
+	}
+	return result, nil
+}
+
 // AXPerform triggers an accessibility action on an element.
 func (c *swiftClient) AXPerform(ctx context.Context, elementID, action string) error {
 	params := AXPerformParams{ElementID: elementID, Action: action}

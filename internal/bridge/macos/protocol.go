@@ -151,3 +151,63 @@ type AXPerformParams struct {
 	ElementID string `json:"element_id"`
 	Action    string `json:"action"`
 }
+
+// --- Screen Diff Types ---
+
+// ScreenDiffParams are the parameters for a screen_diff request.
+type ScreenDiffParams struct {
+	SinceTSNS    int64   `json:"since_ts_ns,omitempty"`   // 0 = diff against last captured frame
+	MaxRegions   int     `json:"max_regions,omitempty"`   // default 8
+	MinMagnitude float64 `json:"min_magnitude,omitempty"` // default 0.02 (2% of region)
+}
+
+// ScreenDiffRegion describes a changed region of the screen.
+type ScreenDiffRegion struct {
+	X         int     `json:"x"`
+	Y         int     `json:"y"`
+	W         int     `json:"w"`
+	H         int     `json:"h"`
+	Magnitude float64 `json:"magnitude"`
+}
+
+// ScreenDiffResult is the result of a screen_diff request.
+type ScreenDiffResult struct {
+	Changed   bool               `json:"changed"`
+	Hamming   int                `json:"hamming"`
+	Regions   []ScreenDiffRegion `json:"regions,omitempty"`
+	FullHash  string             `json:"full_hash"`
+	CaptureNS int64              `json:"capture_ns"`
+}
+
+// --- Action Batch Types ---
+
+// BatchAction is a single action in an action_batch request.
+type BatchAction struct {
+	Type   string         `json:"type"`
+	Params map[string]any `json:"params,omitempty"` // action-specific payload
+}
+
+// BatchActionResult is the result of a single action in an action_batch.
+type BatchActionResult struct {
+	Index      int            `json:"index"`
+	Type       string         `json:"type"`
+	OK         bool           `json:"ok"`
+	Result     map[string]any `json:"result,omitempty"`
+	Error      string         `json:"error,omitempty"`
+	DurationMS int            `json:"duration_ms"`
+}
+
+// ActionBatchParams are the parameters for an action_batch request.
+type ActionBatchParams struct {
+	Actions         []BatchAction `json:"actions"`
+	StopOnError     bool          `json:"stop_on_error,omitempty"`
+	ScreenshotAfter bool          `json:"screenshot_after,omitempty"`
+}
+
+// ActionBatchResult is the result of an action_batch request.
+type ActionBatchResult struct {
+	Completed       int                 `json:"completed"`
+	FailedAt        *int                `json:"failed_at,omitempty"`
+	Actions         []BatchActionResult `json:"actions"`
+	FinalScreenshot string              `json:"final_screenshot,omitempty"` // path
+}

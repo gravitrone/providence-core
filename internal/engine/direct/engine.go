@@ -236,6 +236,8 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 			tools.NewDesktopFindElementTool(bridge),
 			tools.NewDesktopClickElementTool(bridge),
 			tools.NewDesktopReadScreenTool(bridge),
+			tools.NewScreenDiffTool(bridge),
+			tools.NewDesktopActionBatchTool(bridge),
 		)
 	}
 

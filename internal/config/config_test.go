@@ -501,6 +501,33 @@ func TestOverlayConfigDefaults(t *testing.T) {
 	assert.Equal(t, 50, d.ChatHistoryLimit)
 	assert.InDelta(t, 0.92, d.ChatAlpha, 0.0001)
 	assert.Equal(t, "right", d.ChatPosition)
+	assert.Equal(t, 50000, d.DailyTokenBudget, "phase G: default daily budget 50000")
+}
+
+func TestOverlayConfigDailyBudgetValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		budget  int
+		wantErr bool
+	}{
+		{"zero disables gating", 0, false},
+		{"positive default", 50000, false},
+		{"small positive", 100, false},
+		{"negative rejected", -1, true},
+		{"large negative rejected", -99999, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{Overlay: OverlayConfig{DailyTokenBudget: tc.budget}}
+			err := cfg.Validate()
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "daily_token_budget")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestOverlayConfigChatTOMLRoundtrip(t *testing.T) {

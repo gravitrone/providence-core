@@ -562,3 +562,73 @@ func TestContextUpdateOriginField(t *testing.T) {
 	assert.Equal(t, "overlay", u2.Origin)
 }
 
+// --- Phase G: daily budget breaker ---
+
+func TestBridgeSkipsInjectionOnBudgetExceeded(t *testing.T) {
+	eng := newFakeEngine()
+	bridge := NewBridgeWithMode(eng, ember.New(), nil, nil, nil, "synthetic_user")
+	bridge.SetDailyBudget(50)
+
+	// Pre-spend the day's budget directly so BudgetExceeded() returns true
+	// before OnContextUpdate even runs.
+	bridge.Tracker().Record(TokenEntry{
+		Time:   time.Now(),
+		Tokens: 60,
+		Reason: "pretest",
+		App:    "Test",
+		Mode:   "synthetic_user",
+	})
+	require.True(t, bridge.Tracker().BudgetExceeded())
+
+	err := bridge.OnContextUpdate(nil, ContextUpdate{
+		Timestamp:  time.Now(),
+		ActiveApp:  "com.microsoft.VSCode",
+		Activity:   "coding",
+		AXSummary:  "func Send",
+		ChangeKind: "pattern",
+	})
+	require.NoError(t, err)
+
+	// Synthetic mode: engine.Send must NOT have been called.
+	assert.Equal(t, 0, eng.sendCallCount(), "budget exceeded -> no synthetic send")
+	// And no pending reminder got stored as the fallback path.
+	assert.Empty(t, bridge.PendingSystemReminder(), "budget exceeded -> no pending reminder")
+}
+
+func TestBridgeAllowsInjectionWithinBudget(t *testing.T) {
+	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
+	bridge.SetDailyBudget(100000) // effectively unlimited for this test
+
+	err := bridge.OnContextUpdate(nil, ContextUpdate{
+		Timestamp:  time.Now(),
+		ActiveApp:  "Safari",
+		Activity:   "browsing",
+		ChangeKind: "pattern",
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, bridge.PendingSystemReminder(), "under budget -> reminder stored")
+}
+
+func TestBridgeBudgetZeroDisablesGating(t *testing.T) {
+	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
+	// Default NewBridge leaves DailyTokenBudget=0 (unlimited).
+
+	// Load a massive token count; should still allow injections.
+	bridge.Tracker().Record(TokenEntry{
+		Time:   time.Now(),
+		Tokens: 10_000_000,
+		Reason: "huge",
+		App:    "X",
+		Mode:   "system_reminder",
+	})
+	assert.False(t, bridge.Tracker().BudgetExceeded())
+
+	err := bridge.OnContextUpdate(nil, ContextUpdate{
+		Timestamp:  time.Now(),
+		ActiveApp:  "Safari",
+		ChangeKind: "heartbeat",
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, bridge.PendingSystemReminder())
+}
+

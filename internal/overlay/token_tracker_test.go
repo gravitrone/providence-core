@@ -87,6 +87,77 @@ func TestTokenTrackerNilSafe(t *testing.T) {
 	})
 }
 
+func TestDailyBudgetExceeded(t *testing.T) {
+	tr := NewTokenTrackerWithBudget(100)
+	assert.Equal(t, 100, tr.DailyBudget())
+	assert.False(t, tr.BudgetExceeded(), "fresh tracker should not be exceeded")
+
+	tr.Record(TokenEntry{Time: time.Now(), Tokens: 40, Reason: "r", App: "A", Mode: "system_reminder"})
+	tr.Record(TokenEntry{Time: time.Now(), Tokens: 40, Reason: "r", App: "A", Mode: "system_reminder"})
+	assert.False(t, tr.BudgetExceeded(), "80/100 tokens: still under budget")
+	assert.Equal(t, 80, tr.DailyTotal())
+
+	tr.Record(TokenEntry{Time: time.Now(), Tokens: 40, Reason: "r", App: "A", Mode: "system_reminder"})
+	assert.True(t, tr.BudgetExceeded(), "120/100 tokens: should trip")
+	assert.Equal(t, 120, tr.DailyTotal())
+}
+
+func TestDailyBudgetZeroMeansUnlimited(t *testing.T) {
+	tr := NewTokenTrackerWithBudget(0)
+	for i := 0; i < 100; i++ {
+		tr.Record(TokenEntry{Time: time.Now(), Tokens: 1000, Reason: "r", App: "A", Mode: "system_reminder"})
+	}
+	assert.False(t, tr.BudgetExceeded(), "budget=0 must be unlimited")
+	assert.Equal(t, 100000, tr.DailyTotal())
+}
+
+func TestDailyBudgetResetAcrossMidnight(t *testing.T) {
+	tr := NewTokenTrackerWithBudget(100)
+	// Simulate a tracker that accumulated tokens yesterday: poke dayStart back
+	// in time and set dailyCount over budget directly. This avoids wall-clock
+	// mocking while exercising the rollover branch in rollIfNewDayLocked.
+	yesterday := time.Now().Add(-26 * time.Hour)
+	tr.mu.Lock()
+	tr.dayStart = startOfDay(yesterday)
+	tr.dailyCount = 200
+	tr.mu.Unlock()
+	// DailyTotal/BudgetExceeded should roll the counter because now() is on
+	// a later day than dayStart.
+	assert.Equal(t, 0, tr.DailyTotal(), "stale yesterday total must roll to 0")
+	assert.False(t, tr.BudgetExceeded())
+
+	// Re-stage yesterday's state so the Record-path rollover is exercised too.
+	tr.mu.Lock()
+	tr.dayStart = startOfDay(yesterday)
+	tr.dailyCount = 200
+	tr.mu.Unlock()
+
+	// Recording a new entry "today" should roll the counter.
+	tr.Record(TokenEntry{Time: time.Now(), Tokens: 10, Reason: "r", App: "A", Mode: "system_reminder"})
+	assert.Equal(t, 10, tr.DailyTotal(), "daily counter should have rolled at midnight")
+	assert.False(t, tr.BudgetExceeded(), "after rollover, 10/100 is under budget")
+}
+
+func TestDailyBudgetNilSafe(t *testing.T) {
+	var tr *TokenTracker
+	assert.NotPanics(t, func() {
+		_ = tr.BudgetExceeded()
+		_ = tr.DailyTotal()
+		_ = tr.DailyBudget()
+		tr.SetDailyBudget(100)
+	})
+	assert.False(t, tr.BudgetExceeded())
+}
+
+func TestDailyBudgetSetRuntime(t *testing.T) {
+	tr := NewTokenTracker()
+	assert.Equal(t, 0, tr.DailyBudget())
+	tr.SetDailyBudget(500)
+	assert.Equal(t, 500, tr.DailyBudget())
+	tr.SetDailyBudget(-10)
+	assert.Equal(t, 0, tr.DailyBudget(), "negative clamps to 0")
+}
+
 func TestEstimateTokens(t *testing.T) {
 	assert.Equal(t, 1, EstimateTokens(""))
 	assert.Equal(t, 1, EstimateTokens("abc"))

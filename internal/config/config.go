@@ -48,6 +48,11 @@ type OverlayConfig struct {
 	ChatHistoryLimit int     `toml:"chat_history_limit" json:"chat_history_limit,omitempty"`   // default 50
 	ChatAlpha        float64 `toml:"chat_alpha" json:"chat_alpha,omitempty"`                   // 0.3-1.0, default 0.92
 	ChatPosition     string  `toml:"chat_position" json:"chat_position,omitempty"`             // "right"|"left"|"center"
+
+	// Phase G: daily token budget breaker. When > 0, the overlay bridge skips
+	// injections once this many tokens have been recorded today. 0 disables
+	// gating. Default 50000. Must be >= 0.
+	DailyTokenBudget int `toml:"daily_token_budget" json:"daily_token_budget,omitempty"`
 }
 
 // SpawnEnabled returns true if the overlay subprocess should be spawned
@@ -209,6 +214,7 @@ func overlayDefaults() OverlayConfig {
 		ChatHistoryLimit: 50,
 		ChatAlpha:        0.92,
 		ChatPosition:     "right",
+		DailyTokenBudget: 50000,
 	}
 }
 
@@ -530,6 +536,9 @@ func mergeConfig(base, override *Config) {
 	if override.Overlay.ChatPosition != "" {
 		base.Overlay.ChatPosition = override.Overlay.ChatPosition
 	}
+	if override.Overlay.DailyTokenBudget != 0 {
+		base.Overlay.DailyTokenBudget = override.Overlay.DailyTokenBudget
+	}
 
 	// Hooks: override replaces entire event lists (not additive).
 	overrideHooks := override.Hooks.ToMap()
@@ -799,6 +808,9 @@ func (c *Config) Validate() error {
 	}
 	if !validChatPosition[c.Overlay.ChatPosition] {
 		errs = append(errs, fmt.Sprintf("overlay.chat_position %q is not valid (allowed: right, left, center)", c.Overlay.ChatPosition))
+	}
+	if c.Overlay.DailyTokenBudget < 0 {
+		errs = append(errs, fmt.Sprintf("overlay.daily_token_budget %d must be >= 0 (0 disables)", c.Overlay.DailyTokenBudget))
 	}
 
 	if len(errs) > 0 {

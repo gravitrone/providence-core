@@ -743,6 +743,173 @@ func TestOverlayConfig_BinaryPathEnvExpansion(t *testing.T) {
 	assert.Equal(t, "/opt/overlay/bin/providence-overlay", c.Overlay.BinaryPath)
 }
 
+// --- Permissions merge + Save/Load tests ---
+
+func TestPermissions_DenyMergeReplacesNotAppends(t *testing.T) {
+	base := Config{
+		Permissions: PermissionsConfig{
+			Deny: []string{"Bash(rm -rf *)", "Bash(dd *)"},
+		},
+	}
+	override := Config{
+		Permissions: PermissionsConfig{
+			Deny: []string{"Bash(curl *)"},
+		},
+	}
+	mergeConfig(&base, &override)
+	// override.Deny non-empty => replaces base.Deny entirely
+	assert.Equal(t, []string{"Bash(curl *)"}, base.Permissions.Deny)
+}
+
+func TestPermissions_AllowMergeBehavior(t *testing.T) {
+	base := Config{
+		Permissions: PermissionsConfig{
+			Allow: []string{"Read(*)", "Glob(*)"},
+		},
+	}
+	override := Config{
+		Permissions: PermissionsConfig{
+			Allow: []string{"Write(*)"},
+		},
+	}
+	mergeConfig(&base, &override)
+	assert.Equal(t, []string{"Write(*)"}, base.Permissions.Allow)
+}
+
+func TestPermissions_AskMergeBehavior(t *testing.T) {
+	base := Config{
+		Permissions: PermissionsConfig{
+			Ask: []string{"Bash(git push *)", "Bash(git force *)"},
+		},
+	}
+	override := Config{
+		Permissions: PermissionsConfig{
+			Ask: []string{"Bash(npm publish *)"},
+		},
+	}
+	mergeConfig(&base, &override)
+	assert.Equal(t, []string{"Bash(npm publish *)"}, base.Permissions.Ask)
+}
+
+func TestPermissions_EmptyOverridePreservesBase(t *testing.T) {
+	base := Config{
+		Permissions: PermissionsConfig{
+			Allow: []string{"Read(*)"},
+			Deny:  []string{"Bash(rm -rf *)"},
+			Ask:   []string{"Bash(git push *)"},
+		},
+	}
+	mergeConfig(&base, &Config{})
+	assert.Equal(t, []string{"Read(*)"}, base.Permissions.Allow)
+	assert.Equal(t, []string{"Bash(rm -rf *)"}, base.Permissions.Deny)
+	assert.Equal(t, []string{"Bash(git push *)"}, base.Permissions.Ask)
+}
+
+func TestConfig_SaveAndLoadRoundtripPreservesAllFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	original := Config{
+		Engine:           "direct",
+		Model:            "opus",
+		Theme:            "flame",
+		Effort:           "high",
+		OpenRouterAPIKey: "sk-or-test-key",
+		TokenBudget:      200000,
+		AutoTitleEnabled: true,
+		ToolUseSummary:   true,
+		DashboardVisible: true,
+		BGAgentsEnabled:  true,
+		OutputStyle:      "compact",
+		SpinnerVerbs:     []string{"thinking", "working"},
+		Bridge: BridgeConfig{
+			Mode:              "swift",
+			SwiftPath:         "/usr/local/bin/bridge",
+			WarmStreamFPS:     5,
+			BurstStreamFPS:    30,
+			ActionBatch:       true,
+			ScreenDiffEnabled: true,
+			AXMaxDepth:        15,
+			AXMaxNodes:        3000,
+			SpawnTimeoutMS:    2000,
+		},
+		Compact: CompactConfig{
+			Mode:           "dynamic-rolling",
+			Trigger:        "pressure",
+			ThresholdPct:   85,
+			TurnCount:      15,
+			KeepRecentPct:  35,
+			RollingTokens:  60000,
+			FastTierModel:  "haiku",
+			CircuitBreaker: 5,
+		},
+		Permissions: PermissionsConfig{
+			Mode:  "acceptEdits",
+			Allow: []string{"Read(*)", "Glob(*)"},
+			Deny:  []string{"Bash(rm -rf *)"},
+			Ask:   []string{"Bash(git push *)"},
+		},
+		Overlay: OverlayConfig{
+			Enable:           true,
+			SocketPath:       "/tmp/overlay.sock",
+			BinaryPath:       "/usr/local/bin/overlay",
+			AutoStart:        true,
+			TTSEnabled:       true,
+			ContextInjection: "system_reminder",
+			DailyTokenBudget: 75000,
+		},
+	}
+
+	require.NoError(t, original.SaveTo(path))
+	loaded := LoadFromTOML(path)
+
+	assert.Equal(t, original.Engine, loaded.Engine)
+	assert.Equal(t, original.Model, loaded.Model)
+	assert.Equal(t, original.Theme, loaded.Theme)
+	assert.Equal(t, original.Effort, loaded.Effort)
+	assert.Equal(t, original.OpenRouterAPIKey, loaded.OpenRouterAPIKey)
+	assert.Equal(t, original.TokenBudget, loaded.TokenBudget)
+	assert.Equal(t, original.AutoTitleEnabled, loaded.AutoTitleEnabled)
+	assert.Equal(t, original.ToolUseSummary, loaded.ToolUseSummary)
+	assert.Equal(t, original.DashboardVisible, loaded.DashboardVisible)
+	assert.Equal(t, original.BGAgentsEnabled, loaded.BGAgentsEnabled)
+	assert.Equal(t, original.OutputStyle, loaded.OutputStyle)
+	assert.Equal(t, original.SpinnerVerbs, loaded.SpinnerVerbs)
+	assert.Equal(t, original.Bridge, loaded.Bridge)
+	assert.Equal(t, original.Compact, loaded.Compact)
+	assert.Equal(t, original.Permissions, loaded.Permissions)
+	assert.Equal(t, original.Overlay.Enable, loaded.Overlay.Enable)
+	assert.Equal(t, original.Overlay.SocketPath, loaded.Overlay.SocketPath)
+	assert.Equal(t, original.Overlay.BinaryPath, loaded.Overlay.BinaryPath)
+	assert.Equal(t, original.Overlay.AutoStart, loaded.Overlay.AutoStart)
+	assert.Equal(t, original.Overlay.TTSEnabled, loaded.Overlay.TTSEnabled)
+	assert.Equal(t, original.Overlay.ContextInjection, loaded.Overlay.ContextInjection)
+	assert.Equal(t, original.Overlay.DailyTokenBudget, loaded.Overlay.DailyTokenBudget)
+}
+
+func TestConfig_PermissionsModeValidation(t *testing.T) {
+	validModes := []string{
+		"", // empty = use default, passes validation
+	}
+	// Validate() does not gate permissions.mode - confirm no error for any string.
+	// This documents actual production behavior: permissions.mode is free-form.
+	for _, mode := range validModes {
+		t.Run("mode="+mode, func(t *testing.T) {
+			cfg := Config{Permissions: PermissionsConfig{Mode: mode}}
+			assert.NoError(t, cfg.Validate())
+		})
+	}
+
+	// Known valid semantic values also pass (no rejection in Validate).
+	for _, mode := range []string{"default", "acceptEdits", "bypassPermissions", "plan", "dontAsk"} {
+		mode := mode
+		t.Run("semantic_mode="+mode, func(t *testing.T) {
+			cfg := Config{Permissions: PermissionsConfig{Mode: mode}}
+			assert.NoError(t, cfg.Validate(), "permissions.mode %q should pass Validate()", mode)
+		})
+	}
+}
+
 func TestOverlayConfigJSONRoundtrip(t *testing.T) {
 	cfg := OverlayConfig{
 		Enable:           true,

@@ -171,37 +171,24 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 	var spawnedPID int
 
 	if appPath != "" {
-		// `launchctl asuser <uid> -- open -n -a <app> --args ...` launches the
-		// app in the user's launchd session, fully detached from providence's
-		// TCC responsibility chain. Without `asuser`, macOS attributes TCC
-		// requests back to providence and ScreenCaptureKit hangs indefinitely
-		// when providence itself isn't granted Screen Recording. With asuser
-		// the overlay's TCC identity is its own bundle ID.
-		launchArgs := []string{"asuser", strconv.Itoa(os.Getuid()), "--", "open", "-n", "-a", appPath, "--args"}
-		launchArgs = append(launchArgs, args...)
-		openCmd := exec.CommandContext(ctx, "launchctl", launchArgs...)
-		if logFile != nil {
-			openCmd.Stdout = logFile
-			openCmd.Stderr = logFile
-		}
-		if err := openCmd.Run(); err != nil {
-			srvCancel()
-			_ = srv.Close()
-			m.server = nil
-			m.setStateSafe(StateStopped)
-			return fmt.Errorf("overlay: open -a %q: %w", appPath, err)
-		}
-		// Locate the spawned process by socket arg.
-		pid, err := findOverlayPID(srv.SocketPath(), 2*time.Second)
+		// Direct binary path inside the .app, spawned with posix_spawn +
+		// responsibility_spawnattrs_setdisclaim(1). This is the canonical macOS
+		// way to launch a helper process without inheriting the parent's TCC
+		// "responsible process" chain. Chrome / Slack / Discord all do this.
+		// Without disclaim, the overlay's ScreenCaptureKit requests hang
+		// indefinitely because macOS walks up to providence (the caller) and
+		// either denies or re-prompts against the wrong identity.
+		innerBin := filepath.Join(appPath, "Contents", "MacOS", "providence-overlay")
+		pid, err := spawnDisclaimed(innerBin, args, nil)
 		if err != nil {
 			srvCancel()
 			_ = srv.Close()
 			m.server = nil
 			m.setStateSafe(StateStopped)
-			return fmt.Errorf("overlay: %w", err)
+			return fmt.Errorf("overlay: spawn disclaimed %q: %w", innerBin, err)
 		}
 		spawnedPID = pid
-		m.logger.Info("overlay: launched via LaunchServices", "pid", pid, "app", appPath)
+		m.logger.Info("overlay: launched disclaimed", "pid", pid, "app", appPath)
 	} else {
 		// Loose binary fallback (no .app bundle, e.g. dev build before install).
 		cmd = exec.CommandContext(ctx, binPath, args...)

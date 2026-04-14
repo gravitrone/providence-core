@@ -48,6 +48,16 @@ type Bridge struct {
 	logger    *slog.Logger
 	sessionID string
 
+	// injection selects how context_update payloads reach the engine.
+	// "system_reminder" (default): store as pending reminder, prepended to
+	// the next user turn. "synthetic_user": call engine.Send directly with
+	// the formatted reminder as the user message, rate-limited to 1 per 10s.
+	injection       string
+	lastSyntheticAt time.Time
+	syntheticMu     sync.Mutex
+
+	tracker *TokenTracker
+
 	// pendingReminder holds the latest ContextUpdate formatted as a
 	// <system-reminder> block. Consumed once by PendingSystemReminder.
 	pendingMu       sync.Mutex
@@ -62,14 +72,34 @@ func NewBridge(eng Engine, em *ember.State, server *Server, manager *Manager, lo
 		logger = slog.Default()
 	}
 	b := &Bridge{
-		engine:  eng,
-		ember:   em,
-		server:  server,
-		manager: manager,
-		logger:  logger,
+		engine:    eng,
+		ember:     em,
+		server:    server,
+		manager:   manager,
+		logger:    logger,
+		injection: "system_reminder",
+		tracker:   NewTokenTracker(),
 	}
 	return b
 }
+
+// NewBridgeWithMode is like NewBridge but lets callers select the context
+// injection mode at construction time. Empty mode defaults to system_reminder.
+func NewBridgeWithMode(eng Engine, em *ember.State, server *Server, manager *Manager, logger *slog.Logger, mode string) *Bridge {
+	b := NewBridge(eng, em, server, manager, logger)
+	if mode == "" {
+		mode = "system_reminder"
+	}
+	b.injection = mode
+	return b
+}
+
+// Tracker returns the per-session token tracker. Never nil for a Bridge
+// constructed via NewBridge / NewBridgeWithMode.
+func (b *Bridge) Tracker() *TokenTracker { return b.tracker }
+
+// InjectionMode returns the configured injection mode.
+func (b *Bridge) InjectionMode() string { return b.injection }
 
 // SetServer wires a server after construction (used when the server is
 // created by the manager at Start time).
@@ -144,13 +174,86 @@ func (b *Bridge) OnHello(c *client, h Hello) Welcome {
 	return w
 }
 
-// OnContextUpdate receives a screen/audio observation from the overlay and
-// stores it as a pending system reminder for the next engine turn.
+// OnContextUpdate receives a screen/audio observation from the overlay.
+//
+// Routing depends on b.injection:
+//   - "system_reminder" (default): stores the formatted reminder for the next
+//     engine turn (the engine prepends it to the user message).
+//   - "synthetic_user": calls engine.Send directly with the reminder, so the
+//     model narrates in real time. Rate-limited to 1 send per 10s; when the
+//     rate limit kicks in we fall back to storing the reminder.
+//
+// On every accepted update we record the approximate token count in the
+// session TokenTracker and broadcast a ContextAck to connected clients.
 func (b *Bridge) OnContextUpdate(_ *client, u ContextUpdate) error {
-	b.pendingMu.Lock()
-	b.pendingReminder = formatContextReminder(u)
-	b.pendingMu.Unlock()
+	reminder := formatContextReminder(u)
+	tokens := EstimateTokens(reminder)
+
+	mode := b.injection
+	if mode == "" {
+		mode = "system_reminder"
+	}
+
+	if b.tracker != nil {
+		b.tracker.Record(TokenEntry{
+			Time:   time.Now(),
+			Tokens: tokens,
+			Reason: u.ChangeKind,
+			App:    u.ActiveApp,
+			Mode:   mode,
+		})
+	}
+
+	switch mode {
+	case "synthetic_user":
+		b.syntheticMu.Lock()
+		canSend := time.Since(b.lastSyntheticAt) >= 10*time.Second
+		if canSend {
+			b.lastSyntheticAt = time.Now()
+		}
+		b.syntheticMu.Unlock()
+
+		if canSend && b.engine != nil {
+			// Fire-and-forget: the engine will stream a response on its own
+			// loop. A failed Send should not take down the bridge.
+			go func(text string) {
+				defer func() {
+					if r := recover(); r != nil {
+						b.logger.Warn("overlay: synthetic send panic recovered", "panic", r)
+					}
+				}()
+				if err := b.engine.Send(text); err != nil {
+					b.logger.Warn("overlay: synthetic send failed", "error", err)
+				}
+			}(reminder)
+		} else {
+			// Rate-limited or no engine - fall back to reminder store so the
+			// next natural turn still sees the update.
+			b.storeAsReminder(reminder)
+		}
+	default:
+		b.storeAsReminder(reminder)
+	}
+
+	if b.server != nil {
+		ack := ContextAck{
+			Tokens: tokens,
+			Reason: u.ChangeKind,
+			Mode:   mode,
+			Total:  b.tracker.Total(),
+		}
+		if err := b.server.Broadcast(TypeContextAck, ack); err != nil {
+			b.logger.Debug("overlay: broadcast context_ack failed", "error", err)
+		}
+	}
 	return nil
+}
+
+// storeAsReminder saves the formatted reminder for later PendingSystemReminder.
+func (b *Bridge) storeAsReminder(text string) {
+	b.pendingMu.Lock()
+	b.pendingReminder = text
+	b.pendingMu.Unlock()
 }
 
 // OnUserQuery forwards the user's overlay query to the engine.

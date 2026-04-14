@@ -22,6 +22,13 @@ type overlayBridge interface {
 	overlay.Injector
 }
 
+// overlayTracked is optionally implemented by an overlayBridge that exposes a
+// TokenTracker, used by `/overlay cost`. Kept as a separate interface so tests
+// can substitute a minimal bridge without needing a tracker.
+type overlayTracked interface {
+	Tracker() *overlay.TokenTracker
+}
+
 // WithOverlay is a functional option for wiring an overlay manager and bridge
 // into the AgentTab after construction.
 func WithOverlay(mgr overlayManager, bridge overlayBridge) func(*AgentTab) {

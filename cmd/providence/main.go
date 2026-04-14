@@ -179,7 +179,7 @@ func runTUI(engineType string, cfg config.Config, resumeQuery string, continueSe
 			ExcludeApps: cfg.Overlay.ExcludeApps,
 		}
 		overlayMgr := overlay.NewManager(overlayCfg, logger)
-		overlayBridge := overlay.NewBridge(nil, emberState, nil, overlayMgr, logger)
+		overlayBridge := overlay.NewBridgeWithMode(nil, emberState, nil, overlayMgr, logger, cfg.Overlay.ContextInjection)
 
 		overlayMgr.SetCallbacks(
 			func() {

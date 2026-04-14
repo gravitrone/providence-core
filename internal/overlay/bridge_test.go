@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,11 +18,12 @@ import (
 // --- Fake engine ---
 
 type fakeEngine struct {
-	sendCalled   []string
-	interrupted  bool
-	model        string
-	engineType   string
-	bus          *session.Bus
+	mu          sync.Mutex
+	sendCalled  []string
+	interrupted bool
+	model       string
+	engineType  string
+	bus         *session.Bus
 }
 
 func newFakeEngine() *fakeEngine {
@@ -33,8 +35,22 @@ func newFakeEngine() *fakeEngine {
 }
 
 func (e *fakeEngine) Send(text string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.sendCalled = append(e.sendCalled, text)
 	return nil
+}
+
+func (e *fakeEngine) sendCallCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.sendCalled)
+}
+
+func (e *fakeEngine) sendCallAt(i int) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.sendCalled[i]
 }
 
 func (e *fakeEngine) Interrupt() { e.interrupted = true }
@@ -332,6 +348,118 @@ func TestFormatContextReminderOCRAndDeltaFields(t *testing.T) {
 	out := formatContextReminder(u)
 	assert.Contains(t, out, "buy milk", "OCR text must appear in reminder")
 	assert.Contains(t, out, "user-invoked", "ChangeKind must appear as Delta line")
+}
+
+// --- Phase 9: synthetic_user + tracker + ack tests ---
+
+func TestBridgeSystemReminderModeStoresReminderAndDoesNotSend(t *testing.T) {
+	eng := newFakeEngine()
+	bridge := NewBridgeWithMode(eng, ember.New(), nil, nil, nil, "system_reminder")
+
+	err := bridge.OnContextUpdate(nil, ContextUpdate{
+		ActiveApp:  "VS Code",
+		Activity:   "coding",
+		AXSummary:  "editor",
+		ChangeKind: "pattern",
+	})
+	require.NoError(t, err)
+
+	// Default mode: engine.Send must NOT be called.
+	assert.Equal(t, 0, eng.sendCallCount(), "system_reminder mode must not call engine.Send")
+	// Reminder is stored for the next turn.
+	assert.NotEmpty(t, bridge.PendingSystemReminder())
+	// Tracker recorded one entry.
+	assert.Equal(t, 1, len(bridge.Tracker().Recent(10)))
+	assert.Greater(t, bridge.Tracker().Total(), 0)
+}
+
+func TestBridgeSyntheticUserModeCallsEngineSend(t *testing.T) {
+	eng := newFakeEngine()
+	bridge := NewBridgeWithMode(eng, ember.New(), nil, nil, nil, "synthetic_user")
+
+	err := bridge.OnContextUpdate(nil, ContextUpdate{
+		ActiveApp:  "VS Code",
+		Activity:   "coding",
+		AXSummary:  "editor",
+		ChangeKind: "pattern",
+	})
+	require.NoError(t, err)
+
+	// engine.Send runs in a goroutine, wait briefly.
+	assert.Eventually(t, func() bool {
+		return eng.sendCallCount() == 1
+	}, 500*time.Millisecond, 10*time.Millisecond, "synthetic_user must call engine.Send")
+
+	assert.Contains(t, eng.sendCallAt(0), "<system-reminder origin=\"overlay\">")
+	// Pending reminder should stay empty - we sent it directly.
+	assert.Empty(t, bridge.PendingSystemReminder())
+}
+
+func TestBridgeSyntheticUserRateLimit10s(t *testing.T) {
+	eng := newFakeEngine()
+	bridge := NewBridgeWithMode(eng, ember.New(), nil, nil, nil, "synthetic_user")
+
+	// First update: sent.
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ActiveApp: "VS Code", Activity: "coding", ChangeKind: "pattern",
+	}))
+	// Second update within 10s: rate-limited, stored as reminder.
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ActiveApp: "Terminal", Activity: "coding", ChangeKind: "error",
+	}))
+
+	// Give the first goroutine time to run.
+	assert.Eventually(t, func() bool {
+		return eng.sendCallCount() == 1
+	}, 500*time.Millisecond, 10*time.Millisecond)
+
+	// Only one send, not two.
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, 1, eng.sendCallCount(), "rate-limited: second synthetic send must not fire")
+
+	// Second update lands in the pending reminder as fallback.
+	assert.NotEmpty(t, bridge.PendingSystemReminder())
+
+	// Both updates counted by tracker.
+	assert.Equal(t, 2, len(bridge.Tracker().Recent(10)))
+}
+
+func TestBridgeContextAckBroadcastOnUpdate(t *testing.T) {
+	eng := newFakeEngine()
+	spy := &spyHandler{}
+	srv, cancel := startTestServer(t, spy)
+	defer cancel()
+	defer srv.Close()
+
+	bridge := NewBridgeWithMode(eng, ember.New(), srv, nil, nil, "system_reminder")
+
+	conn := dialTestClient(t, srv)
+	sendEnvelope(t, conn, TypeHello, Hello{PID: 1})
+	readEnvelope(t, conn) // welcome
+
+	err := bridge.OnContextUpdate(nil, ContextUpdate{
+		ActiveApp:  "VS Code",
+		Activity:   "coding",
+		AXSummary:  "editor",
+		ChangeKind: "pattern",
+	})
+	require.NoError(t, err)
+
+	env := readEnvelope(t, conn)
+	assert.Equal(t, TypeContextAck, env.Type)
+
+	var ack ContextAck
+	require.NoError(t, json.Unmarshal(env.Data, &ack))
+	assert.Greater(t, ack.Tokens, 0)
+	assert.Equal(t, "pattern", ack.Reason)
+	assert.Equal(t, "system_reminder", ack.Mode)
+	assert.Equal(t, ack.Tokens, ack.Total, "first update: total equals single emit")
+}
+
+func TestBridgeDefaultModeFallsBackToSystemReminder(t *testing.T) {
+	// Empty mode -> default.
+	bridge := NewBridgeWithMode(newFakeEngine(), ember.New(), nil, nil, nil, "")
+	assert.Equal(t, "system_reminder", bridge.InjectionMode())
 }
 
 // TestContextUpdateOriginField verifies the Origin field is present in

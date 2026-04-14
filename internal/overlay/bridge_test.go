@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/png"
 	"log/slog"
@@ -662,6 +663,143 @@ func TestBridgeTranscriptLatest(t *testing.T) {
 	assert.Equal(t, "second transcript", bridge.Transcript())
 }
 
+// --- New ring / transcript isolation tests ---
+
+// TestBridge_Screenshots_EvictsFramesOlderThan30s documents the TTL eviction
+// gap. Production code evicts on read using time.Now(), so faking past time
+// requires either clock injection (not yet wired) or a 30s sleep (too slow).
+// Tracked for Phase N clock-injection refactor.
+func TestBridge_Screenshots_EvictsFramesOlderThan30s(t *testing.T) {
+	t.Skip("TTL eviction requires clock injection; tracked for Phase N refactor")
+}
+
+// TestBridge_MarkAttachedThenNoNewFrames_RingUnchangedReturnsFalse verifies
+// that RingChangedSinceLastAttach returns false when no new frames have been
+// pushed after MarkAttached.
+func TestBridge_MarkAttachedThenNoNewFrames_RingUnchangedReturnsFalse(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	b64, _ := makeColoredPNGB64(t, 1)
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: b64,
+		ChangeKind:       "frame",
+	}))
+
+	bridge.MarkAttached()
+	assert.False(t, bridge.RingChangedSinceLastAttach(), "no new frames after MarkAttached -> unchanged")
+}
+
+// TestBridge_MarkAttachedThenPushNewFrame_RingChangedReturnsTrue verifies
+// that RingChangedSinceLastAttach returns true after a new frame evicts the
+// attached head.
+func TestBridge_MarkAttachedThenPushNewFrame_RingChangedReturnsTrue(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	// Fill ring to capacity so the next push evicts the current head.
+	for i := range screenRingCap {
+		b64, _ := makeColoredPNGB64(t, uint8(i+1))
+		require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+			ScreenshotPNGB64: b64,
+			ChangeKind:       "frame",
+		}))
+	}
+
+	bridge.MarkAttached()
+	assert.False(t, bridge.RingChangedSinceLastAttach(), "unchanged immediately after MarkAttached")
+
+	// Push one more frame - evicts the oldest, ring[0].Time changes.
+	b64, _ := makeColoredPNGB64(t, 99)
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: b64,
+		ChangeKind:       "frame",
+	}))
+
+	assert.True(t, bridge.RingChangedSinceLastAttach(), "new frame pushed after attach -> ring changed")
+}
+
+// TestBridge_TranscriptOnlyUpdateDoesNotAffectRing verifies that a
+// ContextUpdate with no screenshot leaves the ring untouched while updating
+// the transcript.
+func TestBridge_TranscriptOnlyUpdateDoesNotAffectRing(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	// Push one real frame first.
+	b64, _ := makeColoredPNGB64(t, 7)
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: b64,
+		ChangeKind:       "frame",
+	}))
+	require.Len(t, bridge.ScreenshotPNGs(), 1, "one frame before transcript-only update")
+
+	bridge.MarkAttached()
+
+	// Transcript-only update - no PNG.
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: "",
+		Transcript:       "hi",
+		ChangeKind:       "transcript_only",
+	}))
+
+	assert.Len(t, bridge.ScreenshotPNGs(), 1, "ring must not grow on transcript-only update")
+	assert.Equal(t, "hi", bridge.Transcript(), "transcript must be updated")
+	assert.False(t, bridge.RingChangedSinceLastAttach(), "ring head unchanged -> dedup returns false")
+}
+
+// TestBridge_ScreenshotsReturnsCopyNotAlias verifies that mutating the slice
+// returned by Screenshots does not affect the bridge's internal ring.
+func TestBridge_ScreenshotsReturnsCopyNotAlias(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	b64, _ := makeColoredPNGB64(t, 42)
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: b64,
+		ChangeKind:       "frame",
+	}))
+
+	first := bridge.Screenshots()
+	require.Len(t, first, 1)
+
+	// Mutate the returned slice.
+	first[0] = ScreenshotFrame{}
+
+	// Bridge internal ring must be unaffected.
+	second := bridge.Screenshots()
+	require.Len(t, second, 1, "bridge ring must still hold the original frame")
+	assert.NotEqual(t, first[0].Time, second[0].Time, "mutated copy must not alias bridge internals")
+}
+
+// TestBridge_ScreenshotPNGsMatchesScreenshotsOrder verifies that ScreenshotPNGs
+// returns PNGs in the same order as Screenshots (oldest first).
+func TestBridge_ScreenshotPNGsMatchesScreenshotsOrder(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	var expectedPNGs [][]byte
+	for i := range 3 {
+		b64, raw := makeColoredPNGB64(t, uint8(i+10))
+		expectedPNGs = append(expectedPNGs, raw)
+		require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+			ScreenshotPNGB64: b64,
+			ChangeKind:       "frame",
+		}))
+	}
+
+	frames := bridge.Screenshots()
+	pngs := bridge.ScreenshotPNGs()
+	require.Len(t, frames, 3)
+	require.Len(t, pngs, 3)
+
+	for i := range 3 {
+		assert.Equal(t, frames[i].PNG, pngs[i], "ScreenshotPNGs[%d] must match Screenshots[%d].PNG", i, i)
+	}
+}
+
+// TestBridge_TranscriptEmptyWhenNoUpdates verifies Transcript returns "" on a
+// fresh bridge with no updates.
+func TestBridge_TranscriptEmptyWhenNoUpdates(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+	assert.Empty(t, bridge.Transcript(), "fresh bridge must have empty transcript")
+}
+
 // TestBridgeMarkAttachedAndRingChanged verifies the MarkAttached / RingChangedSinceLastAttach
 // dedup contract:
 //   - After MarkAttached(), RingChangedSinceLastAttach() returns false (ring head unchanged).
@@ -690,4 +828,211 @@ func TestBridgeMarkAttachedAndRingChanged(t *testing.T) {
 	}))
 	// Ring head changed (oldest was evicted) -> RingChangedSinceLastAttach must be true.
 	assert.True(t, bridge.RingChangedSinceLastAttach(), "ring changed: oldest frame was evicted by 7th push")
+}
+
+// --- OnContextUpdate edge cases (Phase: test coverage sweep) ---
+
+// TestOnContextUpdate_MalformedBase64DoesNotCrash_TranscriptStillUpdates verifies
+// that a corrupt ScreenshotPNGB64 value is silently dropped while the Transcript
+// is still stored and nil/empty PNG slice is returned.
+func TestOnContextUpdate_MalformedBase64DoesNotCrash_TranscriptStillUpdates(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	err := bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: "not-valid-base64!!!",
+		Transcript:       "hello",
+		ChangeKind:       "frame",
+	})
+	require.NoError(t, err, "bad base64 must not return an error")
+	assert.Equal(t, "hello", bridge.Transcript(), "transcript must be stored despite bad png")
+	pngs := bridge.ScreenshotPNGs()
+	assert.True(t, len(pngs) == 0, "bad base64 must not push a frame to the ring")
+}
+
+// TestOnContextUpdate_EmptyPNGDoesNotPushToRing verifies that an empty
+// ScreenshotPNGB64 on a second update leaves the ring length unchanged.
+func TestOnContextUpdate_EmptyPNGDoesNotPushToRing(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	// Push one valid frame first.
+	b64, _ := makeColoredPNGB64(t, 1)
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: b64,
+		ChangeKind:       "frame",
+	}))
+	require.Len(t, bridge.ScreenshotPNGs(), 1, "pre-condition: 1 frame in ring")
+
+	// Send an update with an empty PNG field.
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: "",
+		Transcript:       "no frame here",
+		ChangeKind:       "heartbeat",
+	}))
+
+	assert.Len(t, bridge.ScreenshotPNGs(), 1, "ring must stay at 1 after empty-PNG update")
+}
+
+// TestOnContextUpdate_OnlyTranscriptDoesNotBumpRing verifies that multiple
+// transcript-only updates never push any frame to the ring.
+func TestOnContextUpdate_OnlyTranscriptDoesNotBumpRing(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	for i := range 5 {
+		require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+			Transcript: fmt.Sprintf("update %d", i),
+			ChangeKind: "transcript_only",
+		}))
+	}
+
+	assert.Len(t, bridge.ScreenshotPNGs(), 0, "transcript-only updates must not touch the ring")
+	assert.Equal(t, "update 4", bridge.Transcript(), "transcript must reflect the last update")
+}
+
+// TestOnContextUpdate_RingEvictsOldestAtCapSix pushes 7 distinct frames and
+// asserts that the first pushed frame (seed=1) is evicted, and ring[0] now
+// holds seed=2's bytes.
+func TestOnContextUpdate_RingEvictsOldestAtCapSix(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	var seed2PNG []byte
+	for i := range 7 {
+		b64, raw := makeColoredPNGB64(t, uint8(i+1))
+		if i == 1 {
+			seed2PNG = raw
+		}
+		require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+			ScreenshotPNGB64: b64,
+			ChangeKind:       "frame",
+		}))
+	}
+
+	pngs := bridge.ScreenshotPNGs()
+	require.Len(t, pngs, 6, "ring must be capped at 6 after 7 pushes")
+	assert.Equal(t, seed2PNG, pngs[0], "ring[0] must be seed=2 after seed=1 was evicted")
+}
+
+// TestOnContextUpdate_BudgetExceededSkipsRingPush verifies that when the daily
+// budget is exceeded, a subsequent update does not push a frame into the ring and
+// the ack broadcast carries reason="budget_exceeded".
+func TestOnContextUpdate_BudgetExceededSkipsRingPush(t *testing.T) {
+	eng := newFakeEngine()
+	spy := &spyHandler{}
+	srv, cancel := startTestServer(t, spy)
+	defer cancel()
+	defer srv.Close()
+
+	bridge := NewBridgeWithMode(eng, ember.New(), srv, nil, nil, "system_reminder")
+	bridge.SetDailyBudget(10)
+
+	// Pre-spend over budget directly so BudgetExceeded() is true.
+	bridge.Tracker().Record(TokenEntry{
+		Time:   time.Now(),
+		Tokens: 100,
+		Reason: "pretest",
+		App:    "test",
+		Mode:   "system_reminder",
+	})
+	require.True(t, bridge.Tracker().BudgetExceeded(), "pre-condition: budget must be exceeded")
+
+	// Connect a client to receive the ack broadcast.
+	conn := dialTestClient(t, srv)
+	sendEnvelope(t, conn, TypeHello, Hello{PID: 1})
+	readEnvelope(t, conn) // welcome
+
+	// Push one valid frame.
+	b64, _ := makeColoredPNGB64(t, 42)
+	err := bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: b64,
+		Transcript:       "ignored",
+		ChangeKind:       "frame",
+	})
+	require.NoError(t, err, "budget_exceeded must not return an error")
+
+	// Ring must not have grown.
+	assert.Len(t, bridge.ScreenshotPNGs(), 0, "budget exceeded -> no frame pushed to ring")
+
+	// Ack broadcast must carry reason=budget_exceeded.
+	env := readEnvelope(t, conn)
+	assert.Equal(t, TypeContextAck, env.Type)
+	var ack ContextAck
+	require.NoError(t, json.Unmarshal(env.Data, &ack))
+	assert.Equal(t, "budget_exceeded", ack.Reason, "ack reason must be budget_exceeded")
+}
+
+// TestOnContextUpdate_ConcurrentCallsRaceFree fires 10 goroutines each making
+// 50 OnContextUpdate calls with distinct PNGs. Must not panic and must pass
+// -race. Ring length at end must be <= 6.
+func TestOnContextUpdate_ConcurrentCallsRaceFree(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	var wg sync.WaitGroup
+	for g := range 10 {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := range 50 {
+				seed := uint8((g*50 + i) % 255)
+				b64, _ := makeColoredPNGB64(t, seed)
+				_ = bridge.OnContextUpdate(nil, ContextUpdate{
+					ScreenshotPNGB64: b64,
+					Transcript:       fmt.Sprintf("g%d-i%d", g, i),
+					ChangeKind:       "frame",
+				})
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	pngs := bridge.ScreenshotPNGs()
+	assert.LessOrEqual(t, len(pngs), screenRingCap, "ring must never exceed cap after concurrent writes")
+}
+
+// TestOnContextUpdate_TranscriptReplacesNotConcatenates verifies that each
+// OnContextUpdate with a non-empty Transcript fully replaces the previous value.
+func TestOnContextUpdate_TranscriptReplacesNotConcatenates(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	transcripts := []string{"alpha", "beta", "gamma", "delta"}
+	for _, tx := range transcripts {
+		require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+			Transcript: tx,
+			ChangeKind: "transcript_only",
+		}))
+	}
+
+	got := bridge.Transcript()
+	assert.Equal(t, "delta", got, "Transcript must return only the latest value, not concatenation")
+	assert.NotContains(t, got, "alpha", "old transcript values must not bleed into current")
+}
+
+// TestOnContextUpdate_NoServerDoesNotCrash verifies that a bridge constructed
+// without a server can handle OnContextUpdate without panicking.
+func TestOnContextUpdate_NoServerDoesNotCrash(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	b64, _ := makeColoredPNGB64(t, 77)
+	err := bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: b64,
+		Transcript:       "no server",
+		ChangeKind:       "frame",
+	})
+	require.NoError(t, err, "nil server must not cause an error or panic")
+	assert.Equal(t, "no server", bridge.Transcript())
+	assert.Len(t, bridge.ScreenshotPNGs(), 1)
+}
+
+// TestOnContextUpdate_ChangeKindRecordedInTracker verifies that the ChangeKind
+// field from the ContextUpdate is stored as the Reason in the token tracker
+// entry so cost attribution is correct.
+func TestOnContextUpdate_ChangeKindRecordedInTracker(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		Transcript: "some speech",
+		ChangeKind: "user-invoked",
+	}))
+
+	entries := bridge.Tracker().Recent(10)
+	require.Len(t, entries, 1, "exactly one tracker entry expected")
+	assert.Equal(t, "user-invoked", entries[0].Reason, "tracker entry Reason must match ChangeKind")
 }

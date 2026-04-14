@@ -646,6 +646,103 @@ binary_path = "$OVERLAY_BIN"
 	assert.Equal(t, "/usr/local/bin/overlay", c.Overlay.BinaryPath)
 }
 
+// --- Named OverlayConfig validation tests ---
+
+func TestOverlayConfig_DailyTokenBudgetNegativeRejected(t *testing.T) {
+	cfg := Config{Overlay: OverlayConfig{DailyTokenBudget: -1}}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "daily_token_budget")
+}
+
+func TestOverlayConfig_DailyTokenBudgetZeroAccepted(t *testing.T) {
+	cfg := Config{Overlay: OverlayConfig{DailyTokenBudget: 0}}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestOverlayConfig_ContextInjectionEmptyAccepted(t *testing.T) {
+	cfg := Config{Overlay: OverlayConfig{ContextInjection: ""}}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestOverlayConfig_ContextInjectionSystemReminderAccepted(t *testing.T) {
+	cfg := Config{Overlay: OverlayConfig{ContextInjection: "system_reminder"}}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestOverlayConfig_ContextInjectionSyntheticUserAccepted(t *testing.T) {
+	cfg := Config{Overlay: OverlayConfig{ContextInjection: "synthetic_user"}}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestOverlayConfig_ContextInjectionInvalidRejected(t *testing.T) {
+	cfg := Config{Overlay: OverlayConfig{ContextInjection: "push_notification"}}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context_injection")
+}
+
+// --- Named OverlayConfig merge tests ---
+
+func TestOverlayConfig_MergeTTSEnabledFromOverride(t *testing.T) {
+	base := Config{Overlay: OverlayConfig{TTSEnabled: false}}
+	override := Config{Overlay: OverlayConfig{TTSEnabled: true}}
+	mergeConfig(&base, &override)
+	assert.True(t, base.Overlay.TTSEnabled)
+}
+
+func TestOverlayConfig_MergeAutoStartFromOverride(t *testing.T) {
+	base := Config{Overlay: OverlayConfig{AutoStart: false}}
+	override := Config{Overlay: OverlayConfig{AutoStart: true}}
+	mergeConfig(&base, &override)
+	assert.True(t, base.Overlay.AutoStart)
+}
+
+func TestOverlayConfig_MergeDailyTokenBudgetOverride(t *testing.T) {
+	base := Config{Overlay: OverlayConfig{DailyTokenBudget: 50000}}
+	override := Config{Overlay: OverlayConfig{DailyTokenBudget: 10000}}
+	mergeConfig(&base, &override)
+	assert.Equal(t, 10000, base.Overlay.DailyTokenBudget)
+}
+
+func TestOverlayConfig_MergePreservesBaseWhenOverrideEmpty(t *testing.T) {
+	base := Config{
+		Overlay: OverlayConfig{
+			Enable:           true,
+			SocketPath:       "/run/overlay.sock",
+			BinaryPath:       "/usr/bin/overlay",
+			TTSEnabled:       true,
+			DailyTokenBudget: 25000,
+		},
+	}
+	mergeConfig(&base, &Config{})
+	assert.True(t, base.Overlay.Enable)
+	assert.Equal(t, "/run/overlay.sock", base.Overlay.SocketPath)
+	assert.Equal(t, "/usr/bin/overlay", base.Overlay.BinaryPath)
+	assert.True(t, base.Overlay.TTSEnabled)
+	assert.Equal(t, 25000, base.Overlay.DailyTokenBudget)
+}
+
+// --- Named OverlayConfig env expansion tests ---
+
+func TestOverlayConfig_SocketPathEnvExpansion(t *testing.T) {
+	t.Setenv("TEST_OVERLAY_SOCK", "/tmp/test-overlay.sock")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte("[overlay]\nsocket_path = \"${TEST_OVERLAY_SOCK}\"\n"), 0o644))
+	c := LoadFromTOML(path)
+	assert.Equal(t, "/tmp/test-overlay.sock", c.Overlay.SocketPath)
+}
+
+func TestOverlayConfig_BinaryPathEnvExpansion(t *testing.T) {
+	t.Setenv("TEST_OVERLAY_BIN", "/opt/overlay/bin/providence-overlay")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte("[overlay]\nbinary_path = \"${TEST_OVERLAY_BIN}\"\n"), 0o644))
+	c := LoadFromTOML(path)
+	assert.Equal(t, "/opt/overlay/bin/providence-overlay", c.Overlay.BinaryPath)
+}
+
 func TestOverlayConfigJSONRoundtrip(t *testing.T) {
 	cfg := OverlayConfig{
 		Enable:           true,

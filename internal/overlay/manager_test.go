@@ -12,6 +12,53 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// --- StatusInfo ---
+
+func TestManagerStatusInfo_Stopped(t *testing.T) {
+	m := NewManager(Config{SocketPath: "/tmp/providence-overlay-test.sock"}, nil)
+
+	info := m.StatusInfo()
+
+	state, ok := info["state"].(string)
+	require.True(t, ok, "state key must be a string")
+	assert.Equal(t, "stopped", state, "fresh Manager must report stopped")
+
+	assert.Equal(t, 0, info["pid"], "pid must be 0 when not started")
+	assert.Equal(t, 0, info["connected_clients"], "no clients when server not running")
+}
+
+func TestManagerStatusInfo_HasRequiredKeys(t *testing.T) {
+	m := NewManager(Config{SocketPath: "/tmp/providence-overlay-test.sock"}, nil)
+
+	info := m.StatusInfo()
+
+	requiredKeys := []string{"state", "pid", "connected_clients"}
+	for _, k := range requiredKeys {
+		_, ok := info[k]
+		assert.True(t, ok, "StatusInfo must include %q key", k)
+	}
+}
+
+// --- /ember handler (documentation-only, deferred) ---
+
+// TestEmberHandler_ActivatesEmberAndAutoLaunchesOverlay documents the desired
+// coverage for the /ember slash handler in agent_tab.go: when invoked while
+// the overlay manager is stopped, it should activate ember and auto-launch
+// the overlay via exec.Command("open", ...). This requires a full AgentTab
+// test harness which does not exist in the current tree - the handler pulls
+// in the TUI, engine, and config layers simultaneously. Skipped until a
+// harness is introduced.
+func TestEmberHandler_ActivatesEmberAndAutoLaunchesOverlay(t *testing.T) {
+	t.Skip("pending AgentTab test harness: /ember handler auto-launches overlay when manager is stopped")
+}
+
+// TestEmberHandler_SecondActivationDeactivates documents the toggle contract
+// for /ember: the second invocation should deactivate ember mode. Same
+// blocker as above - no AgentTab harness available yet.
+func TestEmberHandler_SecondActivationDeactivates(t *testing.T) {
+	t.Skip("pending AgentTab test harness: /ember is a toggle, second call should deactivate")
+}
+
 // --- resolveBinaryPath ---
 
 func TestResolveBinaryPathExplicitOverride(t *testing.T) {

@@ -401,3 +401,205 @@ func TestServerSocketPermissions(t *testing.T) {
 	perm := info.Mode().Perm()
 	assert.Equal(t, os.FileMode(0600), perm, "socket should be mode 0600")
 }
+
+// --- framing + multi-client tests ---
+
+// TestServer_PartialMessageFraming sends a valid JSON envelope split across
+// two Write calls and asserts the server reassembles it and dispatches once.
+func TestServer_PartialMessageFraming(t *testing.T) {
+	spy := &spyHandler{}
+	srv, cancel := startTestServer(t, spy)
+	defer cancel()
+	defer srv.Close()
+
+	conn := dialTestClient(t, srv)
+
+	// Build the full hello envelope bytes then split them in half.
+	line, err := marshalEnvelope(TypeHello, Hello{PID: 7777, ClientVersion: "0.9"})
+	require.NoError(t, err)
+	mid := len(line) / 2
+
+	_, err = conn.Write(line[:mid])
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond) // force two separate TCP segments
+	_, err = conn.Write(line[mid:])
+	require.NoError(t, err)
+
+	// Expect welcome response - server reassembled and dispatched exactly once.
+	env := readEnvelope(t, conn)
+	assert.Equal(t, TypeWelcome, env.Type)
+
+	waitFor(t, func() bool { return spy.helloCount() == 1 }, time.Second)
+	spy.mu.Lock()
+	assert.Equal(t, 7777, spy.hellos[0].PID)
+	spy.mu.Unlock()
+}
+
+// TestServer_MultipleEnvelopesInOneWrite sends two envelopes concatenated in a
+// single Write and asserts both are dispatched.
+func TestServer_MultipleEnvelopesInOneWrite(t *testing.T) {
+	spy := &spyHandler{}
+	srv, cancel := startTestServer(t, spy)
+	defer cancel()
+	defer srv.Close()
+
+	conn := dialTestClient(t, srv)
+
+	// First message: hello.
+	helloLine, err := marshalEnvelope(TypeHello, Hello{PID: 11})
+	require.NoError(t, err)
+
+	// Second message: interrupt (no payload, data can be null).
+	intLine, err := marshalEnvelope(TypeInterrupt, nil)
+	require.NoError(t, err)
+
+	// Write both in one syscall.
+	_, err = conn.Write(append(helloLine, intLine...))
+	require.NoError(t, err)
+
+	// Both should be dispatched.
+	waitFor(t, func() bool { return spy.helloCount() >= 1 }, time.Second)
+	// Read the welcome reply to drain the write buffer.
+	readEnvelope(t, conn)
+
+	waitFor(t, func() bool {
+		spy.mu.Lock()
+		defer spy.mu.Unlock()
+		return spy.interrupts >= 1
+	}, time.Second)
+}
+
+// TestServer_BroadcastToMultipleClients connects N clients, broadcasts a
+// message, and asserts all of them receive it.
+func TestServer_BroadcastToMultipleClients(t *testing.T) {
+	const N = 4
+	spy := &spyHandler{}
+	srv, cancel := startTestServer(t, spy)
+	defer cancel()
+	defer srv.Close()
+
+	conns := make([]net.Conn, N)
+	for i := range conns {
+		c, err := net.Dial("unix", srv.SocketPath())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = c.Close() })
+		conns[i] = c
+	}
+
+	// Handshake all clients.
+	for i, c := range conns {
+		sendEnvelope(t, c, TypeHello, Hello{PID: i + 1})
+		readEnvelope(t, c) // welcome
+	}
+
+	waitFor(t, func() bool { return srv.ConnectedCount() >= N }, time.Second)
+
+	// Broadcast ember state.
+	require.NoError(t, srv.Broadcast(TypeEmberState, EmberState{Active: true}))
+
+	// Every client must receive the broadcast.
+	for i, c := range conns {
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		scanner := bufio.NewScanner(c)
+		require.True(t, scanner.Scan(), "client %d: expected broadcast", i)
+		var env Envelope
+		require.NoError(t, json.Unmarshal(scanner.Bytes(), &env))
+		assert.Equal(t, TypeEmberState, env.Type, "client %d: unexpected type", i)
+	}
+}
+
+// TestServer_SlowClientDoesNotBlockFast verifies that a client that stops
+// reading does not prevent other connected clients from receiving broadcasts.
+// The server's Broadcast is non-blocking per-client (writeMu is held only
+// during flush; no channel depth required). If the server lacks this property
+// the test will timeout instead of hanging indefinitely.
+func TestServer_SlowClientDoesNotBlockFast(t *testing.T) {
+	spy := &spyHandler{}
+	srv, cancel := startTestServer(t, spy)
+	defer cancel()
+	defer srv.Close()
+
+	// fast client: reads normally.
+	fast, err := net.Dial("unix", srv.SocketPath())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = fast.Close() })
+
+	// slow client: connects but never reads after hello.
+	slow, err := net.Dial("unix", srv.SocketPath())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = slow.Close() })
+
+	sendEnvelope(t, fast, TypeHello, Hello{PID: 101})
+	readEnvelope(t, fast)
+	sendEnvelope(t, slow, TypeHello, Hello{PID: 102})
+	readEnvelope(t, slow)
+
+	waitFor(t, func() bool { return srv.ConnectedCount() >= 2 }, time.Second)
+
+	// Fill the slow client's socket buffer so its writes will block eventually.
+	// We broadcast many times to saturate the buffer. The fast client must still
+	// receive each one without hanging.
+	const bursts = 20
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < bursts; i++ {
+			_ = srv.Broadcast(TypeEmberState, EmberState{Active: true})
+		}
+	}()
+
+	// fast must receive all bursts within deadline.
+	_ = fast.SetReadDeadline(time.Now().Add(3 * time.Second))
+	scanner := bufio.NewScanner(fast)
+	received := 0
+	for received < bursts && scanner.Scan() {
+		received++
+	}
+	assert.Equal(t, bursts, received, "fast client should receive all broadcasts")
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("broadcast loop blocked for too long - slow client is blocking fast client")
+	}
+}
+
+// TestServer_ClientDisconnectMidBroadcast closes one client while a broadcast
+// is in flight and asserts the server tolerates the error and other clients
+// still receive the message.
+func TestServer_ClientDisconnectMidBroadcast(t *testing.T) {
+	spy := &spyHandler{}
+	srv, cancel := startTestServer(t, spy)
+	defer cancel()
+	defer srv.Close()
+
+	alive, err := net.Dial("unix", srv.SocketPath())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = alive.Close() })
+
+	doomed, err := net.Dial("unix", srv.SocketPath())
+	require.NoError(t, err)
+
+	sendEnvelope(t, alive, TypeHello, Hello{PID: 1})
+	readEnvelope(t, alive)
+	sendEnvelope(t, doomed, TypeHello, Hello{PID: 2})
+	readEnvelope(t, doomed)
+
+	waitFor(t, func() bool { return srv.ConnectedCount() >= 2 }, time.Second)
+
+	// Disconnect the doomed client before broadcast.
+	doomed.Close()
+	// Give the server a moment to notice the disconnect.
+	time.Sleep(20 * time.Millisecond)
+
+	// Broadcast must not panic/error even if doomed is gone.
+	require.NoError(t, srv.Broadcast(TypeEmberState, EmberState{Active: false}))
+
+	// alive client still receives it.
+	_ = alive.SetReadDeadline(time.Now().Add(2 * time.Second))
+	scanner := bufio.NewScanner(alive)
+	require.True(t, scanner.Scan(), "alive client must receive broadcast")
+	var env Envelope
+	require.NoError(t, json.Unmarshal(scanner.Bytes(), &env))
+	assert.Equal(t, TypeEmberState, env.Type)
+}

@@ -35,21 +35,11 @@ type OverlayConfig struct {
 	// launch the overlay manually from a fresh shell (works around macOS
 	// TCC "responsible process" attribution that hangs ScreenCaptureKit
 	// when the overlay is spawned from providence).
-	Spawn            *bool    `toml:"spawn,omitempty" json:"spawn,omitempty"`
-	ExcludeApps      []string `toml:"exclude_apps" json:"exclude_apps,omitempty"`
-	AdaptiveFPS      bool     `toml:"adaptive_fps" json:"adaptive_fps,omitempty"`
-	TTSEnabled       bool     `toml:"tts_enabled" json:"tts_enabled,omitempty"`
-	ContextInjection string   `toml:"context_injection" json:"context_injection,omitempty"` // "system_reminder"|"synthetic_user"
-	WakeWord         string   `toml:"wake_word" json:"wake_word,omitempty"`
-	Position         string   `toml:"position" json:"position,omitempty"` // "right-sidebar"|"bottom-bar"
+	Spawn            *bool  `toml:"spawn,omitempty" json:"spawn,omitempty"`
+	TTSEnabled       bool   `toml:"tts_enabled" json:"tts_enabled,omitempty"`
+	ContextInjection string `toml:"context_injection" json:"context_injection,omitempty"` // legacy: kept for forward-compat config files
 
-	// Phase A (chat overlay): persistent chat window rendering config.
-	UIMode           string  `toml:"ui_mode" json:"ui_mode,omitempty"`                         // "ghost"|"chat"|"both"
-	ChatHistoryLimit int     `toml:"chat_history_limit" json:"chat_history_limit,omitempty"`   // default 50
-	ChatAlpha        float64 `toml:"chat_alpha" json:"chat_alpha,omitempty"`                   // 0.3-1.0, default 0.92
-	ChatPosition     string  `toml:"chat_position" json:"chat_position,omitempty"`             // "right"|"left"|"center"
-
-	// Phase G: daily token budget breaker. When > 0, the overlay bridge skips
+	// Daily token budget breaker. When > 0, the overlay bridge skips
 	// injections once this many tokens have been recorded today. 0 disables
 	// gating. Default 50000. Must be >= 0.
 	DailyTokenBudget int `toml:"daily_token_budget" json:"daily_token_budget,omitempty"`
@@ -206,14 +196,6 @@ func overlayDefaults() OverlayConfig {
 	return OverlayConfig{
 		Enable:           false,
 		ContextInjection: "system_reminder",
-		WakeWord:         "Hey Providence",
-		Position:         "right-sidebar",
-		AdaptiveFPS:      true,
-		ExcludeApps:      []string{"com.1password.1password", "com.apple.keychainaccess"},
-		UIMode:           "ghost",
-		ChatHistoryLimit: 50,
-		ChatAlpha:        0.92,
-		ChatPosition:     "right",
 		DailyTokenBudget: 50000,
 	}
 }
@@ -295,11 +277,7 @@ func expandConfigEnvVars(c *Config) {
 	c.Bridge.SwiftPath = expandEnvVars(c.Bridge.SwiftPath)
 	c.Overlay.SocketPath = expandEnvVars(c.Overlay.SocketPath)
 	c.Overlay.BinaryPath = expandEnvVars(c.Overlay.BinaryPath)
-	c.Overlay.WakeWord = expandEnvVars(c.Overlay.WakeWord)
 	c.Overlay.ContextInjection = expandEnvVars(c.Overlay.ContextInjection)
-	c.Overlay.Position = expandEnvVars(c.Overlay.Position)
-	c.Overlay.UIMode = expandEnvVars(c.Overlay.UIMode)
-	c.Overlay.ChatPosition = expandEnvVars(c.Overlay.ChatPosition)
 	c.Compact.Mode = expandEnvVars(c.Compact.Mode)
 	c.Compact.Trigger = expandEnvVars(c.Compact.Trigger)
 	c.Compact.FastTierModel = expandEnvVars(c.Compact.FastTierModel)
@@ -506,35 +484,11 @@ func mergeConfig(base, override *Config) {
 	if override.Overlay.AutoStart {
 		base.Overlay.AutoStart = true
 	}
-	if len(override.Overlay.ExcludeApps) > 0 {
-		base.Overlay.ExcludeApps = override.Overlay.ExcludeApps
-	}
-	if override.Overlay.AdaptiveFPS {
-		base.Overlay.AdaptiveFPS = true
-	}
 	if override.Overlay.TTSEnabled {
 		base.Overlay.TTSEnabled = true
 	}
 	if override.Overlay.ContextInjection != "" {
 		base.Overlay.ContextInjection = override.Overlay.ContextInjection
-	}
-	if override.Overlay.WakeWord != "" {
-		base.Overlay.WakeWord = override.Overlay.WakeWord
-	}
-	if override.Overlay.Position != "" {
-		base.Overlay.Position = override.Overlay.Position
-	}
-	if override.Overlay.UIMode != "" {
-		base.Overlay.UIMode = override.Overlay.UIMode
-	}
-	if override.Overlay.ChatHistoryLimit != 0 {
-		base.Overlay.ChatHistoryLimit = override.Overlay.ChatHistoryLimit
-	}
-	if override.Overlay.ChatAlpha != 0 {
-		base.Overlay.ChatAlpha = override.Overlay.ChatAlpha
-	}
-	if override.Overlay.ChatPosition != "" {
-		base.Overlay.ChatPosition = override.Overlay.ChatPosition
 	}
 	if override.Overlay.DailyTokenBudget != 0 {
 		base.Overlay.DailyTokenBudget = override.Overlay.DailyTokenBudget
@@ -769,45 +723,12 @@ func (c *Config) Validate() error {
 	}
 
 	validContextInjection := map[string]bool{
-		"":                 true, // empty = use default
-		"system_reminder":  true,
-		"synthetic_user":   true,
+		"":                true, // empty = use default
+		"system_reminder": true,
+		"synthetic_user":  true, // legacy: still accepted but no longer fires direct sends
 	}
 	if !validContextInjection[c.Overlay.ContextInjection] {
 		errs = append(errs, fmt.Sprintf("overlay.context_injection %q is not valid (allowed: system_reminder, synthetic_user)", c.Overlay.ContextInjection))
-	}
-	validOverlayPosition := map[string]bool{
-		"":              true, // empty = use default
-		"right-sidebar": true,
-		"bottom-bar":    true,
-	}
-	if !validOverlayPosition[c.Overlay.Position] {
-		errs = append(errs, fmt.Sprintf("overlay.position %q is not valid (allowed: right-sidebar, bottom-bar)", c.Overlay.Position))
-	}
-
-	validUIMode := map[string]bool{
-		"":      true,
-		"ghost": true,
-		"chat":  true,
-		"both":  true,
-	}
-	if !validUIMode[c.Overlay.UIMode] {
-		errs = append(errs, fmt.Sprintf("overlay.ui_mode %q is not valid (allowed: ghost, chat, both)", c.Overlay.UIMode))
-	}
-	if c.Overlay.ChatHistoryLimit != 0 && (c.Overlay.ChatHistoryLimit < 1 || c.Overlay.ChatHistoryLimit > 500) {
-		errs = append(errs, fmt.Sprintf("overlay.chat_history_limit %d out of range (1-500)", c.Overlay.ChatHistoryLimit))
-	}
-	if c.Overlay.ChatAlpha != 0 && (c.Overlay.ChatAlpha < 0.3 || c.Overlay.ChatAlpha > 1.0) {
-		errs = append(errs, fmt.Sprintf("overlay.chat_alpha %.2f out of range (0.3-1.0)", c.Overlay.ChatAlpha))
-	}
-	validChatPosition := map[string]bool{
-		"":       true,
-		"right":  true,
-		"left":   true,
-		"center": true,
-	}
-	if !validChatPosition[c.Overlay.ChatPosition] {
-		errs = append(errs, fmt.Sprintf("overlay.chat_position %q is not valid (allowed: right, left, center)", c.Overlay.ChatPosition))
 	}
 	if c.Overlay.DailyTokenBudget < 0 {
 		errs = append(errs, fmt.Sprintf("overlay.daily_token_budget %d must be >= 0 (0 disables)", c.Overlay.DailyTokenBudget))

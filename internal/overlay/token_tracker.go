@@ -154,6 +154,15 @@ func EstimateTokens(s string) int {
 	return n
 }
 
+// EstimateImageTokens approximates a base-cost vision token charge per PNG
+// frame attached to a Claude turn. Anthropic's documented heuristic for a
+// 1024x1024 input is ~1568 tokens; we ship downscaled to 768x768 max edge
+// (~764 tokens). PNG byte count isn't a great proxy because compression
+// varies wildly with screen content - use a fixed estimate per frame.
+func EstimateImageTokens(_ []byte) int {
+	return 764
+}
+
 // Total returns the running total of tokens injected this session.
 func (t *TokenTracker) Total() int {
 	if t == nil {

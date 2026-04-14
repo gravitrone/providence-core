@@ -1303,7 +1303,7 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		// Create session on first use.
 		if at.engine == nil {
 			// Images will be transferred after engine creation via handleEngineCreated.
-			return at, tea.Batch(createEngineAndSend(text, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks, at.ember != nil && at.ember.Active), spinnerTick())
+			return at, tea.Batch(createEngineAndSend(text, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks, at.ember != nil && at.ember.Active, at.overlayBridge != nil), spinnerTick())
 		}
 
 		// Transfer images to engine before sending.
@@ -2859,7 +2859,7 @@ func (at *AgentTab) transferImagesToEngine() int {
 // sendCmd returns the tea.Cmd to send a message (create session or send to existing).
 func (at AgentTab) sendCmd(text string) tea.Cmd {
 	if at.engine == nil {
-		return createEngineAndSend(text, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks, at.ember != nil && at.ember.Active)
+		return createEngineAndSend(text, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks, at.ember != nil && at.ember.Active, at.overlayBridge != nil)
 	}
 	if err := at.engine.Send(text); err != nil {
 		return nil
@@ -5013,7 +5013,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		at.refreshViewport()
 		// Spin up a fresh engine and rehydrate its history so the model
 		// actually remembers this conversation on the next turn.
-		return true, createEngineAndRestore(restored, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks, at.ember != nil && at.ember.Active)
+		return true, createEngineAndRestore(restored, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks, at.ember != nil && at.ember.Active, at.overlayBridge != nil)
 
 	case "/compact":
 		if at.engine == nil {
@@ -5142,6 +5142,19 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 					de.SetUnattendedRetry(true)
 				}
 				at.addSystemMessage("Ember autonomous mode activated - ticks will fire after each turn")
+				// Auto-launch overlay when ember activates, if it is wired but not yet running.
+				if at.overlayMgr != nil && at.overlayBridge != nil {
+					info := at.overlayMgr.StatusInfo()
+					if state, ok := info["state"].(string); ok && state == "stopped" {
+						go func() {
+							ctx := context.Background()
+							if err := at.overlayMgr.Start(ctx, at.overlayBridge); err != nil {
+								// Best-effort: overlay start failure does not block ember.
+								_ = err
+							}
+						}()
+					}
+				}
 			}
 		} else {
 			switch strings.TrimSpace(args) {
@@ -6619,7 +6632,7 @@ func isOpenRouterModel(model string) bool {
 // buildSystemBlocks assembles a PromptConfig from the active output style,
 // discovered instruction files, and environment context, then returns the
 // full set of structured SystemBlocks for prompt caching.
-func buildSystemBlocks(outputStyleName, model string, emberActive bool) []engine.SystemBlock {
+func buildSystemBlocks(outputStyleName, model string, emberActive, overlayActive bool) []engine.SystemBlock {
 	cwd, _ := os.Getwd()
 	home, _ := os.UserHomeDir()
 
@@ -6646,6 +6659,7 @@ func buildSystemBlocks(outputStyleName, model string, emberActive bool) []engine
 		GitStatus:         engine.ComputeGitStatus(cwd),
 		ToolPrompts:       tools.DefaultToolPrompts(),
 		EmberActive:       emberActive,
+		OverlayActive:     overlayActive,
 	}
 
 	return engine.BuildSystemBlocks(cfg)
@@ -6653,8 +6667,8 @@ func buildSystemBlocks(outputStyleName, model string, emberActive bool) []engine
 
 // buildSystemPromptWithStyle builds the system prompt as a flat string.
 // Kept for backward compatibility with claude headless engine.
-func buildSystemPromptWithStyle(outputStyleName string, emberActive bool) string {
-	blocks := buildSystemBlocks(outputStyleName, "", emberActive)
+func buildSystemPromptWithStyle(outputStyleName string, emberActive, overlayActive bool) string {
+	blocks := buildSystemBlocks(outputStyleName, "", emberActive, overlayActive)
 	return engine.FlattenBlocks(blocks)
 }
 
@@ -6678,7 +6692,7 @@ func configHooksToEngine(h config.HooksConfig) map[string][]engine.HookConfigEnt
 }
 
 // createEngineAndSend spawns a new engine session and sends the first prompt.
-func createEngineAndSend(prompt, model string, engineType engine.EngineType, outputStyle string, hooksCfg config.HooksConfig, emberActive bool) tea.Cmd {
+func createEngineAndSend(prompt, model string, engineType engine.EngineType, outputStyle string, hooksCfg config.HooksConfig, emberActive, overlayActive bool) tea.Cmd {
 	return func() tea.Msg {
 		// Allowed tools differ by engine type.
 		var allowedTools []string
@@ -6689,7 +6703,7 @@ func createEngineAndSend(prompt, model string, engineType engine.EngineType, out
 
 		wd, _ := os.Getwd()
 
-		blocks := buildSystemBlocks(outputStyle, model, emberActive)
+		blocks := buildSystemBlocks(outputStyle, model, emberActive, overlayActive)
 		cfg := engine.EngineConfig{
 			Type:         engineType,
 			SystemBlocks: blocks,
@@ -6794,7 +6808,7 @@ func (at *AgentTab) handleResumeInit() tea.Cmd {
 		at.addSystemMessage("Session was interrupted. Continuing from where you left off.")
 	}
 	at.refreshViewport()
-	return createEngineAndRestore(restored, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks, at.ember != nil && at.ember.Active)
+	return createEngineAndRestore(restored, at.model, at.engineType, at.cfg.OutputStyle, at.cfg.Hooks, at.ember != nil && at.ember.Active, at.overlayBridge != nil)
 }
 
 // repairRestoredMessages fixes common interruption artifacts in restored
@@ -6849,7 +6863,7 @@ func repairRestoredMessages(msgs []engine.RestoredMessage, pendingToolIDs map[st
 // populates its history with the supplied restored messages. The engine is
 // left idle and ready for the next Send. Used by /resume so the model
 // actually remembers the prior conversation.
-func createEngineAndRestore(restored []engine.RestoredMessage, model string, engineType engine.EngineType, outputStyle string, hooksCfg config.HooksConfig, emberActive bool) tea.Cmd {
+func createEngineAndRestore(restored []engine.RestoredMessage, model string, engineType engine.EngineType, outputStyle string, hooksCfg config.HooksConfig, emberActive, overlayActive bool) tea.Cmd {
 	return func() tea.Msg {
 		var allowedTools []string
 		if engineType == engine.EngineTypeClaude {
@@ -6858,7 +6872,7 @@ func createEngineAndRestore(restored []engine.RestoredMessage, model string, eng
 
 		wd, _ := os.Getwd()
 
-		blocks := buildSystemBlocks(outputStyle, model, emberActive)
+		blocks := buildSystemBlocks(outputStyle, model, emberActive, overlayActive)
 		cfg := engine.EngineConfig{
 			Type:         engineType,
 			SystemBlocks: blocks,

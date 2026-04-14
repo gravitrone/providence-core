@@ -202,11 +202,9 @@ func TestServerContextUpdateDelivered(t *testing.T) {
 	readEnvelope(t, conn) // welcome
 
 	u := ContextUpdate{
-		ActiveApp:   "com.microsoft.VSCode",
-		WindowTitle: "main.go",
-		Activity:    "coding",
-		ChangeKind:  "pattern",
-		Timestamp:   time.Now(),
+		Transcript: "coding in vscode",
+		ChangeKind: "transcript_only",
+		Timestamp:  time.Now(),
 	}
 	sendEnvelope(t, conn, TypeContextUpdate, u)
 
@@ -219,9 +217,8 @@ func TestServerContextUpdateDelivered(t *testing.T) {
 	spy.mu.Lock()
 	got := spy.contextUpdates[0]
 	spy.mu.Unlock()
-	assert.Equal(t, "com.microsoft.VSCode", got.ActiveApp)
-	assert.Equal(t, "main.go", got.WindowTitle)
-	assert.Equal(t, "coding", got.Activity)
+	assert.Equal(t, "coding in vscode", got.Transcript)
+	assert.Equal(t, "transcript_only", got.ChangeKind)
 }
 
 func TestServerUserQueryDelivered(t *testing.T) {

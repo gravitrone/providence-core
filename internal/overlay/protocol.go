@@ -47,15 +47,7 @@ type Welcome struct {
 	EmberActive bool      `json:"ember_active"`
 	CWD         string    `json:"cwd"`
 	Timestamp   time.Time `json:"timestamp"`
-
-	// Phase 10: runtime preferences sourced from overlay config.
-	TTSEnabled   bool     `json:"tts_enabled,omitempty"`
-	Position     string   `json:"position,omitempty"`
-	ExcludedApps []string `json:"excluded_apps,omitempty"`
-
-	// Phase A (chat overlay): persistent chat window rendering config.
-	UIMode           string `json:"ui_mode,omitempty"`
-	ChatHistoryLimit int    `json:"chat_history_limit,omitempty"`
+	TTSEnabled  bool      `json:"tts_enabled,omitempty"`
 }
 
 // Hello is sent Overlay -> TUI as the first message on connect to identify
@@ -66,19 +58,14 @@ type Hello struct {
 	PID           int      `json:"pid"`
 }
 
-// ContextUpdate is sent Overlay -> TUI when the overlay observes a change in
-// screen or audio state.
+// ContextUpdate is sent Overlay -> TUI when the overlay observes a screen
+// frame or transcript change. The model literally sees the screenshot;
+// providence-core does no heuristic classification.
 type ContextUpdate struct {
-	Timestamp   time.Time `json:"timestamp"`
-	ActiveApp   string    `json:"active_app"`
-	WindowTitle string    `json:"window_title"`
-	Activity    string    `json:"activity"` // "coding"|"browsing"|"meeting"|"writing"|"idle"|"general"
-	OCRText     string    `json:"ocr_text,omitempty"`
-	AXSummary   string    `json:"ax_summary,omitempty"`
-	Transcript  string    `json:"transcript,omitempty"`
-	PixelHash   string    `json:"pixel_hash,omitempty"`
-	ChangeKind  string    `json:"change_kind"` // "pattern"|"heartbeat"|"user-invoked"|"error"
-	Origin      string    `json:"origin,omitempty"` // e.g. "overlay" - for loopback suppression
+	Timestamp        time.Time `json:"timestamp"`
+	ScreenshotPNGB64 string    `json:"screenshot_png_b64,omitempty"`
+	Transcript       string    `json:"transcript,omitempty"`
+	ChangeKind       string    `json:"change_kind"` // "frame"|"transcript_only"|"user-invoked"
 }
 
 // UserQuery is sent Overlay -> TUI when the user initiates a message through

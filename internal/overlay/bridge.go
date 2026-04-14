@@ -2,6 +2,7 @@ package overlay
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,21 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/ember"
 	"github.com/gravitrone/providence-core/internal/engine/session"
 )
+
+// ScreenshotFrame is a decoded PNG observation kept in the bridge ring buffer
+// for vision attachment on the next model turn.
+type ScreenshotFrame struct {
+	Time time.Time
+	PNG  []byte
+}
+
+// screenRingCap is how many frames the bridge retains at once. With a 5s
+// capture cadence that's a 30s rolling window.
+const screenRingCap = 6
+
+// screenFrameTTL evicts ring entries older than this on read. Prevents a long
+// idle from leaking ancient frames into the next model turn.
+const screenFrameTTL = 30 * time.Second
 
 // --- Engine Surface ---
 
@@ -48,35 +64,29 @@ type Bridge struct {
 	logger    *slog.Logger
 	sessionID string
 
-	// injection selects how context_update payloads reach the engine.
-	// "system_reminder" (default): store as pending reminder, prepended to
-	// the next user turn. "synthetic_user": call engine.Send directly with
-	// the formatted reminder as the user message, rate-limited to 1 per 10s.
-	injection       string
-	lastSyntheticAt time.Time
-	syntheticMu     sync.Mutex
+	// injection is preserved as a config field for backward compat but the
+	// post-rewire pipeline always uses ring-buffered image attachment + the
+	// rolling transcript on the next natural turn / ember tick. The old
+	// "synthetic_user" forced-send mode is no longer fired.
+	injection string
 
 	tracker *TokenTracker
 
 	// engineMu guards late-wire of engine via SetEngine.
 	engineMu sync.RWMutex
 
-	// pendingReminder holds the latest ContextUpdate formatted as a
-	// <system-reminder> block. Consumed once by PendingSystemReminder.
-	pendingMu       sync.Mutex
-	pendingReminder string
+	// TUI-side runtime prefs forwarded to the overlay in Welcome. Now reduced
+	// to TTS-only after the ambient rewire dropped position/exclusion/UI fields.
+	prefsMu    sync.RWMutex
+	ttsEnabled bool
 
-	// Phase 10: runtime prefs forwarded to the overlay in Welcome.
-	prefsMu      sync.RWMutex
-	ttsEnabled   bool
-	position     string
-	excludedApps []string
-
-	// Phase A (chat overlay): persistent chat window rendering config.
-	uiMode           string
-	chatHistoryLimit int
-	chatAlpha        float64
-	chatPosition     string
+	// screenRing holds the last N decoded screenshots from the overlay. Read
+	// at model turn time and attached as image content blocks. Independently
+	// guarded from the prefs lock to avoid contention during burst updates.
+	ringMu            sync.RWMutex
+	screenRing        []ScreenshotFrame
+	latestTranscript  string
+	lastAttachedFirst time.Time // dedup: skip image attach if ring unchanged
 
 	// Phase G: daily budget bookkeeping. budgetWarnedDay holds the start-of-day
 	// marker for the last date we logged the "budget exceeded" warning, so we
@@ -147,36 +157,77 @@ func (b *Bridge) SetEngine(eng Engine) {
 	b.engine = eng
 }
 
-// SetRuntimePrefs records TUI-side preferences that are advertised to the
-// overlay client in each Welcome envelope. Safe to call at any time; takes
-// effect on the next hello exchange. Phase 10.
-func (b *Bridge) SetRuntimePrefs(tts bool, position string, excludedApps []string, uiMode string, chatHistoryLimit int, chatAlpha float64, chatPosition string) {
+// SetRuntimePrefs records TUI-side preferences advertised to the overlay in
+// each Welcome envelope. Post-ambient-rewire this is just TTS - all the UI
+// position / exclusion / chat-rendering knobs are local Swift UserDefaults.
+func (b *Bridge) SetRuntimePrefs(tts bool) {
 	b.prefsMu.Lock()
 	b.ttsEnabled = tts
-	b.position = position
-	// Copy to avoid the caller mutating our internal slice.
-	if len(excludedApps) > 0 {
-		b.excludedApps = append([]string(nil), excludedApps...)
-	} else {
-		b.excludedApps = nil
-	}
-	b.uiMode = uiMode
-	b.chatHistoryLimit = chatHistoryLimit
-	b.chatAlpha = chatAlpha
-	b.chatPosition = chatPosition
 	b.prefsMu.Unlock()
 }
 
-// RuntimePrefs returns a snapshot of the TUI-side runtime preferences. Phase 10.
-func (b *Bridge) RuntimePrefs() (tts bool, position string, excludedApps []string) {
-	b.prefsMu.RLock()
-	defer b.prefsMu.RUnlock()
-	tts = b.ttsEnabled
-	position = b.position
-	if len(b.excludedApps) > 0 {
-		excludedApps = append([]string(nil), b.excludedApps...)
+// ScreenshotPNGs returns just the decoded PNG byte slices from the ring,
+// oldest first. Convenience for callers (engine) that don't need timestamps.
+func (b *Bridge) ScreenshotPNGs() [][]byte {
+	frames := b.Screenshots()
+	if len(frames) == 0 {
+		return nil
 	}
-	return
+	out := make([][]byte, len(frames))
+	for i, f := range frames {
+		out[i] = f.PNG
+	}
+	return out
+}
+
+// Screenshots returns a copy of the current ring buffer of decoded PNG frames,
+// oldest first. Frames older than screenFrameTTL are evicted at read time.
+// Returns nil if the ring is empty.
+func (b *Bridge) Screenshots() []ScreenshotFrame {
+	b.ringMu.Lock()
+	defer b.ringMu.Unlock()
+	cutoff := time.Now().Add(-screenFrameTTL)
+	live := b.screenRing[:0]
+	for _, f := range b.screenRing {
+		if f.Time.After(cutoff) {
+			live = append(live, f)
+		}
+	}
+	b.screenRing = live
+	if len(live) == 0 {
+		return nil
+	}
+	out := make([]ScreenshotFrame, len(live))
+	copy(out, live)
+	return out
+}
+
+// Transcript returns the current rolling transcript snapshot (may be empty).
+func (b *Bridge) Transcript() string {
+	b.ringMu.RLock()
+	defer b.ringMu.RUnlock()
+	return b.latestTranscript
+}
+
+// MarkAttached records that the engine attached the current ring head; used
+// for skip-on-no-change deduping at Send time.
+func (b *Bridge) MarkAttached() {
+	b.ringMu.Lock()
+	defer b.ringMu.Unlock()
+	if len(b.screenRing) > 0 {
+		b.lastAttachedFirst = b.screenRing[0].Time
+	}
+}
+
+// RingChangedSinceLastAttach returns true if the ring head differs from what
+// was last attached. Caller-side opportunistic skip during idle ember ticks.
+func (b *Bridge) RingChangedSinceLastAttach() bool {
+	b.ringMu.RLock()
+	defer b.ringMu.RUnlock()
+	if len(b.screenRing) == 0 {
+		return false
+	}
+	return !b.screenRing[0].Time.Equal(b.lastAttachedFirst)
 }
 
 // Start subscribes to the session bus and forwards events to connected
@@ -205,15 +256,17 @@ func (b *Bridge) Start(ctx context.Context) {
 	}
 }
 
-// PendingSystemReminder returns the most recently received ContextUpdate
-// formatted as a <system-reminder> block, and clears it. Returns "" if no
-// update is pending.
+// PendingSystemReminder returns the current rolling transcript wrapped as a
+// system-reminder block, or "" if no transcript exists. Unlike pre-rewire,
+// this no longer carries activity/OCR/AX text - those came from the deleted
+// Swift heuristic layer. Image attachments handle the rest of the context.
+// Non-destructive read: ember ticks may pull the same transcript repeatedly
+// if no new audio has arrived.
 func (b *Bridge) PendingSystemReminder() string {
-	b.pendingMu.Lock()
-	defer b.pendingMu.Unlock()
-	s := b.pendingReminder
-	b.pendingReminder = ""
-	return s
+	b.ringMu.RLock()
+	tx := b.latestTranscript
+	b.ringMu.RUnlock()
+	return formatTranscriptReminder(tx)
 }
 
 // --- ServerHandler implementation ---
@@ -244,49 +297,44 @@ func (b *Bridge) OnHello(c *client, h Hello) Welcome {
 
 	b.prefsMu.RLock()
 	w.TTSEnabled = b.ttsEnabled
-	w.Position = b.position
-	if len(b.excludedApps) > 0 {
-		w.ExcludedApps = append([]string(nil), b.excludedApps...)
-	}
-	if b.uiMode != "" {
-		w.UIMode = b.uiMode
-	} else {
-		w.UIMode = "ghost"
-	}
-	if b.chatHistoryLimit > 0 {
-		w.ChatHistoryLimit = b.chatHistoryLimit
-	} else {
-		w.ChatHistoryLimit = 50
-	}
 	b.prefsMu.RUnlock()
 
 	return w
 }
 
-// OnContextUpdate receives a screen/audio observation from the overlay.
-//
-// Routing depends on b.injection:
-//   - "system_reminder" (default): stores the formatted reminder for the next
-//     engine turn (the engine prepends it to the user message).
-//   - "synthetic_user": calls engine.Send directly with the reminder, so the
-//     model narrates in real time. Rate-limited to 1 send per 10s; when the
-//     rate limit kicks in we fall back to storing the reminder.
-//
-// On every accepted update we record the approximate token count in the
-// session TokenTracker and broadcast a ContextAck to connected clients.
+// OnContextUpdate receives a screen frame and/or transcript snapshot from the
+// overlay. Frames push into the ring buffer for vision attachment on the next
+// model turn. Transcript replaces the current snapshot. Token bookkeeping +
+// daily budget breaker enforce cost ceilings.
 func (b *Bridge) OnContextUpdate(_ *client, u ContextUpdate) error {
-	reminder := formatContextReminder(u)
-	tokens := EstimateTokens(reminder)
-
 	mode := b.injection
 	if mode == "" {
 		mode = "system_reminder"
 	}
 
-	// Phase G: daily budget breaker. Check BEFORE recording so an already-
-	// exceeded budget doesn't keep inflating the counter on silent updates.
-	// We still broadcast a ContextAck below (with tokens=0, budget_exceeded
-	// reason) so the overlay can show a muted indicator.
+	// Decode + push screenshot into the ring (if this update carries one).
+	var pngBytes []byte
+	if u.ScreenshotPNGB64 != "" {
+		decoded, err := base64.StdEncoding.DecodeString(u.ScreenshotPNGB64)
+		if err == nil {
+			pngBytes = decoded
+		} else {
+			b.logger.Debug("overlay: bad screenshot base64", "error", err, "len", len(u.ScreenshotPNGB64))
+		}
+	}
+
+	// Token cost estimate: sum image + transcript tokens.
+	tokens := 0
+	if pngBytes != nil {
+		tokens += EstimateImageTokens(pngBytes)
+	}
+	if u.Transcript != "" {
+		tokens += EstimateTokens(u.Transcript)
+	}
+
+	// Daily budget breaker. Check BEFORE recording so an already-exceeded
+	// budget doesn't keep inflating the counter. Still broadcast an ack with
+	// budget_exceeded reason so the overlay can show a muted indicator.
 	if b.tracker != nil && b.tracker.BudgetExceeded() {
 		b.warnBudgetOncePerDay()
 		if b.server != nil {
@@ -303,46 +351,35 @@ func (b *Bridge) OnContextUpdate(_ *client, u ContextUpdate) error {
 		return nil
 	}
 
-	if b.tracker != nil {
+	// Push into the ring. Frames stored even when over budget would bypass
+	// future caps; we already returned above in that case.
+	b.ringMu.Lock()
+	if pngBytes != nil {
+		b.screenRing = append(b.screenRing, ScreenshotFrame{Time: time.Now(), PNG: pngBytes})
+		if len(b.screenRing) > screenRingCap {
+			// Drop oldest. Simple slice shift; ring is small (cap=6).
+			b.screenRing = b.screenRing[len(b.screenRing)-screenRingCap:]
+		}
+	}
+	if u.Transcript != "" {
+		b.latestTranscript = u.Transcript
+	}
+	b.ringMu.Unlock()
+
+	if b.tracker != nil && tokens > 0 {
 		b.tracker.Record(TokenEntry{
 			Time:   time.Now(),
 			Tokens: tokens,
 			Reason: u.ChangeKind,
-			App:    u.ActiveApp,
+			App:    "overlay",
 			Mode:   mode,
 		})
 	}
 
-	switch mode {
-	case "synthetic_user":
-		b.syntheticMu.Lock()
-		canSend := time.Since(b.lastSyntheticAt) >= 10*time.Second
-		if canSend {
-			b.lastSyntheticAt = time.Now()
-		}
-		b.syntheticMu.Unlock()
-
-		if canSend && b.engine != nil {
-			// Fire-and-forget: the engine will stream a response on its own
-			// loop. A failed Send should not take down the bridge.
-			go func(text string) {
-				defer func() {
-					if r := recover(); r != nil {
-						b.logger.Warn("overlay: synthetic send panic recovered", "panic", r)
-					}
-				}()
-				if err := b.engine.Send(text); err != nil {
-					b.logger.Warn("overlay: synthetic send failed", "error", err)
-				}
-			}(reminder)
-		} else {
-			// Rate-limited or no engine - fall back to reminder store so the
-			// next natural turn still sees the update.
-			b.storeAsReminder(reminder)
-		}
-	default:
-		b.storeAsReminder(reminder)
-	}
+	// synthetic_user mode is now a no-op for ambient observations - the model
+	// sees frames + transcript via the next natural turn (or ember tick) via
+	// the contextInjector.Screenshots/Transcript path. Keep the field on the
+	// struct for backward-compat config but stop firing direct sends.
 
 	if b.server != nil {
 		ack := ContextAck{
@@ -378,13 +415,6 @@ func (b *Bridge) warnBudgetOncePerDay() {
 		b.logger.Warn("overlay: daily token budget exceeded, skipping injection",
 			"budget", budget)
 	}
-}
-
-// storeAsReminder saves the formatted reminder for later PendingSystemReminder.
-func (b *Bridge) storeAsReminder(text string) {
-	b.pendingMu.Lock()
-	b.pendingReminder = text
-	b.pendingMu.Unlock()
 }
 
 // OnUserQuery forwards the user's overlay query to the engine.
@@ -466,49 +496,16 @@ func (b *Bridge) forwardSessionEvent(ev session.Event) {
 	}
 }
 
-// formatContextReminder wraps a ContextUpdate as a <system-reminder> block
-// suitable for injection into the engine as a system message.
-// The origin="overlay" attribute signals the model that this is observational
-// screen context, not user input.
-func formatContextReminder(u ContextUpdate) string {
-	ts := u.Timestamp.Format("15:04:05")
-	if u.Timestamp.IsZero() {
-		ts = time.Now().Format("15:04:05")
+// formatTranscriptReminder produces a tiny text reminder to accompany the
+// image attachments. Used by PendingSystemReminder so the model sees a
+// human-readable transcript header next to the visual frames.
+func formatTranscriptReminder(transcript string) string {
+	if transcript == "" {
+		return ""
 	}
-
-	activity := u.Activity
-	if activity == "" {
-		activity = "general"
-	}
-
-	appInfo := u.ActiveApp
-	if u.WindowTitle != "" {
-		appInfo = u.ActiveApp + " - " + u.WindowTitle
-	}
-
-	var axLine string
-	if u.AXSummary != "" {
-		axLine = "\nAX: " + u.AXSummary
-	}
-
-	transcript := "(silent)"
-	if u.Transcript != "" {
-		transcript = u.Transcript
-	}
-
-	var ocrLine string
-	if u.OCRText != "" {
-		ocrLine = "\nOCR: " + u.OCRText
-	}
-
-	var deltaLine string
-	if u.ChangeKind != "" {
-		deltaLine = "\nDelta: " + u.ChangeKind
-	}
-
 	return fmt.Sprintf(
-		"<system-reminder origin=\"overlay\">\n# Screen Context (as of %s)\nActive: %s (%s)%s%s\nRecent speech: %s%s\n</system-reminder>",
-		ts, appInfo, activity, axLine, ocrLine, transcript, deltaLine,
+		"<system-reminder origin=\"overlay\">\nRecent speech (last ~30s): %s\n</system-reminder>",
+		transcript,
 	)
 }
 

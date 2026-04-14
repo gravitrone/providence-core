@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/png"
 	"log/slog"
@@ -827,4 +828,211 @@ func TestBridgeMarkAttachedAndRingChanged(t *testing.T) {
 	}))
 	// Ring head changed (oldest was evicted) -> RingChangedSinceLastAttach must be true.
 	assert.True(t, bridge.RingChangedSinceLastAttach(), "ring changed: oldest frame was evicted by 7th push")
+}
+
+// --- OnContextUpdate edge cases (Phase: test coverage sweep) ---
+
+// TestOnContextUpdate_MalformedBase64DoesNotCrash_TranscriptStillUpdates verifies
+// that a corrupt ScreenshotPNGB64 value is silently dropped while the Transcript
+// is still stored and nil/empty PNG slice is returned.
+func TestOnContextUpdate_MalformedBase64DoesNotCrash_TranscriptStillUpdates(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	err := bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: "not-valid-base64!!!",
+		Transcript:       "hello",
+		ChangeKind:       "frame",
+	})
+	require.NoError(t, err, "bad base64 must not return an error")
+	assert.Equal(t, "hello", bridge.Transcript(), "transcript must be stored despite bad png")
+	pngs := bridge.ScreenshotPNGs()
+	assert.True(t, len(pngs) == 0, "bad base64 must not push a frame to the ring")
+}
+
+// TestOnContextUpdate_EmptyPNGDoesNotPushToRing verifies that an empty
+// ScreenshotPNGB64 on a second update leaves the ring length unchanged.
+func TestOnContextUpdate_EmptyPNGDoesNotPushToRing(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	// Push one valid frame first.
+	b64, _ := makeColoredPNGB64(t, 1)
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: b64,
+		ChangeKind:       "frame",
+	}))
+	require.Len(t, bridge.ScreenshotPNGs(), 1, "pre-condition: 1 frame in ring")
+
+	// Send an update with an empty PNG field.
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: "",
+		Transcript:       "no frame here",
+		ChangeKind:       "heartbeat",
+	}))
+
+	assert.Len(t, bridge.ScreenshotPNGs(), 1, "ring must stay at 1 after empty-PNG update")
+}
+
+// TestOnContextUpdate_OnlyTranscriptDoesNotBumpRing verifies that multiple
+// transcript-only updates never push any frame to the ring.
+func TestOnContextUpdate_OnlyTranscriptDoesNotBumpRing(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	for i := range 5 {
+		require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+			Transcript: fmt.Sprintf("update %d", i),
+			ChangeKind: "transcript_only",
+		}))
+	}
+
+	assert.Len(t, bridge.ScreenshotPNGs(), 0, "transcript-only updates must not touch the ring")
+	assert.Equal(t, "update 4", bridge.Transcript(), "transcript must reflect the last update")
+}
+
+// TestOnContextUpdate_RingEvictsOldestAtCapSix pushes 7 distinct frames and
+// asserts that the first pushed frame (seed=1) is evicted, and ring[0] now
+// holds seed=2's bytes.
+func TestOnContextUpdate_RingEvictsOldestAtCapSix(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	var seed2PNG []byte
+	for i := range 7 {
+		b64, raw := makeColoredPNGB64(t, uint8(i+1))
+		if i == 1 {
+			seed2PNG = raw
+		}
+		require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+			ScreenshotPNGB64: b64,
+			ChangeKind:       "frame",
+		}))
+	}
+
+	pngs := bridge.ScreenshotPNGs()
+	require.Len(t, pngs, 6, "ring must be capped at 6 after 7 pushes")
+	assert.Equal(t, seed2PNG, pngs[0], "ring[0] must be seed=2 after seed=1 was evicted")
+}
+
+// TestOnContextUpdate_BudgetExceededSkipsRingPush verifies that when the daily
+// budget is exceeded, a subsequent update does not push a frame into the ring and
+// the ack broadcast carries reason="budget_exceeded".
+func TestOnContextUpdate_BudgetExceededSkipsRingPush(t *testing.T) {
+	eng := newFakeEngine()
+	spy := &spyHandler{}
+	srv, cancel := startTestServer(t, spy)
+	defer cancel()
+	defer srv.Close()
+
+	bridge := NewBridgeWithMode(eng, ember.New(), srv, nil, nil, "system_reminder")
+	bridge.SetDailyBudget(10)
+
+	// Pre-spend over budget directly so BudgetExceeded() is true.
+	bridge.Tracker().Record(TokenEntry{
+		Time:   time.Now(),
+		Tokens: 100,
+		Reason: "pretest",
+		App:    "test",
+		Mode:   "system_reminder",
+	})
+	require.True(t, bridge.Tracker().BudgetExceeded(), "pre-condition: budget must be exceeded")
+
+	// Connect a client to receive the ack broadcast.
+	conn := dialTestClient(t, srv)
+	sendEnvelope(t, conn, TypeHello, Hello{PID: 1})
+	readEnvelope(t, conn) // welcome
+
+	// Push one valid frame.
+	b64, _ := makeColoredPNGB64(t, 42)
+	err := bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: b64,
+		Transcript:       "ignored",
+		ChangeKind:       "frame",
+	})
+	require.NoError(t, err, "budget_exceeded must not return an error")
+
+	// Ring must not have grown.
+	assert.Len(t, bridge.ScreenshotPNGs(), 0, "budget exceeded -> no frame pushed to ring")
+
+	// Ack broadcast must carry reason=budget_exceeded.
+	env := readEnvelope(t, conn)
+	assert.Equal(t, TypeContextAck, env.Type)
+	var ack ContextAck
+	require.NoError(t, json.Unmarshal(env.Data, &ack))
+	assert.Equal(t, "budget_exceeded", ack.Reason, "ack reason must be budget_exceeded")
+}
+
+// TestOnContextUpdate_ConcurrentCallsRaceFree fires 10 goroutines each making
+// 50 OnContextUpdate calls with distinct PNGs. Must not panic and must pass
+// -race. Ring length at end must be <= 6.
+func TestOnContextUpdate_ConcurrentCallsRaceFree(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	var wg sync.WaitGroup
+	for g := range 10 {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := range 50 {
+				seed := uint8((g*50 + i) % 255)
+				b64, _ := makeColoredPNGB64(t, seed)
+				_ = bridge.OnContextUpdate(nil, ContextUpdate{
+					ScreenshotPNGB64: b64,
+					Transcript:       fmt.Sprintf("g%d-i%d", g, i),
+					ChangeKind:       "frame",
+				})
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	pngs := bridge.ScreenshotPNGs()
+	assert.LessOrEqual(t, len(pngs), screenRingCap, "ring must never exceed cap after concurrent writes")
+}
+
+// TestOnContextUpdate_TranscriptReplacesNotConcatenates verifies that each
+// OnContextUpdate with a non-empty Transcript fully replaces the previous value.
+func TestOnContextUpdate_TranscriptReplacesNotConcatenates(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	transcripts := []string{"alpha", "beta", "gamma", "delta"}
+	for _, tx := range transcripts {
+		require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+			Transcript: tx,
+			ChangeKind: "transcript_only",
+		}))
+	}
+
+	got := bridge.Transcript()
+	assert.Equal(t, "delta", got, "Transcript must return only the latest value, not concatenation")
+	assert.NotContains(t, got, "alpha", "old transcript values must not bleed into current")
+}
+
+// TestOnContextUpdate_NoServerDoesNotCrash verifies that a bridge constructed
+// without a server can handle OnContextUpdate without panicking.
+func TestOnContextUpdate_NoServerDoesNotCrash(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	b64, _ := makeColoredPNGB64(t, 77)
+	err := bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: b64,
+		Transcript:       "no server",
+		ChangeKind:       "frame",
+	})
+	require.NoError(t, err, "nil server must not cause an error or panic")
+	assert.Equal(t, "no server", bridge.Transcript())
+	assert.Len(t, bridge.ScreenshotPNGs(), 1)
+}
+
+// TestOnContextUpdate_ChangeKindRecordedInTracker verifies that the ChangeKind
+// field from the ContextUpdate is stored as the Reason in the token tracker
+// entry so cost attribution is correct.
+func TestOnContextUpdate_ChangeKindRecordedInTracker(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		Transcript: "some speech",
+		ChangeKind: "user-invoked",
+	}))
+
+	entries := bridge.Tracker().Recent(10)
+	require.Len(t, entries, 1, "exactly one tracker entry expected")
+	assert.Equal(t, "user-invoked", entries[0].Reason, "tracker entry Reason must match ChangeKind")
 }

@@ -159,7 +159,14 @@ func (c *shellClient) LaunchApp(ctx context.Context, appName string) error {
 	return exec.CommandContext(ctx, "open", "-a", appName).Run()
 }
 
+// osascriptTimeout caps per-call osascript execution. Prevents hangs when a
+// TCC Automation prompt is pending and the GUI can't display it (CI, headless
+// shells, test runs). 15s is generous for normal responses.
+const osascriptTimeout = 15 * time.Second
+
 func (c *shellClient) runOsascript(ctx context.Context, script string) error {
+	ctx, cancel := context.WithTimeout(ctx, osascriptTimeout)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, "osascript", "-e", script)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("osascript failed: %w: %s", err, string(out))
@@ -168,6 +175,8 @@ func (c *shellClient) runOsascript(ctx context.Context, script string) error {
 }
 
 func (c *shellClient) runOsascriptOutput(ctx context.Context, script string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, osascriptTimeout)
+	defer cancel()
 	out, err := exec.CommandContext(ctx, "osascript", "-e", script).Output()
 	if err != nil {
 		return "", err

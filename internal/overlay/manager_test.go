@@ -81,8 +81,9 @@ func TestManagerBinaryMissing(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sockPath := filepath.Join(dir, "o.sock")
 
-	// Empty BinaryPath + empty PATH means resolveBinaryPath returns "" -> "not found"
-	t.Setenv("PATH", dir) // only our temp dir in PATH, which has no providence-overlay
+	// Empty BinaryPath + empty PATH + empty HOME means resolveBinaryPath returns "" -> "not found"
+	t.Setenv("PATH", dir)  // only our temp dir in PATH, which has no providence-overlay
+	t.Setenv("HOME", dir)  // override home so ~/.providence/bin lookup misses (CI vs. dev-installed binary)
 	mgr := NewManager(Config{
 		SocketPath: sockPath,
 		BinaryPath: "", // force PATH lookup

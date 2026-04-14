@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -579,7 +580,25 @@ func (b *Bridge) trySwift(
 		return nil, true, nil
 	}
 
+	// Methods the Swift bridge doesn't implement yet respond with
+	// bad_request("method not implemented yet: X"). Fall back to shell
+	// without degrading the capability - a future phase may wire the method.
+	if isMethodNotImplemented(err) {
+		return nil, true, nil
+	}
+
 	return nil, false, err
+}
+
+func isMethodNotImplemented(err error) bool {
+	if err == nil {
+		return false
+	}
+	var perr *ProtocolError
+	if !errors.As(err, &perr) {
+		return false
+	}
+	return perr.Code == ErrBadRequest && strings.Contains(perr.Message, "method not implemented")
 }
 
 func (b *Bridge) useSwift(cap Capability) bool {

@@ -42,3 +42,4 @@ vendor/
 
 # Internal docs
 SPEC.md
+bridge/swift-mac/.build/

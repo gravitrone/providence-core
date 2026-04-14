@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -157,31 +159,78 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 		logFile = nil
 	}
 
-	// Spawn subprocess.
+	// Spawn the overlay. On macOS, if an .app bundle exists we MUST launch it
+	// via `open -n -a` so LaunchServices owns the process. A direct exec.Command
+	// subprocess inherits the parent's TCC responsibility chain, which causes
+	// ScreenCaptureKit requests to hang indefinitely when providence itself
+	// doesn't have Screen Recording permission.
 	args := []string{"--socket=" + srv.SocketPath()}
-	cmd := exec.CommandContext(ctx, binPath, args...)
-	if logFile != nil {
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-	}
-	// Ensure the subprocess is in its own process group so SIGINT doesn't
-	// propagate from the TUI terminal to the overlay.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	appPath := findAppBundle(binPath)
 
-	if err := cmd.Start(); err != nil {
-		srvCancel()
-		_ = srv.Close()
-		m.server = nil
-		m.setStateSafe(StateStopped)
-		return fmt.Errorf("overlay: spawn %s: %w", binPath, err)
+	var cmd *exec.Cmd
+	var spawnedPID int
+
+	if appPath != "" {
+		// open -n (new instance) -a (app path) --args ... passes the flags to
+		// the launched binary. `open` itself returns as soon as the app is
+		// launched; we then pgrep to find the actual PID for signaling.
+		openArgs := []string{"-n", "-a", appPath, "--args"}
+		openArgs = append(openArgs, args...)
+		openCmd := exec.CommandContext(ctx, "open", openArgs...)
+		if logFile != nil {
+			openCmd.Stdout = logFile
+			openCmd.Stderr = logFile
+		}
+		if err := openCmd.Run(); err != nil {
+			srvCancel()
+			_ = srv.Close()
+			m.server = nil
+			m.setStateSafe(StateStopped)
+			return fmt.Errorf("overlay: open -a %q: %w", appPath, err)
+		}
+		// Locate the spawned process by socket arg.
+		pid, err := findOverlayPID(srv.SocketPath(), 2*time.Second)
+		if err != nil {
+			srvCancel()
+			_ = srv.Close()
+			m.server = nil
+			m.setStateSafe(StateStopped)
+			return fmt.Errorf("overlay: %w", err)
+		}
+		spawnedPID = pid
+		m.logger.Info("overlay: launched via LaunchServices", "pid", pid, "app", appPath)
+	} else {
+		// Loose binary fallback (no .app bundle, e.g. dev build before install).
+		cmd = exec.CommandContext(ctx, binPath, args...)
+		if logFile != nil {
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+		}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := cmd.Start(); err != nil {
+			srvCancel()
+			_ = srv.Close()
+			m.server = nil
+			m.setStateSafe(StateStopped)
+			return fmt.Errorf("overlay: spawn %s: %w", binPath, err)
+		}
+		spawnedPID = cmd.Process.Pid
+		m.logger.Info("overlay: process started", "pid", spawnedPID, "binary", binPath)
 	}
 
 	m.cmd = cmd
-	m.cmdPID = cmd.Process.Pid
-	m.logger.Info("overlay: process started", "pid", m.cmdPID, "binary", binPath)
+	m.cmdPID = spawnedPID
 
 	// Wait for the hello exchange to complete (hello is handled inside the
 	// Bridge's OnHello which marks helloAt). We poll with a 3-second timeout.
+	killSpawned := func() {
+		if cmd != nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		} else if spawnedPID > 0 {
+			_ = syscall.Kill(spawnedPID, syscall.SIGKILL)
+		}
+	}
 	helloTimeout := time.After(3 * time.Second)
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -189,9 +238,7 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 	for !gotHello {
 		select {
 		case <-helloTimeout:
-			// Timed out - kill process, clean up.
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			killSpawned()
 			srvCancel()
 			_ = srv.Close()
 			m.cmd = nil
@@ -204,8 +251,7 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 			gotHello = !m.helloAt.IsZero()
 			m.helloMu.Unlock()
 		case <-ctx.Done():
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			killSpawned()
 			srvCancel()
 			_ = srv.Close()
 			m.cmd = nil
@@ -226,10 +272,22 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 		m.onStart()
 	}
 
-	// Watch for the subprocess to exit so we can transition to stopped.
+	// Watch for the spawned process to exit so we can transition to stopped.
+	// For direct-exec spawns cmd.Wait works; for open-a spawns we poll signal(0).
+	watchedPID := spawnedPID
 	go func() {
-		_ = cmd.Wait()
-		m.logger.Info("overlay: process exited", "pid", m.cmdPID)
+		if cmd != nil {
+			_ = cmd.Wait()
+		} else {
+			// Poll signal(0) every 500ms until the process is gone.
+			for {
+				time.Sleep(500 * time.Millisecond)
+				if err := syscall.Kill(watchedPID, 0); err != nil {
+					break
+				}
+			}
+		}
+		m.logger.Info("overlay: process exited", "pid", watchedPID)
 		if m.State() == StateRunning {
 			m.setStateSafe(StateStopped)
 			if m.onStop != nil {
@@ -270,7 +328,8 @@ func (m *Manager) Stop(ctx context.Context) error {
 		_ = m.server.Broadcast(TypeBye, struct{}{})
 	}
 
-	// SIGTERM with 2-second grace.
+	// SIGTERM with 2-second grace. Two code paths depending on spawn mode:
+	// direct exec (cmd set) vs open-a (only cmdPID set).
 	if m.cmd != nil && m.cmd.Process != nil {
 		_ = m.cmd.Process.Signal(syscall.SIGTERM)
 		done := make(chan struct{})
@@ -287,6 +346,26 @@ func (m *Manager) Stop(ctx context.Context) error {
 		case <-ctx.Done():
 			_ = m.cmd.Process.Kill()
 			<-done
+		}
+	} else if m.cmdPID > 0 {
+		pid := m.cmdPID
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if time.Now().After(deadline) {
+				m.logger.Warn("overlay: SIGTERM grace expired, sending SIGKILL")
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				break
+			}
+			if err := syscall.Kill(pid, 0); err != nil {
+				break // process is gone
+			}
+			select {
+			case <-ctx.Done():
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				deadline = time.Now()
+			case <-time.After(100 * time.Millisecond):
+			}
 		}
 	}
 
@@ -386,6 +465,72 @@ func resolveBinaryPath(override string) string {
 	}
 
 	return ""
+}
+
+// --- .app bundle detection ---
+
+// findAppBundle returns the absolute path to a Providence Overlay .app bundle
+// associated with binPath, or "" if none. Supports two cases:
+//  1. binPath already points inside an .app (.../Foo.app/Contents/MacOS/bin).
+//  2. binPath is a shim script that execs into the .app - parse for the .app path.
+//  3. Conventional fallback: ~/Applications/Providence Overlay.app.
+func findAppBundle(binPath string) string {
+	// Case 1: binPath is inside an .app.
+	if idx := strings.Index(binPath, ".app/Contents/MacOS/"); idx != -1 {
+		return binPath[:idx+len(".app")]
+	}
+
+	// Case 2: shim script - read + look for .app path reference.
+	if data, err := os.ReadFile(binPath); err == nil {
+		content := string(data)
+		if idx := strings.Index(content, ".app/Contents/MacOS/"); idx != -1 {
+			start := strings.LastIndexAny(content[:idx], "\"' \t\n")
+			if start >= 0 {
+				candidate := content[start+1 : idx+len(".app")]
+				if strings.Contains(candidate, "$HOME") {
+					if home, err := os.UserHomeDir(); err == nil {
+						candidate = strings.ReplaceAll(candidate, "$HOME", home)
+					}
+				}
+				if _, err := os.Stat(candidate); err == nil {
+					return candidate
+				}
+			}
+		}
+	}
+
+	// Case 3: conventional location.
+	if home, err := os.UserHomeDir(); err == nil {
+		candidate := filepath.Join(home, "Applications", "Providence Overlay.app")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	return ""
+}
+
+// findOverlayPID locates the PID of an overlay process launched with the given
+// socket argument. Polls pgrep up to the timeout since open(1) returns before
+// the app is fully up.
+func findOverlayPID(socketPath string, timeout time.Duration) (int, error) {
+	deadline := time.Now().Add(timeout)
+	pattern := "providence-overlay.*--socket=" + socketPath
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("pgrep", "-f", pattern).Output()
+		if err == nil {
+			fields := strings.Fields(strings.TrimSpace(string(out)))
+			// pgrep may return multiple matches (open's own process, shim, app) -
+			// take the last/newest which is most likely the actual app process.
+			for i := len(fields) - 1; i >= 0; i-- {
+				if pid, perr := strconv.Atoi(fields[i]); perr == nil && pid > 0 {
+					return pid, nil
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return 0, fmt.Errorf("could not locate spawned overlay process (socket=%s)", socketPath)
 }
 
 // --- helloNotifyHandler ---

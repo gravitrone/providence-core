@@ -203,10 +203,12 @@ func runTUI(engineType string, cfg config.Config, resumeQuery string, continueSe
 		appOpts = append(appOpts, ui.WithOverlay(overlayMgr, overlayBridge))
 
 		if cfg.Overlay.AutoStart {
+			// Use Background context so the server lives for the lifetime of
+			// the TUI. A goroutine-local WithCancel + defer cancel would tear
+			// the server down the instant Start returns (which happens fast
+			// in spawn=false mode).
 			go func() {
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				if err := overlayMgr.Start(ctx, overlayBridge); err != nil {
+				if err := overlayMgr.Start(context.Background(), overlayBridge); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: overlay auto-start: %v\n", err)
 				}
 			}()

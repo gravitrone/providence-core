@@ -47,6 +47,11 @@ type Welcome struct {
 	EmberActive bool      `json:"ember_active"`
 	CWD         string    `json:"cwd"`
 	Timestamp   time.Time `json:"timestamp"`
+
+	// Phase 10: runtime preferences sourced from overlay config.
+	TTSEnabled   bool     `json:"tts_enabled,omitempty"`
+	Position     string   `json:"position,omitempty"`
+	ExcludedApps []string `json:"excluded_apps,omitempty"`
 }
 
 // Hello is sent Overlay -> TUI as the first message on connect to identify

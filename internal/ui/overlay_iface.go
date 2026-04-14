@@ -29,6 +29,13 @@ type overlayTracked interface {
 	Tracker() *overlay.TokenTracker
 }
 
+// overlayPrefsReader is optionally implemented by an overlayBridge that
+// advertises runtime prefs to overlay clients. Used by `/overlay status`.
+// Phase 10.
+type overlayPrefsReader interface {
+	RuntimePrefs() (tts bool, position string, excludedApps []string)
+}
+
 // WithOverlay is a functional option for wiring an overlay manager and bridge
 // into the AgentTab after construction.
 func WithOverlay(mgr overlayManager, bridge overlayBridge) func(*AgentTab) {

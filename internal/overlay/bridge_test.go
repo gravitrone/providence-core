@@ -462,6 +462,41 @@ func TestBridgeDefaultModeFallsBackToSystemReminder(t *testing.T) {
 	assert.Equal(t, "system_reminder", bridge.InjectionMode())
 }
 
+// TestBridgeRuntimePrefsAdvertisedInWelcome verifies that SetRuntimePrefs
+// values are carried through OnHello into the Welcome envelope.
+// Phase 10.
+func TestBridgeRuntimePrefsAdvertisedInWelcome(t *testing.T) {
+	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
+	bridge.SetRuntimePrefs(true, "bottom-bar", []string{"com.1password.1password", "com.apple.keychainaccess"})
+
+	w := bridge.OnHello(nil, Hello{ClientVersion: "1.0", PID: 100})
+	assert.True(t, w.TTSEnabled)
+	assert.Equal(t, "bottom-bar", w.Position)
+	assert.Equal(t, []string{"com.1password.1password", "com.apple.keychainaccess"}, w.ExcludedApps)
+}
+
+// TestBridgeRuntimePrefsDefaultEmpty verifies a bridge with no SetRuntimePrefs
+// call returns zero values in Welcome.
+func TestBridgeRuntimePrefsDefaultEmpty(t *testing.T) {
+	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
+	w := bridge.OnHello(nil, Hello{PID: 1})
+	assert.False(t, w.TTSEnabled)
+	assert.Empty(t, w.Position)
+	assert.Empty(t, w.ExcludedApps)
+}
+
+// TestBridgeRuntimePrefsSnapshotIsCopy verifies callers cannot mutate the
+// bridge's internal slice via the arg they passed in.
+func TestBridgeRuntimePrefsSnapshotIsCopy(t *testing.T) {
+	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
+	apps := []string{"com.example.a"}
+	bridge.SetRuntimePrefs(false, "right-sidebar", apps)
+	apps[0] = "com.example.mutated"
+
+	_, _, got := bridge.RuntimePrefs()
+	assert.Equal(t, []string{"com.example.a"}, got, "bridge must hold its own copy")
+}
+
 // TestContextUpdateOriginField verifies the Origin field is present in
 // ContextUpdate and round-trips through JSON.
 func TestContextUpdateOriginField(t *testing.T) {

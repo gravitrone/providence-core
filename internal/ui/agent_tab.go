@@ -5552,6 +5552,15 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 					sb.WriteString(fmt.Sprintf("  %-20s  %v\n", k, v))
 				}
 			}
+			// Phase 10: show runtime prefs if bridge exposes them.
+			if pr, ok := at.overlayBridge.(overlayPrefsReader); ok {
+				tts, pos, excluded := pr.RuntimePrefs()
+				sb.WriteString(fmt.Sprintf("  %-20s  %v\n", "tts_enabled", tts))
+				if pos != "" {
+					sb.WriteString(fmt.Sprintf("  %-20s  %s\n", "position", pos))
+				}
+				sb.WriteString(fmt.Sprintf("  %-20s  %d\n", "exclusions", len(excluded)))
+			}
 			at.addSystemMessage(sb.String())
 
 		case "start":

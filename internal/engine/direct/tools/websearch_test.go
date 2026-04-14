@@ -199,7 +199,13 @@ func TestWebSearchName(t *testing.T) {
 // setExaURL overrides the Exa search endpoint for this test.
 func setExaURL(t *testing.T, url string) {
 	t.Helper()
+	exaSearchURLMu.Lock()
 	orig := exaSearchURL
 	exaSearchURL = url
-	t.Cleanup(func() { exaSearchURL = orig })
+	exaSearchURLMu.Unlock()
+	t.Cleanup(func() {
+		exaSearchURLMu.Lock()
+		exaSearchURL = orig
+		exaSearchURLMu.Unlock()
+	})
 }

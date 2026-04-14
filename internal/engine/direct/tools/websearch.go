@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -41,8 +42,12 @@ const (
 	exaMaxChars   = 3000
 )
 
-// exaSearchURL is the Exa API endpoint. It is a var so tests can override it.
-var exaSearchURL = "https://api.exa.ai/search"
+// exaSearchURL is the Exa API endpoint. Protected by exaSearchURLMu for
+// safe concurrent override in tests.
+var (
+	exaSearchURLMu sync.RWMutex
+	exaSearchURL   = "https://api.exa.ai/search"
+)
 
 type exaRequest struct {
 	Query      string      `json:"query"`
@@ -104,7 +109,11 @@ func (t *WebSearchTool) Execute(ctx context.Context, input map[string]any) ToolR
 	ctx, cancel := context.WithTimeout(ctx, exaTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, exaSearchURL, bytes.NewReader(body))
+	exaSearchURLMu.RLock()
+	searchURL := exaSearchURL
+	exaSearchURLMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, searchURL, bytes.NewReader(body))
 	if err != nil {
 		return ToolResult{Content: fmt.Sprintf("failed to create request: %v", err), IsError: true}
 	}

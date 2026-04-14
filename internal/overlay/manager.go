@@ -79,6 +79,9 @@ type Manager struct {
 	server  *Server
 	cmd     *exec.Cmd
 	cmdPID  int // captured at start, safe to read after start completes
+	// cmdDone is closed by the Start watch goroutine once cmd.Wait() returns.
+	// Stop waits on this instead of calling cmd.Wait() itself to avoid a data race.
+	cmdDone chan struct{}
 	state   State
 	stateMu sync.RWMutex
 	logger  *slog.Logger
@@ -238,6 +241,7 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 
 	m.cmd = cmd
 	m.cmdPID = spawnedPID
+	m.cmdDone = make(chan struct{})
 
 	// Wait for the hello exchange to complete (hello is handled inside the
 	// Bridge's OnHello which marks helloAt). We poll with a 3-second timeout.
@@ -292,10 +296,13 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 
 	// Watch for the spawned process to exit so we can transition to stopped.
 	// For direct-exec spawns cmd.Wait works; for open-a spawns we poll signal(0).
+	// cmdDone is closed here; Stop() must not call cmd.Wait() itself.
 	watchedPID := spawnedPID
+	cmdDone := m.cmdDone
 	go func() {
 		if cmd != nil {
 			_ = cmd.Wait()
+			close(cmdDone)
 		} else {
 			// Poll signal(0) every 500ms until the process is gone.
 			for {
@@ -304,6 +311,7 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 					break
 				}
 			}
+			close(cmdDone)
 		}
 		m.logger.Info("overlay: process exited", "pid", watchedPID)
 		if m.State() == StateRunning {
@@ -348,22 +356,20 @@ func (m *Manager) Stop(ctx context.Context) error {
 
 	// SIGTERM with 2-second grace. Two code paths depending on spawn mode:
 	// direct exec (cmd set) vs open-a (only cmdPID set).
+	// We never call cmd.Wait() here - that is the exclusive job of the Start watch
+	// goroutine, which closes m.cmdDone when Wait returns. We wait on cmdDone.
 	if m.cmd != nil && m.cmd.Process != nil {
+		cmdDone := m.cmdDone
 		_ = m.cmd.Process.Signal(syscall.SIGTERM)
-		done := make(chan struct{})
-		go func() {
-			_ = m.cmd.Wait()
-			close(done)
-		}()
 		select {
-		case <-done:
+		case <-cmdDone:
 		case <-time.After(2 * time.Second):
 			m.logger.Warn("overlay: SIGTERM grace expired, sending SIGKILL")
 			_ = m.cmd.Process.Kill()
-			<-done
+			<-cmdDone
 		case <-ctx.Done():
 			_ = m.cmd.Process.Kill()
-			<-done
+			<-cmdDone
 		}
 	} else if m.cmdPID > 0 {
 		pid := m.cmdPID

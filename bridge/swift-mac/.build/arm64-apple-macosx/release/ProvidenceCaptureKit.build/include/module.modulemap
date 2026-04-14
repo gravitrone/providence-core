@@ -1,0 +1,3 @@
+module ProvidenceCaptureKit {
+    header "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/ProvidenceCaptureKit.build/include/ProvidenceCaptureKit-Swift.h"
+}

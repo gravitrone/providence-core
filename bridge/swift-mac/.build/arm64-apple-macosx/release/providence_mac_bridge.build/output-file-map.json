@@ -1,0 +1,43 @@
+{
+  "": {
+    "dependencies": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/providence_mac_bridge.d",
+    "object": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/providence_mac_bridge.o",
+    "swift-dependencies": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/master.swiftdeps"
+  },
+  "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/Sources/providence-mac-bridge/Capture.swift": {
+    "object": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Capture.swift.o",
+    "swiftmodule": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Capture~partial.swiftmodule",
+    "swift-dependencies": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Capture.swiftdeps",
+    "diagnostics": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Capture.dia"
+  },
+  "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/Sources/providence-mac-bridge/Dispatcher.swift": {
+    "object": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Dispatcher.swift.o",
+    "swiftmodule": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Dispatcher~partial.swiftmodule",
+    "swift-dependencies": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Dispatcher.swiftdeps",
+    "diagnostics": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Dispatcher.dia"
+  },
+  "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/Sources/providence-mac-bridge/IOLoop.swift": {
+    "object": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/IOLoop.swift.o",
+    "swiftmodule": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/IOLoop~partial.swiftmodule",
+    "swift-dependencies": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/IOLoop.swiftdeps",
+    "diagnostics": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/IOLoop.dia"
+  },
+  "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/Sources/providence-mac-bridge/Permissions.swift": {
+    "object": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Permissions.swift.o",
+    "swiftmodule": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Permissions~partial.swiftmodule",
+    "swift-dependencies": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Permissions.swiftdeps",
+    "diagnostics": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Permissions.dia"
+  },
+  "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/Sources/providence-mac-bridge/Protocol.swift": {
+    "object": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Protocol.swift.o",
+    "swiftmodule": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Protocol~partial.swiftmodule",
+    "swift-dependencies": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Protocol.swiftdeps",
+    "diagnostics": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/Protocol.dia"
+  },
+  "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/Sources/providence-mac-bridge/main.swift": {
+    "object": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/main.swift.o",
+    "swiftmodule": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/main.swiftdeps",
+    "diagnostics": "/Users/alxx/Code/Gravitrone/Providence/providence-w-bridge/bridge/swift-mac/.build/arm64-apple-macosx/release/providence_mac_bridge.build/main.dia"
+  }
+}

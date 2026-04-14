@@ -2394,24 +2394,8 @@ func (at AgentTab) renderChatPane(paneWidth, height int) string {
 		vpPadded.WriteString(leftPad + line)
 	}
 
-	// Gradient divider at content width with turn counter, padded.
-	turnLabel := ""
-	if at.turnCount > 0 {
-		turnLabel = fmt.Sprintf(" turn %d ", at.turnCount)
-	}
-	divW := contentW
-	if turnLabel != "" {
-		divW = contentW - len(turnLabel)
-		if divW < 4 {
-			divW = 4
-		}
-	}
-	dividerLine := gradientDivider(divW)
-	if turnLabel != "" {
-		turnStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true)
-		dividerLine += turnStyle.Render(turnLabel)
-	}
-	divider := leftPad + dividerLine
+	// Gradient divider at content width, padded.
+	divider := leftPad + gradientDivider(contentW)
 
 	// Command preview, padded.
 	previewSection := ""

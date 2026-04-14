@@ -25,6 +25,9 @@ type swiftBridgeClient interface {
 	Click(context.Context, clickParams) error
 	TypeText(context.Context, string) error
 	KeyCombo(context.Context, KeyCombo) error
+	AXTree(context.Context, AXTreeParams) (AXTreeResult, error)
+	AXFind(context.Context, AXQuery) (AXFindResult, error)
+	AXPerform(context.Context, string, string) error
 	Close(context.Context) error
 }
 
@@ -80,6 +83,8 @@ func New(opts ...Option) *Bridge {
 			CapType:        true,
 			CapKey:         true,
 			CapAXTree:      true,
+			CapAXFind:      true,
+			CapAXPerform:   true,
 			CapScreenDiff:  true,
 			CapActionBatch: true,
 			CapClipboard:   true,
@@ -327,6 +332,71 @@ func (b *Bridge) LaunchApp(ctx context.Context, appName string) error {
 	}
 
 	return b.shell.LaunchApp(ctx, appName)
+}
+
+// AXTree returns the Accessibility tree for the target app.
+func (b *Bridge) AXTree(ctx context.Context, p AXTreeParams) (AXTreeResult, error) {
+	if !b.useSwift(CapAXTree) {
+		return AXTreeResult{}, errors.New("AX tree requires native bridge; install providence-mac-bridge and grant Accessibility permission")
+	}
+
+	b.mu.Lock()
+	swift := b.swift
+	b.mu.Unlock()
+
+	if swift == nil {
+		return AXTreeResult{}, errors.New("AX tree requires native bridge; install providence-mac-bridge and grant Accessibility permission")
+	}
+
+	result, err := swift.AXTree(ctx, p)
+	if err != nil && b.shouldDegrade(err) {
+		b.degrade(CapAXTree, err)
+		return AXTreeResult{}, err
+	}
+	return result, err
+}
+
+// AXFind searches for Accessibility elements matching the given query.
+func (b *Bridge) AXFind(ctx context.Context, q AXQuery) (AXFindResult, error) {
+	if !b.useSwift(CapAXFind) {
+		return AXFindResult{}, errors.New("AX find requires native bridge; install providence-mac-bridge and grant Accessibility permission")
+	}
+
+	b.mu.Lock()
+	swift := b.swift
+	b.mu.Unlock()
+
+	if swift == nil {
+		return AXFindResult{}, errors.New("AX find requires native bridge; install providence-mac-bridge and grant Accessibility permission")
+	}
+
+	result, err := swift.AXFind(ctx, q)
+	if err != nil && b.shouldDegrade(err) {
+		b.degrade(CapAXFind, err)
+		return AXFindResult{}, err
+	}
+	return result, err
+}
+
+// AXPerform triggers an Accessibility action on an element by ID.
+func (b *Bridge) AXPerform(ctx context.Context, elementID, action string) error {
+	if !b.useSwift(CapAXPerform) {
+		return errors.New("AX perform requires native bridge; install providence-mac-bridge and grant Accessibility permission")
+	}
+
+	b.mu.Lock()
+	swift := b.swift
+	b.mu.Unlock()
+
+	if swift == nil {
+		return errors.New("AX perform requires native bridge; install providence-mac-bridge and grant Accessibility permission")
+	}
+
+	err := swift.AXPerform(ctx, elementID, action)
+	if err != nil && b.shouldDegrade(err) {
+		b.degrade(CapAXPerform, err)
+	}
+	return err
 }
 
 // Close shuts down the Swift bridge process if it was started.

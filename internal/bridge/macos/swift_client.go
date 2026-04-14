@@ -4,6 +4,7 @@ package macos
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,23 @@ import (
 )
 
 var swiftRequestID atomic.Uint64
+
+type clickParams struct {
+	X      int    `json:"x"`
+	Y      int    `json:"y"`
+	Button string `json:"button,omitempty"`
+	Count  int    `json:"count,omitempty"`
+}
+
+type typeTextParams struct {
+	Text string `json:"text"`
+}
+
+type keyComboParams struct {
+	Key         string   `json:"key"`
+	Modifiers   []string `json:"modifiers,omitempty"`
+	VirtualCode int      `json:"virtual_code"`
+}
 
 type swiftClient struct {
 	cmd       *exec.Cmd
@@ -36,6 +54,22 @@ type swiftEnvelope struct {
 	Error  *ProtocolError  `json:"error,omitempty"`
 	Event  string          `json:"event,omitempty"`
 	Data   json.RawMessage `json:"data,omitempty"`
+}
+
+func (c *swiftClient) Click(ctx context.Context, params clickParams) error {
+	return c.callAction(ctx, "click", params)
+}
+
+func (c *swiftClient) TypeText(ctx context.Context, text string) error {
+	return c.callAction(ctx, "type_text", typeTextParams{Text: text})
+}
+
+func (c *swiftClient) KeyCombo(ctx context.Context, combo KeyCombo) error {
+	return c.callAction(ctx, "key_combo", keyComboParams{
+		Key:         combo.Key,
+		Modifiers:   combo.Modifiers,
+		VirtualCode: combo.VirtualCode,
+	})
 }
 
 func spawnSwift(ctx context.Context, binary string, timeout time.Duration) (*swiftClient, error) {
@@ -352,4 +386,37 @@ func (c *swiftClient) waitForDone(ctx context.Context, timeout time.Duration) bo
 	case <-timer.C:
 		return false
 	}
+}
+
+func (c *swiftClient) callAction(ctx context.Context, method string, params any) error {
+	payload, err := json.Marshal(params)
+	if err != nil {
+		return fmt.Errorf("marshal %s params: %w", method, err)
+	}
+
+	result, err := c.call(ctx, method, json.RawMessage(payload))
+	if err != nil {
+		return err
+	}
+
+	return decodeActionResult(result)
+}
+
+func decodeActionResult(result json.RawMessage) error {
+	trimmed := bytes.TrimSpace(result)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+
+	var payload struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(trimmed, &payload); err != nil {
+		return fmt.Errorf("failed to decode swift action result: %w", err)
+	}
+	if payload.OK {
+		return nil
+	}
+
+	return fmt.Errorf("swift action did not return ok")
 }

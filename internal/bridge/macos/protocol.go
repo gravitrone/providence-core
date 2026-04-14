@@ -67,7 +67,10 @@ type Capability string
 const (
 	CapScreenshot  Capability = "screenshot"
 	CapClick       Capability = "click"
+	CapDoubleClick Capability = "double_click"
+	CapRightClick  Capability = "right_click"
 	CapType        Capability = "type"
+	CapKey         Capability = "key"
 	CapAXTree      Capability = "ax_tree"
 	CapScreenDiff  Capability = "screen_diff"
 	CapActionBatch Capability = "action_batch"

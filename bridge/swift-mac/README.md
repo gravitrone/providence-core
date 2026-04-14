@@ -80,6 +80,18 @@ Only the following methods are wired:
 
 Any other method returns `error.code = "bad_request"` with `message = "method not implemented yet: <name>"`. Phase 2-5 wire input, AX, diff, batch, metrics.
 
+## Phase 2 scope
+
+Phase 2 adds: `click`, `double_click`, `right_click`, `type_text`, `key_combo`. Input methods require Accessibility permission.
+
+- `click` - posts `.leftMouseDown/.leftMouseUp` (or `right`/`middle` via `button` param) at `(x, y)`. Supports `count` (double/triple clicks set `.mouseEventClickState`), `modifiers` (`cmd`, `shift`, `option`, `control`, `fn`), and `settle_ms` (cursor move settle delay, default 50ms).
+- `double_click` - same params as `click`, caller's `count` is ignored and forced to 2.
+- `right_click` - same params as `click`, `button` is forced to `"right"`.
+- `type_text` - injects `text` via `CGEvent.keyboardSetUnicodeString` with virtualKey=0. Minimum 8ms inter-keystroke delay; `delay_ms` can bump it higher. Handles emoji / astral-plane scalars via UTF-16 surrogate pair encoding.
+- `key_combo` - posts `keyDown`/`keyUp` for `virtual_code` (HIToolbox kVK_*) with `modifiers` held. If `virtual_code == -1`, falls back to Unicode injection of the `key` string under modifier flags. Fails with `bad_request` if neither is provided.
+
+Error mapping: CGEvent post failures return `capture_failed` with a hint about Accessibility. Invalid `key_combo` shape returns `bad_request`.
+
 ## Minimum macOS
 
 - **12.0** floor (`Package.swift` platform). On 12.0-12.2 the bridge falls back to `CGWindowListCreateImage` for screenshots.

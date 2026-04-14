@@ -175,86 +175,36 @@ func (c *shellClient) runOsascriptOutput(ctx context.Context, script string) (st
 	return string(out), nil
 }
 
-// keyMap maps common key names to AppleScript key code references.
-var keyMap = map[string]int{
-	"return":    36,
-	"enter":     36,
-	"tab":       48,
-	"space":     49,
-	"delete":    51,
-	"backspace": 51,
-	"escape":    53,
-	"esc":       53,
-	"up":        126,
-	"down":      125,
-	"left":      123,
-	"right":     124,
-	"home":      115,
-	"end":       119,
-	"pageup":    116,
-	"pagedown":  121,
-	"f1":        122,
-	"f2":        120,
-	"f3":        99,
-	"f4":        118,
-	"f5":        96,
-	"f6":        97,
-	"f7":        98,
-	"f8":        100,
-	"f9":        101,
-	"f10":       109,
-	"f11":       103,
-	"f12":       111,
-}
-
-// modifierMap maps modifier names to AppleScript modifier syntax.
-var modifierMap = map[string]string{
-	"command": "command down",
+var appleScriptModifierMap = map[string]string{
 	"cmd":     "command down",
 	"control": "control down",
-	"ctrl":    "control down",
 	"option":  "option down",
-	"alt":     "option down",
 	"shift":   "shift down",
 }
 
 // buildKeystrokeScript parses a key combo like "command+v" into AppleScript.
 func buildKeystrokeScript(keys string) (string, error) {
-	parts := strings.Split(strings.ToLower(strings.TrimSpace(keys)), "+")
-	if len(parts) == 0 {
-		return "", fmt.Errorf("empty key combo")
+	combo, err := ParseKeyCombo(keys)
+	if err != nil {
+		return "", err
 	}
 
-	var modifiers []string
-	var keyPart string
-
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if mod, ok := modifierMap[p]; ok {
-			modifiers = append(modifiers, mod)
-		} else {
-			keyPart = p
-		}
+	modifiers := make([]string, 0, len(combo.Modifiers))
+	for _, modifier := range combo.Modifiers {
+		modifiers = append(modifiers, appleScriptModifierMap[modifier])
 	}
 
-	if keyPart == "" {
-		return "", fmt.Errorf("no key specified in combo: %s", keys)
-	}
-
-	// Check if it's a special key (needs key code) or a character (needs keystroke)
-	if code, ok := keyMap[keyPart]; ok {
-		// Special key - use key code
+	if usesAppleScriptKeyCode(combo.Key) {
 		if len(modifiers) > 0 {
 			return fmt.Sprintf(`tell application "System Events" to key code %d using {%s}`,
-				code, strings.Join(modifiers, ", ")), nil
+				combo.VirtualCode, strings.Join(modifiers, ", ")), nil
 		}
-		return fmt.Sprintf(`tell application "System Events" to key code %d`, code), nil
+		return fmt.Sprintf(`tell application "System Events" to key code %d`, combo.VirtualCode), nil
 	}
 
-	// Regular character - use keystroke
 	if len(modifiers) > 0 {
 		return fmt.Sprintf(`tell application "System Events" to keystroke "%s" using {%s}`,
-			keyPart, strings.Join(modifiers, ", ")), nil
+			combo.Key, strings.Join(modifiers, ", ")), nil
 	}
-	return fmt.Sprintf(`tell application "System Events" to keystroke "%s"`, keyPart), nil
+	return fmt.Sprintf(`tell application "System Events" to keystroke "%s"`, combo.Key), nil
 }

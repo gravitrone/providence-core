@@ -15,6 +15,11 @@ func (f *fakeInj) PendingSystemReminder() string {
 	return s
 }
 
+func (f *fakeInj) MarkAttached()                    {}
+func (f *fakeInj) RingChangedSinceLastAttach() bool { return false }
+func (f *fakeInj) ScreenshotPNGs() [][]byte         { return nil }
+func (f *fakeInj) Transcript() string               { return "" }
+
 // TestPrepareUserText_WithReminder verifies that a pending reminder is prepended.
 func TestPrepareUserText_WithReminder(t *testing.T) {
 	e := &DirectEngine{}

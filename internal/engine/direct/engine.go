@@ -174,9 +174,21 @@ type DirectEngine struct {
 }
 
 // contextInjector is a local interface matching overlay.Injector to avoid an
-// import cycle between internal/engine/direct and internal/overlay.
+// import cycle between internal/engine/direct and internal/overlay. The
+// vision pipeline pulls ScreenshotPNGs() + Transcript() at turn start; the
+// PendingSystemReminder is now just the rolling-transcript wrapper.
 type contextInjector interface {
 	PendingSystemReminder() string
+	// ScreenshotPNGs returns the decoded PNG frames in the bridge ring buffer,
+	// oldest first. Empty/nil = no overlay attached or screen capture off.
+	ScreenshotPNGs() [][]byte
+	Transcript() string
+	// MarkAttached lets the bridge know the engine consumed the current ring
+	// head so it can dedup identical attachments on subsequent ember ticks.
+	MarkAttached()
+	// RingChangedSinceLastAttach allows the engine to skip re-attaching the
+	// same frames when nothing new has come in (saves token cost on idle).
+	RingChangedSinceLastAttach() bool
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -687,6 +699,22 @@ func (e *DirectEngine) Send(text string) error {
 	images := e.pendingImages
 	e.pendingImages = nil
 	e.mu.Unlock()
+
+	// Ambient mode: pull screenshots from the overlay ring buffer and attach
+	// them to this turn as image content. Subsample to oldest + 2 newest so
+	// the model gets a "before / now-1 / now" view without ballooning token
+	// cost. Skip if the ring is unchanged since the last attach (idle ember
+	// ticks during quiet periods).
+	if e.contextInjector != nil && e.contextInjector.RingChangedSinceLastAttach() {
+		pngs := e.contextInjector.ScreenshotPNGs()
+		if len(pngs) > 0 {
+			selected := selectAmbientFrames(pngs)
+			for _, png := range selected {
+				images = append(images, ImageData{MediaType: "image/png", Data: png})
+			}
+			e.contextInjector.MarkAttached()
+		}
+	}
 
 	if !e.sessionStarted {
 		e.sessionStarted = true
@@ -2716,4 +2744,19 @@ func (e *DirectEngine) cleanupComputerUse(toolResults []ToolCallResult) {
 	for _, f := range matches {
 		os.Remove(f)
 	}
+}
+
+// selectAmbientFrames picks at most 3 PNG frames out of the overlay ring
+// buffer for vision attachment: the oldest (~30s ago) and the two most
+// recent. This gives the model a temporal "before / now-1 / now" comparison
+// while keeping per-turn vision token cost bounded (~2300 tokens at 768x768).
+func selectAmbientFrames(pngs [][]byte) [][]byte {
+	n := len(pngs)
+	if n == 0 {
+		return nil
+	}
+	if n <= 3 {
+		return pngs
+	}
+	return [][]byte{pngs[0], pngs[n-2], pngs[n-1]}
 }

@@ -12,7 +12,7 @@ func TestBuildSystemPromptContainsIdentity(t *testing.T) {
 	prompt := BuildSystemPrompt(nil)
 	require.NotEmpty(t, prompt)
 	assert.Contains(t, prompt, "Providence")
-	assert.Contains(t, prompt, "Profaned")
+	assert.Contains(t, prompt, "flame")
 }
 
 func TestBuildSystemBlocksReturnsBlocks(t *testing.T) {
@@ -136,19 +136,19 @@ func TestBuildSystemPromptContainsNewSections(t *testing.T) {
 	assert.Contains(t, prompt, "blast radius")
 
 	// Tool usage section.
-	assert.Contains(t, prompt, "Read instead of cat")
-	assert.Contains(t, prompt, "Grep instead of grep")
+	assert.Contains(t, prompt, "Read a file: Read")
+	assert.Contains(t, prompt, "Search file contents: Grep")
 
 	// Coding guidelines extended.
-	assert.Contains(t, prompt, "Do not propose changes to code you haven't read")
+	assert.Contains(t, prompt, "Read before you edit")
 
 	// Output efficiency section.
 	assert.Contains(t, prompt, "Go straight to the point")
-	assert.Contains(t, prompt, "Never echo or repeat tool results")
+	assert.Contains(t, prompt, "Never echo tool results")
 
 	// Git safety section.
-	assert.Contains(t, prompt, "Never update the git config")
-	assert.Contains(t, prompt, "Never add co-author tags")
+	assert.Contains(t, prompt, "Never edit git config")
+	assert.Contains(t, prompt, "Never add Co-Authored-By")
 
 	// Ember section (inactive).
 	assert.Contains(t, prompt, "Ember autonomous mode is currently inactive")
@@ -274,5 +274,5 @@ func TestNoURLBan(t *testing.T) {
 func TestNoCoAuthorTag(t *testing.T) {
 	prompt := BuildSystemPrompt(nil)
 	// Git safety section should prohibit co-author tags.
-	assert.Contains(t, prompt, "Never add co-author tags")
+	assert.Contains(t, prompt, "Never add Co-Authored-By")
 }

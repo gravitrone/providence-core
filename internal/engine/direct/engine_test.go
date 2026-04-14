@@ -667,3 +667,67 @@ func TestDirectEngineModelAndEngineType(t *testing.T) {
 	assert.Equal(t, "claude-sonnet-4-20250514", e.Model())
 	assert.Equal(t, "direct", e.EngineType())
 }
+
+// --- selectAmbientFrames tests ---
+
+// TestSelectAmbientFrames_Empty verifies that nil input returns nil.
+func TestSelectAmbientFrames_Empty(t *testing.T) {
+	got := selectAmbientFrames(nil)
+	assert.Nil(t, got)
+
+	got = selectAmbientFrames([][]byte{})
+	assert.Nil(t, got)
+}
+
+// TestSelectAmbientFrames_AtMostThree verifies that slices with 1, 2, or 3
+// elements are returned verbatim (no truncation).
+func TestSelectAmbientFrames_AtMostThree(t *testing.T) {
+	one := [][]byte{{1}}
+	two := [][]byte{{1}, {2}}
+	three := [][]byte{{1}, {2}, {3}}
+
+	assert.Equal(t, one, selectAmbientFrames(one))
+	assert.Equal(t, two, selectAmbientFrames(two))
+	assert.Equal(t, three, selectAmbientFrames(three))
+}
+
+// TestSelectAmbientFrames_SixFrames verifies the oldest+2newest selection for
+// n>3: result must be {pngs[0], pngs[n-2], pngs[n-1]}.
+func TestSelectAmbientFrames_SixFrames(t *testing.T) {
+	pngs := [][]byte{
+		{1}, {2}, {3}, {4}, {5}, {6},
+	}
+	got := selectAmbientFrames(pngs)
+	require.Len(t, got, 3, "must return exactly 3 frames for n=6")
+	assert.Equal(t, pngs[0], got[0], "got[0] must be oldest (index 0)")
+	assert.Equal(t, pngs[4], got[1], "got[1] must be second-to-last (n-2)")
+	assert.Equal(t, pngs[5], got[2], "got[2] must be newest (n-1)")
+}
+
+// TestSelectAmbientFrames_FourFrames verifies the same contract for n=4.
+func TestSelectAmbientFrames_FourFrames(t *testing.T) {
+	pngs := [][]byte{
+		{10}, {20}, {30}, {40},
+	}
+	got := selectAmbientFrames(pngs)
+	require.Len(t, got, 3)
+	assert.Equal(t, pngs[0], got[0])
+	assert.Equal(t, pngs[2], got[1], "n-2 for n=4 is index 2")
+	assert.Equal(t, pngs[3], got[2], "n-1 for n=4 is index 3")
+}
+
+// TestSelectAmbientFrames_PointerIdentity verifies that the returned slices are
+// the same underlying []byte values (no copies), using byte equality.
+func TestSelectAmbientFrames_PointerIdentity(t *testing.T) {
+	pngs := make([][]byte, 6)
+	for i := range pngs {
+		pngs[i] = []byte{byte(i + 1)}
+	}
+
+	got := selectAmbientFrames(pngs)
+	require.Len(t, got, 3)
+	// Content equality confirms the right frames were selected.
+	assert.Equal(t, []byte{1}, got[0])
+	assert.Equal(t, []byte{5}, got[1])
+	assert.Equal(t, []byte{6}, got[2])
+}

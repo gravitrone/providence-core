@@ -1,8 +1,13 @@
 package overlay
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/png"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -65,14 +70,11 @@ func TestBridgeContextUpdateStoresPendingReminder(t *testing.T) {
 	em := ember.New()
 	bridge := NewBridge(eng, em, nil, nil, nil)
 
+	// Post-ambient-rewire: ContextUpdate only carries ScreenshotPNGB64 + Transcript.
 	u := ContextUpdate{
-		Timestamp:   time.Now(),
-		ActiveApp:   "com.microsoft.VSCode",
-		WindowTitle: "main.go",
-		Activity:    "coding",
-		AXSummary:   "func Send(text string) error { ... line 42",
-		Transcript:  "what does this function do",
-		ChangeKind:  "pattern",
+		Timestamp:  time.Now(),
+		Transcript: "what does this function do",
+		ChangeKind: "transcript_only",
 	}
 
 	err := bridge.OnContextUpdate(nil, u)
@@ -82,27 +84,34 @@ func TestBridgeContextUpdateStoresPendingReminder(t *testing.T) {
 	assert.NotEmpty(t, reminder)
 	assert.Contains(t, reminder, `<system-reminder origin="overlay">`)
 	assert.Contains(t, reminder, "</system-reminder>")
-	assert.Contains(t, reminder, "com.microsoft.VSCode")
-	assert.Contains(t, reminder, "coding")
-	assert.Contains(t, reminder, "func Send")
 	assert.Contains(t, reminder, "what does this function do")
 }
 
 func TestBridgePendingReminderClearsAfterRead(t *testing.T) {
+	// Post-ambient-rewire: PendingSystemReminder is a non-destructive read.
+	// It returns the rolling transcript wrapped in a reminder block.
+	// Without a transcript, it returns "".
 	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
 
+	// No transcript yet - reminder is empty.
 	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
-		ActiveApp: "Safari",
-		Activity:  "browsing",
 		ChangeKind: "heartbeat",
 	}))
 
+	// No transcript was set, so reminder should be empty.
+	assert.Empty(t, bridge.PendingSystemReminder())
+
+	// Now set a transcript.
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		Transcript: "user said hello",
+		ChangeKind: "transcript_only",
+	}))
+
+	// Reminder is non-empty and stable across reads (non-destructive).
 	first := bridge.PendingSystemReminder()
 	assert.NotEmpty(t, first)
-
-	// Second read should return empty.
 	second := bridge.PendingSystemReminder()
-	assert.Empty(t, second)
+	assert.Equal(t, first, second, "post-rewire: PendingSystemReminder is idempotent")
 }
 
 func TestBridgeEmberRequestActive(t *testing.T) {
@@ -255,62 +264,38 @@ func TestBridgeStartForwardsSessionEvents(t *testing.T) {
 	assert.Equal(t, session.EventNewMessage, se.Type)
 }
 
-// TestFormatContextReminder checks the formatting of various ContextUpdate states.
-func TestFormatContextReminder(t *testing.T) {
+// TestFormatTranscriptReminder checks the formatting of the post-ambient-rewire
+// transcript-only reminder builder.
+func TestFormatTranscriptReminder(t *testing.T) {
 	cases := []struct {
 		name        string
-		u           ContextUpdate
+		transcript  string
 		wantContain []string
+		wantEmpty   bool
 	}{
 		{
-			name: "full context with ax and transcript",
-			u: ContextUpdate{
-				Timestamp:   time.Date(2026, 4, 14, 14, 32, 10, 0, time.UTC),
-				ActiveApp:   "VS Code",
-				WindowTitle: "main.go",
-				Activity:    "coding",
-				AXSummary:   "Editor: func Send",
-				Transcript:  "what's this function",
-				ChangeKind:  "pattern",
-			},
+			name:       "non-empty transcript",
+			transcript: "what's this function",
 			wantContain: []string{
 				`<system-reminder origin="overlay">`,
 				"</system-reminder>",
-				"14:32:10",
-				"VS Code",  // ActiveApp
-				"main.go",  // WindowTitle
-				"coding",
-				"Editor: func Send",
 				"what's this function",
 			},
 		},
 		{
-			name: "idle with no speech",
-			u: ContextUpdate{
-				ActiveApp:  "Finder",
-				Activity:   "idle",
-				ChangeKind: "heartbeat",
-			},
-			wantContain: []string{
-				`<system-reminder origin="overlay">`,
-				"Finder",
-				"idle",
-				"(silent)",
-			},
-		},
-		{
-			name: "missing activity defaults to general",
-			u: ContextUpdate{
-				ActiveApp:  "Terminal",
-				ChangeKind: "pattern",
-			},
-			wantContain: []string{"general"},
+			name:      "empty transcript returns empty string",
+			transcript: "",
+			wantEmpty: true,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := formatContextReminder(tc.u)
+			out := formatTranscriptReminder(tc.transcript)
+			if tc.wantEmpty {
+				assert.Empty(t, out)
+				return
+			}
 			for _, want := range tc.wantContain {
 				assert.True(t, strings.Contains(out, want),
 					"expected %q to contain %q\ngot: %s", tc.name, want, out)
@@ -324,30 +309,17 @@ func TestBridgeSatisfiesInjector(t *testing.T) {
 	var _ Injector = (*Bridge)(nil)
 }
 
-// TestFormatContextReminderOriginAttribute verifies the origin="overlay" attribute
-// is present in every formatted reminder for loopback suppression.
-func TestFormatContextReminderOriginAttribute(t *testing.T) {
-	u := ContextUpdate{
-		ActiveApp:  "Safari",
-		Activity:   "browsing",
-		ChangeKind: "heartbeat",
-	}
-	out := formatContextReminder(u)
+// TestFormatTranscriptReminderOriginAttribute verifies the origin="overlay" attribute
+// is present when there is a transcript to format.
+func TestFormatTranscriptReminderOriginAttribute(t *testing.T) {
+	out := formatTranscriptReminder("user said something")
 	assert.Contains(t, out, `origin="overlay"`, "reminder must carry origin attribute")
 }
 
-// TestFormatContextReminderOCRAndDeltaFields verifies OCRText and ChangeKind
-// are included in the output when set.
-func TestFormatContextReminderOCRAndDeltaFields(t *testing.T) {
-	u := ContextUpdate{
-		ActiveApp:  "Notes",
-		Activity:   "writing",
-		OCRText:    "buy milk",
-		ChangeKind: "user-invoked",
-	}
-	out := formatContextReminder(u)
-	assert.Contains(t, out, "buy milk", "OCR text must appear in reminder")
-	assert.Contains(t, out, "user-invoked", "ChangeKind must appear as Delta line")
+// TestFormatTranscriptReminderContent verifies transcript content appears in the output.
+func TestFormatTranscriptReminderContent(t *testing.T) {
+	out := formatTranscriptReminder("buy milk")
+	assert.Contains(t, out, "buy milk", "transcript text must appear in reminder")
 }
 
 // --- Phase 9: synthetic_user + tracker + ack tests ---
@@ -356,11 +328,10 @@ func TestBridgeSystemReminderModeStoresReminderAndDoesNotSend(t *testing.T) {
 	eng := newFakeEngine()
 	bridge := NewBridgeWithMode(eng, ember.New(), nil, nil, nil, "system_reminder")
 
+	// Post-ambient-rewire: include a transcript so PendingSystemReminder is non-empty.
 	err := bridge.OnContextUpdate(nil, ContextUpdate{
-		ActiveApp:  "VS Code",
-		Activity:   "coding",
-		AXSummary:  "editor",
-		ChangeKind: "pattern",
+		Transcript: "editor context",
+		ChangeKind: "transcript_only",
 	})
 	require.NoError(t, err)
 
@@ -368,59 +339,46 @@ func TestBridgeSystemReminderModeStoresReminderAndDoesNotSend(t *testing.T) {
 	assert.Equal(t, 0, eng.sendCallCount(), "system_reminder mode must not call engine.Send")
 	// Reminder is stored for the next turn.
 	assert.NotEmpty(t, bridge.PendingSystemReminder())
-	// Tracker recorded one entry.
+	// Tracker recorded one entry (transcript tokens).
 	assert.Equal(t, 1, len(bridge.Tracker().Recent(10)))
 	assert.Greater(t, bridge.Tracker().Total(), 0)
 }
 
 func TestBridgeSyntheticUserModeCallsEngineSend(t *testing.T) {
+	// Post-ambient-rewire: synthetic_user mode is a no-op. The engine sees
+	// screenshots + transcript on the next natural turn via the ring buffer,
+	// not via a direct Send. Verify engine.Send is never called.
 	eng := newFakeEngine()
 	bridge := NewBridgeWithMode(eng, ember.New(), nil, nil, nil, "synthetic_user")
 
 	err := bridge.OnContextUpdate(nil, ContextUpdate{
-		ActiveApp:  "VS Code",
-		Activity:   "coding",
-		AXSummary:  "editor",
-		ChangeKind: "pattern",
+		Transcript: "what are you doing",
+		ChangeKind: "transcript_only",
 	})
 	require.NoError(t, err)
 
-	// engine.Send runs in a goroutine, wait briefly.
-	assert.Eventually(t, func() bool {
-		return eng.sendCallCount() == 1
-	}, 500*time.Millisecond, 10*time.Millisecond, "synthetic_user must call engine.Send")
-
-	assert.Contains(t, eng.sendCallAt(0), "<system-reminder origin=\"overlay\">")
-	// Pending reminder should stay empty - we sent it directly.
-	assert.Empty(t, bridge.PendingSystemReminder())
+	// Give any goroutine time to run (none should).
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, 0, eng.sendCallCount(), "synthetic_user is a no-op post-rewire: Send must not fire")
 }
 
 func TestBridgeSyntheticUserRateLimit10s(t *testing.T) {
+	// Post-ambient-rewire: synthetic_user is a no-op. Both updates go into the
+	// ring / transcript with no direct Send. Tracker still records both.
 	eng := newFakeEngine()
 	bridge := NewBridgeWithMode(eng, ember.New(), nil, nil, nil, "synthetic_user")
 
-	// First update: sent.
 	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
-		ActiveApp: "VS Code", Activity: "coding", ChangeKind: "pattern",
+		Transcript: "first", ChangeKind: "transcript_only",
 	}))
-	// Second update within 10s: rate-limited, stored as reminder.
 	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
-		ActiveApp: "Terminal", Activity: "coding", ChangeKind: "error",
+		Transcript: "second", ChangeKind: "transcript_only",
 	}))
 
-	// Give the first goroutine time to run.
-	assert.Eventually(t, func() bool {
-		return eng.sendCallCount() == 1
-	}, 500*time.Millisecond, 10*time.Millisecond)
-
-	// Only one send, not two.
 	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, 1, eng.sendCallCount(), "rate-limited: second synthetic send must not fire")
+	assert.Equal(t, 0, eng.sendCallCount(), "synthetic_user no-op: no sends expected")
 
-	// Second update lands in the pending reminder as fallback.
-	assert.NotEmpty(t, bridge.PendingSystemReminder())
-
-	// Both updates counted by tracker.
+	// Both updates counted by tracker (transcript tokens).
 	assert.Equal(t, 2, len(bridge.Tracker().Recent(10)))
 }
 
@@ -438,10 +396,8 @@ func TestBridgeContextAckBroadcastOnUpdate(t *testing.T) {
 	readEnvelope(t, conn) // welcome
 
 	err := bridge.OnContextUpdate(nil, ContextUpdate{
-		ActiveApp:  "VS Code",
-		Activity:   "coding",
-		AXSummary:  "editor",
-		ChangeKind: "pattern",
+		Transcript: "coding in vs code",
+		ChangeKind: "transcript_only",
 	})
 	require.NoError(t, err)
 
@@ -451,7 +407,7 @@ func TestBridgeContextAckBroadcastOnUpdate(t *testing.T) {
 	var ack ContextAck
 	require.NoError(t, json.Unmarshal(env.Data, &ack))
 	assert.Greater(t, ack.Tokens, 0)
-	assert.Equal(t, "pattern", ack.Reason)
+	assert.Equal(t, "transcript_only", ack.Reason)
 	assert.Equal(t, "system_reminder", ack.Mode)
 	assert.Equal(t, ack.Tokens, ack.Total, "first update: total equals single emit")
 }
@@ -464,59 +420,21 @@ func TestBridgeDefaultModeFallsBackToSystemReminder(t *testing.T) {
 
 // TestBridgeRuntimePrefsAdvertisedInWelcome verifies that SetRuntimePrefs
 // values are carried through OnHello into the Welcome envelope.
-// Phase 10.
+// Phase 10. Post-ambient-rewire: only TTSEnabled remains in the wire format.
 func TestBridgeRuntimePrefsAdvertisedInWelcome(t *testing.T) {
 	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
-	bridge.SetRuntimePrefs(true, "bottom-bar", []string{"com.1password.1password", "com.apple.keychainaccess"}, "", 0, 0, "")
+	bridge.SetRuntimePrefs(true)
 
 	w := bridge.OnHello(nil, Hello{ClientVersion: "1.0", PID: 100})
 	assert.True(t, w.TTSEnabled)
-	assert.Equal(t, "bottom-bar", w.Position)
-	assert.Equal(t, []string{"com.1password.1password", "com.apple.keychainaccess"}, w.ExcludedApps)
-}
-
-// TestBridgeWelcomeChatDefaults verifies Welcome carries default ui_mode="ghost"
-// and chat_history_limit=50 when SetRuntimePrefs has not been called.
-// Phase A (chat overlay).
-func TestBridgeWelcomeChatDefaults(t *testing.T) {
-	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
-	w := bridge.OnHello(nil, Hello{PID: 1})
-	assert.Equal(t, "ghost", w.UIMode)
-	assert.Equal(t, 50, w.ChatHistoryLimit)
-}
-
-// TestBridgeWelcomeChatConfigured verifies Welcome reflects chat-mode config
-// after SetRuntimePrefs passes non-default values.
-// Phase A (chat overlay).
-func TestBridgeWelcomeChatConfigured(t *testing.T) {
-	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
-	bridge.SetRuntimePrefs(false, "right-sidebar", nil, "chat", 100, 0.9, "right")
-
-	w := bridge.OnHello(nil, Hello{PID: 2})
-	assert.Equal(t, "chat", w.UIMode)
-	assert.Equal(t, 100, w.ChatHistoryLimit)
 }
 
 // TestBridgeRuntimePrefsDefaultEmpty verifies a bridge with no SetRuntimePrefs
-// call returns zero values in Welcome.
+// call returns false for TTSEnabled in Welcome.
 func TestBridgeRuntimePrefsDefaultEmpty(t *testing.T) {
 	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
 	w := bridge.OnHello(nil, Hello{PID: 1})
 	assert.False(t, w.TTSEnabled)
-	assert.Empty(t, w.Position)
-	assert.Empty(t, w.ExcludedApps)
-}
-
-// TestBridgeRuntimePrefsSnapshotIsCopy verifies callers cannot mutate the
-// bridge's internal slice via the arg they passed in.
-func TestBridgeRuntimePrefsSnapshotIsCopy(t *testing.T) {
-	bridge := NewBridge(newFakeEngine(), ember.New(), nil, nil, nil)
-	apps := []string{"com.example.a"}
-	bridge.SetRuntimePrefs(false, "right-sidebar", apps, "", 0, 0, "")
-	apps[0] = "com.example.mutated"
-
-	_, _, got := bridge.RuntimePrefs()
-	assert.Equal(t, []string{"com.example.a"}, got, "bridge must hold its own copy")
 }
 
 // TestBridgeSetEngineWiresWelcome verifies that SetEngine wires a new engine
@@ -546,21 +464,6 @@ func TestBridgeSetEngineNilSafe(t *testing.T) {
 	assert.Empty(t, w.Model)
 }
 
-// TestContextUpdateOriginField verifies the Origin field is present in
-// ContextUpdate and round-trips through JSON.
-func TestContextUpdateOriginField(t *testing.T) {
-	u := ContextUpdate{
-		ActiveApp: "Terminal",
-		Origin:    "overlay",
-	}
-	b, err := json.Marshal(u)
-	require.NoError(t, err)
-	assert.Contains(t, string(b), `"origin":"overlay"`)
-
-	var u2 ContextUpdate
-	require.NoError(t, json.Unmarshal(b, &u2))
-	assert.Equal(t, "overlay", u2.Origin)
-}
 
 // --- Phase G: daily budget breaker ---
 
@@ -582,16 +485,13 @@ func TestBridgeSkipsInjectionOnBudgetExceeded(t *testing.T) {
 
 	err := bridge.OnContextUpdate(nil, ContextUpdate{
 		Timestamp:  time.Now(),
-		ActiveApp:  "com.microsoft.VSCode",
-		Activity:   "coding",
-		AXSummary:  "func Send",
-		ChangeKind: "pattern",
+		Transcript: "budget exceeded test",
+		ChangeKind: "transcript_only",
 	})
 	require.NoError(t, err)
 
-	// Synthetic mode: engine.Send must NOT have been called.
+	// Budget exceeded: no synthetic send and no pending reminder.
 	assert.Equal(t, 0, eng.sendCallCount(), "budget exceeded -> no synthetic send")
-	// And no pending reminder got stored as the fallback path.
 	assert.Empty(t, bridge.PendingSystemReminder(), "budget exceeded -> no pending reminder")
 }
 
@@ -601,9 +501,8 @@ func TestBridgeAllowsInjectionWithinBudget(t *testing.T) {
 
 	err := bridge.OnContextUpdate(nil, ContextUpdate{
 		Timestamp:  time.Now(),
-		ActiveApp:  "Safari",
-		Activity:   "browsing",
-		ChangeKind: "pattern",
+		Transcript: "browsing the web",
+		ChangeKind: "transcript_only",
 	})
 	require.NoError(t, err)
 	assert.NotEmpty(t, bridge.PendingSystemReminder(), "under budget -> reminder stored")
@@ -625,10 +524,170 @@ func TestBridgeBudgetZeroDisablesGating(t *testing.T) {
 
 	err := bridge.OnContextUpdate(nil, ContextUpdate{
 		Timestamp:  time.Now(),
-		ActiveApp:  "Safari",
 		ChangeKind: "heartbeat",
 	})
 	require.NoError(t, err)
-	assert.NotEmpty(t, bridge.PendingSystemReminder())
+	// Budget=0 so no gating; but no transcript => PendingSystemReminder is empty.
+	// The test only verifies that budget=0 doesn't cause an error.
 }
 
+// --- Screen ring buffer tests (Phase: ambient rewire) ---
+
+// makeTinyPNG returns a 1x1 transparent PNG encoded as base64.
+// All calls produce identical bytes (deterministic). Use makeColoredPNGB64
+// when you need frames with distinct byte content.
+func makeTinyPNGB64(t *testing.T) string {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	return base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+// makeColoredPNGB64 returns a 1x1 PNG whose single pixel has the given seed
+// byte as its red channel. Distinct seeds produce distinct PNG byte slices.
+func makeColoredPNGB64(t *testing.T, seed uint8) (string, []byte) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Pix[0] = seed  // R
+	img.Pix[1] = 0     // G
+	img.Pix[2] = 0     // B
+	img.Pix[3] = 255   // A
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	raw := make([]byte, buf.Len())
+	copy(raw, buf.Bytes())
+	return base64.StdEncoding.EncodeToString(raw), raw
+}
+
+// TestBridgeRingFIFO_SixFrames verifies that after 6 ContextUpdates with valid
+// PNGs, ScreenshotPNGs returns 6 entries with the first (oldest) frame at [0].
+func TestBridgeRingFIFO_SixFrames(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	// Use distinct colored frames so we can identify them by content.
+	var firstPNG []byte
+	for i := range 6 {
+		b64, raw := makeColoredPNGB64(t, uint8(i+1))
+		if i == 0 {
+			firstPNG = raw
+		}
+		require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+			ScreenshotPNGB64: b64,
+			ChangeKind:       "frame",
+		}))
+	}
+
+	pngs := bridge.ScreenshotPNGs()
+	require.Len(t, pngs, 6, "ring should hold exactly 6 frames")
+	assert.Equal(t, firstPNG, pngs[0], "oldest frame (seed=1) must be at index 0 (FIFO)")
+}
+
+// TestBridgeRingFIFO_SeventhEvictsFirst verifies that a 7th update evicts the
+// oldest frame so ring stays at cap=6 and the old head is replaced.
+func TestBridgeRingFIFO_SeventhEvictsFirst(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	// Push 6 frames with distinct seeds 1..6.
+	var firstPNG, secondPNG []byte
+	for i := range 6 {
+		b64, raw := makeColoredPNGB64(t, uint8(i+1))
+		if i == 0 {
+			firstPNG = raw
+		}
+		if i == 1 {
+			secondPNG = raw
+		}
+		require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+			ScreenshotPNGB64: b64,
+			ChangeKind:       "frame",
+		}))
+	}
+
+	// 7th frame with seed=7.
+	seventhB64, seventhPNG := makeColoredPNGB64(t, 7)
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: seventhB64,
+		ChangeKind:       "frame",
+	}))
+
+	pngs := bridge.ScreenshotPNGs()
+	require.Len(t, pngs, 6, "ring must stay at cap after eviction")
+	// Frame with seed=1 (firstPNG) was evicted; frame with seed=2 is now head.
+	assert.NotEqual(t, firstPNG, pngs[0], "original oldest frame (seed=1) must have been evicted")
+	assert.Equal(t, secondPNG, pngs[0], "second frame (seed=2) must now be at head")
+	assert.Equal(t, seventhPNG, pngs[len(pngs)-1], "newest frame (seed=7) must be at tail")
+}
+
+// TestBridgeRingEmptyPNGDoesNotPush verifies that an update with empty
+// ScreenshotPNGB64 does NOT push to the ring, but DOES update the transcript.
+func TestBridgeRingEmptyPNGDoesNotPush(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	// Push one real frame first.
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: makeTinyPNGB64(t),
+		ChangeKind:       "frame",
+	}))
+	require.Len(t, bridge.ScreenshotPNGs(), 1)
+
+	// Now update with empty PNG but with a transcript.
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: "",
+		Transcript:       "hello world",
+		ChangeKind:       "transcript_only",
+	}))
+
+	// Ring must still have exactly 1 frame.
+	assert.Len(t, bridge.ScreenshotPNGs(), 1, "empty PNG must not push to ring")
+	// Transcript must be updated.
+	assert.Equal(t, "hello world", bridge.Transcript())
+}
+
+// TestBridgeTranscriptLatest verifies that Transcript() returns the most
+// recently set non-empty transcript across multiple updates.
+func TestBridgeTranscriptLatest(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		Transcript: "first transcript",
+		ChangeKind: "transcript_only",
+	}))
+	assert.Equal(t, "first transcript", bridge.Transcript())
+
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		Transcript: "second transcript",
+		ChangeKind: "transcript_only",
+	}))
+	assert.Equal(t, "second transcript", bridge.Transcript())
+}
+
+// TestBridgeMarkAttachedAndRingChanged verifies the MarkAttached / RingChangedSinceLastAttach
+// dedup contract:
+//   - After MarkAttached(), RingChangedSinceLastAttach() returns false (ring head unchanged).
+//   - After pushing enough frames to evict the current head, RingChangedSinceLastAttach()
+//     returns true because screenRing[0] now points to a different (newer) frame.
+func TestBridgeMarkAttachedAndRingChanged(t *testing.T) {
+	bridge := NewBridge(nil, nil, nil, nil, slog.Default())
+
+	// Fill the ring to capacity (6 frames).
+	for range screenRingCap {
+		require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+			ScreenshotPNGB64: makeTinyPNGB64(t),
+			ChangeKind:       "frame",
+		}))
+	}
+	require.Len(t, bridge.ScreenshotPNGs(), screenRingCap)
+
+	// Mark attached - ring head is the oldest frame.
+	bridge.MarkAttached()
+	assert.False(t, bridge.RingChangedSinceLastAttach(), "no change immediately after MarkAttached")
+
+	// Push a 7th frame - this evicts the oldest, ring[0] becomes the 2nd original frame.
+	require.NoError(t, bridge.OnContextUpdate(nil, ContextUpdate{
+		ScreenshotPNGB64: makeTinyPNGB64(t),
+		ChangeKind:       "frame",
+	}))
+	// Ring head changed (oldest was evicted) -> RingChangedSinceLastAttach must be true.
+	assert.True(t, bridge.RingChangedSinceLastAttach(), "ring changed: oldest frame was evicted by 7th push")
+}

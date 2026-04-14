@@ -492,15 +492,6 @@ func TestOverlayConfigDefaults(t *testing.T) {
 	d := overlayDefaults()
 	assert.False(t, d.Enable)
 	assert.Equal(t, "system_reminder", d.ContextInjection)
-	assert.Equal(t, "Hey Providence", d.WakeWord)
-	assert.Equal(t, "right-sidebar", d.Position)
-	assert.True(t, d.AdaptiveFPS)
-	assert.Contains(t, d.ExcludeApps, "com.1password.1password")
-	assert.Contains(t, d.ExcludeApps, "com.apple.keychainaccess")
-	assert.Equal(t, "ghost", d.UIMode)
-	assert.Equal(t, 50, d.ChatHistoryLimit)
-	assert.InDelta(t, 0.92, d.ChatAlpha, 0.0001)
-	assert.Equal(t, "right", d.ChatPosition)
 	assert.Equal(t, 50000, d.DailyTokenBudget, "phase G: default daily budget 50000")
 }
 
@@ -530,52 +521,7 @@ func TestOverlayConfigDailyBudgetValidation(t *testing.T) {
 	}
 }
 
-func TestOverlayConfigChatTOMLRoundtrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
 
-	original := Config{
-		Overlay: OverlayConfig{
-			UIMode:           "chat",
-			ChatHistoryLimit: 120,
-			ChatAlpha:        0.8,
-			ChatPosition:     "left",
-		},
-	}
-
-	require.NoError(t, original.SaveTo(path))
-	loaded := LoadFromTOML(path)
-
-	assert.Equal(t, "chat", loaded.Overlay.UIMode)
-	assert.Equal(t, 120, loaded.Overlay.ChatHistoryLimit)
-	assert.InDelta(t, 0.8, loaded.Overlay.ChatAlpha, 0.0001)
-	assert.Equal(t, "left", loaded.Overlay.ChatPosition)
-}
-
-func TestOverlayConfigChatMerge(t *testing.T) {
-	base := Config{
-		Overlay: OverlayConfig{
-			UIMode:           "ghost",
-			ChatHistoryLimit: 50,
-			ChatAlpha:        0.92,
-			ChatPosition:     "right",
-		},
-	}
-	override := Config{
-		Overlay: OverlayConfig{
-			UIMode:           "both",
-			ChatHistoryLimit: 200,
-			ChatAlpha:        0.75,
-		},
-	}
-	mergeConfig(&base, &override)
-
-	assert.Equal(t, "both", base.Overlay.UIMode)
-	assert.Equal(t, 200, base.Overlay.ChatHistoryLimit)
-	assert.InDelta(t, 0.75, base.Overlay.ChatAlpha, 0.0001)
-	// ChatPosition not overridden, keep base.
-	assert.Equal(t, "right", base.Overlay.ChatPosition)
-}
 
 func TestOverlayConfigTOMLRoundtrip(t *testing.T) {
 	dir := t.TempDir()
@@ -587,12 +533,8 @@ func TestOverlayConfigTOMLRoundtrip(t *testing.T) {
 			SocketPath:       "/tmp/overlay.sock",
 			BinaryPath:       "/usr/local/bin/providence-overlay",
 			AutoStart:        true,
-			ExcludeApps:      []string{"com.example.app"},
-			AdaptiveFPS:      true,
 			TTSEnabled:       false,
 			ContextInjection: "synthetic_user",
-			WakeWord:         "Hey Flame",
-			Position:         "bottom-bar",
 		},
 	}
 
@@ -603,12 +545,8 @@ func TestOverlayConfigTOMLRoundtrip(t *testing.T) {
 	assert.Equal(t, "/tmp/overlay.sock", loaded.Overlay.SocketPath)
 	assert.Equal(t, "/usr/local/bin/providence-overlay", loaded.Overlay.BinaryPath)
 	assert.True(t, loaded.Overlay.AutoStart)
-	assert.Equal(t, []string{"com.example.app"}, loaded.Overlay.ExcludeApps)
-	assert.True(t, loaded.Overlay.AdaptiveFPS)
 	assert.False(t, loaded.Overlay.TTSEnabled)
 	assert.Equal(t, "synthetic_user", loaded.Overlay.ContextInjection)
-	assert.Equal(t, "Hey Flame", loaded.Overlay.WakeWord)
-	assert.Equal(t, "bottom-bar", loaded.Overlay.Position)
 }
 
 func TestOverlayConfigMerge(t *testing.T) {
@@ -616,37 +554,27 @@ func TestOverlayConfigMerge(t *testing.T) {
 		Overlay: OverlayConfig{
 			Enable:           false,
 			ContextInjection: "system_reminder",
-			WakeWord:         "Hey Providence",
-			Position:         "right-sidebar",
 		},
 	}
 	override := Config{
 		Overlay: OverlayConfig{
 			Enable:           true,
-			WakeWord:         "Hey Flame",
-			ExcludeApps:      []string{"com.example.secrets"},
 			ContextInjection: "synthetic_user",
 		},
 	}
 	mergeConfig(&base, &override)
 
 	assert.True(t, base.Overlay.Enable)
-	assert.Equal(t, "Hey Flame", base.Overlay.WakeWord)
-	assert.Equal(t, []string{"com.example.secrets"}, base.Overlay.ExcludeApps)
 	assert.Equal(t, "synthetic_user", base.Overlay.ContextInjection)
-	// Position was not in override - should keep base value.
-	assert.Equal(t, "right-sidebar", base.Overlay.Position)
 }
 
 func TestOverlayConfigMergePreservesBase(t *testing.T) {
 	base := Config{
 		Overlay: OverlayConfig{
-			Enable:      true,
-			SocketPath:  "/run/overlay.sock",
-			BinaryPath:  "/usr/bin/overlay",
-			Position:    "bottom-bar",
-			AdaptiveFPS: true,
-			TTSEnabled:  true,
+			Enable:     true,
+			SocketPath: "/run/overlay.sock",
+			BinaryPath: "/usr/bin/overlay",
+			TTSEnabled: true,
 		},
 	}
 	// Empty override should not overwrite base.
@@ -656,8 +584,6 @@ func TestOverlayConfigMergePreservesBase(t *testing.T) {
 	assert.True(t, base.Overlay.Enable)
 	assert.Equal(t, "/run/overlay.sock", base.Overlay.SocketPath)
 	assert.Equal(t, "/usr/bin/overlay", base.Overlay.BinaryPath)
-	assert.Equal(t, "bottom-bar", base.Overlay.Position)
-	assert.True(t, base.Overlay.AdaptiveFPS)
 	assert.True(t, base.Overlay.TTSEnabled)
 }
 
@@ -687,81 +613,6 @@ func TestOverlayConfigValidation(t *testing.T) {
 			cfg:     Config{Overlay: OverlayConfig{ContextInjection: "turbo"}},
 			wantErr: true,
 		},
-		{
-			name:    "valid right-sidebar",
-			cfg:     Config{Overlay: OverlayConfig{Position: "right-sidebar"}},
-			wantErr: false,
-		},
-		{
-			name:    "valid bottom-bar",
-			cfg:     Config{Overlay: OverlayConfig{Position: "bottom-bar"}},
-			wantErr: false,
-		},
-		{
-			name:    "invalid position",
-			cfg:     Config{Overlay: OverlayConfig{Position: "floating"}},
-			wantErr: true,
-		},
-		{
-			name:    "valid ui_mode ghost",
-			cfg:     Config{Overlay: OverlayConfig{UIMode: "ghost"}},
-			wantErr: false,
-		},
-		{
-			name:    "valid ui_mode chat",
-			cfg:     Config{Overlay: OverlayConfig{UIMode: "chat"}},
-			wantErr: false,
-		},
-		{
-			name:    "valid ui_mode both",
-			cfg:     Config{Overlay: OverlayConfig{UIMode: "both"}},
-			wantErr: false,
-		},
-		{
-			name:    "invalid ui_mode",
-			cfg:     Config{Overlay: OverlayConfig{UIMode: "holographic"}},
-			wantErr: true,
-		},
-		{
-			name:    "chat_history_limit too low",
-			cfg:     Config{Overlay: OverlayConfig{ChatHistoryLimit: 0}},
-			wantErr: false, // zero means "use default"
-		},
-		{
-			name:    "chat_history_limit negative",
-			cfg:     Config{Overlay: OverlayConfig{ChatHistoryLimit: -5}},
-			wantErr: true,
-		},
-		{
-			name:    "chat_history_limit too high",
-			cfg:     Config{Overlay: OverlayConfig{ChatHistoryLimit: 1000}},
-			wantErr: true,
-		},
-		{
-			name:    "chat_alpha in range",
-			cfg:     Config{Overlay: OverlayConfig{ChatAlpha: 0.92}},
-			wantErr: false,
-		},
-		{
-			name:    "chat_alpha too low",
-			cfg:     Config{Overlay: OverlayConfig{ChatAlpha: 0.1}},
-			wantErr: true,
-		},
-		{
-			name:    "chat_alpha too high",
-			cfg:     Config{Overlay: OverlayConfig{ChatAlpha: 1.5}},
-			wantErr: true,
-		},
-		{
-			name:    "invalid chat_position",
-			cfg:     Config{Overlay: OverlayConfig{ChatPosition: "diagonal"}},
-			wantErr: true,
-		},
-		{
-			name:    "valid chat_position left",
-			cfg:     Config{Overlay: OverlayConfig{ChatPosition: "left"}},
-			wantErr: false,
-		},
 	}
 
 	for _, tc := range cases {
@@ -780,7 +631,6 @@ func TestOverlayConfigValidation(t *testing.T) {
 func TestOverlayConfigEnvExpansion(t *testing.T) {
 	t.Setenv("OVERLAY_SOCK", "/tmp/my-overlay.sock")
 	t.Setenv("OVERLAY_BIN", "/usr/local/bin/overlay")
-	t.Setenv("OVERLAY_WAKE", "Yo Providence")
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -788,14 +638,12 @@ func TestOverlayConfigEnvExpansion(t *testing.T) {
 	content := `[overlay]
 socket_path = "$OVERLAY_SOCK"
 binary_path = "$OVERLAY_BIN"
-wake_word = "$OVERLAY_WAKE"
 `
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 
 	c := LoadFromTOML(path)
 	assert.Equal(t, "/tmp/my-overlay.sock", c.Overlay.SocketPath)
 	assert.Equal(t, "/usr/local/bin/overlay", c.Overlay.BinaryPath)
-	assert.Equal(t, "Yo Providence", c.Overlay.WakeWord)
 }
 
 func TestOverlayConfigJSONRoundtrip(t *testing.T) {
@@ -803,10 +651,6 @@ func TestOverlayConfigJSONRoundtrip(t *testing.T) {
 		Enable:           true,
 		SocketPath:       "/tmp/overlay.sock",
 		ContextInjection: "system_reminder",
-		WakeWord:         "Hey Providence",
-		Position:         "right-sidebar",
-		AdaptiveFPS:      true,
-		ExcludeApps:      []string{"com.1password.1password"},
 	}
 
 	data, err := json.Marshal(cfg)
@@ -818,8 +662,4 @@ func TestOverlayConfigJSONRoundtrip(t *testing.T) {
 	assert.Equal(t, cfg.Enable, got.Enable)
 	assert.Equal(t, cfg.SocketPath, got.SocketPath)
 	assert.Equal(t, cfg.ContextInjection, got.ContextInjection)
-	assert.Equal(t, cfg.WakeWord, got.WakeWord)
-	assert.Equal(t, cfg.Position, got.Position)
-	assert.Equal(t, cfg.AdaptiveFPS, got.AdaptiveFPS)
-	assert.Equal(t, cfg.ExcludeApps, got.ExcludeApps)
 }

@@ -51,14 +51,13 @@ func (s State) String() string {
 // Config holds overlay manager settings, mapped from OverlayConfig in the
 // top-level config package.
 type Config struct {
-	SocketPath  string
-	BinaryPath  string
-	AutoStart   bool
+	SocketPath string
+	BinaryPath string
+	AutoStart  bool
 	// Spawn controls whether Start spawns the overlay subprocess.
 	// Zero value (nil) means "default true" for backwards compat.
-	Spawn       *bool
-	ExcludeApps []string
-	LogPath     string // default ~/.providence/log/overlay.log
+	Spawn   *bool
+	LogPath string // default ~/.providence/log/overlay.log
 }
 
 // spawnEnabled returns true if the manager should spawn the overlay

@@ -16,8 +16,10 @@ type overlayManager interface {
 }
 
 // overlayBridge is the subset of overlay.Bridge used by the UI slash commands.
+// It includes overlay.Injector so the engine can be wired for context injection.
 type overlayBridge interface {
 	overlay.ServerHandler
+	overlay.Injector
 }
 
 // WithOverlay is a functional option for wiring an overlay manager and bridge

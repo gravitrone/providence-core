@@ -168,6 +168,15 @@ type DirectEngine struct {
 
 	// Caffeinate: prevent macOS sleep while the engine is active.
 	caffeinator *engine.Caffeinator
+
+	// Context injector for overlay screen-context reminders.
+	contextInjector contextInjector
+}
+
+// contextInjector is a local interface matching overlay.Injector to avoid an
+// import cycle between internal/engine/direct and internal/overlay.
+type contextInjector interface {
+	PendingSystemReminder() string
 }
 
 // NewDirectEngine creates a DirectEngine from the given config.
@@ -622,8 +631,29 @@ func (e *DirectEngine) SetPendingImages(images []ImageData) {
 	e.pendingImages = images
 }
 
+// SetContextInjector attaches a context injector (typically the overlay bridge).
+// When set, each user message sent via Send gets any pending system-reminder
+// prepended and the injector is cleared. Nil-safe: a nil injector means no-op.
+// The overlay writes to the injector from its UDS handler.
+func (e *DirectEngine) SetContextInjector(inj contextInjector) {
+	e.contextInjector = inj
+}
+
+// prepareUserText prepends any pending overlay system-reminder to text.
+// Returns the (possibly modified) text. Safe to call with nil injector.
+func (e *DirectEngine) prepareUserText(text string) string {
+	if e.contextInjector == nil {
+		return text
+	}
+	if reminder := e.contextInjector.PendingSystemReminder(); reminder != "" {
+		return reminder + "\n\n" + text
+	}
+	return text
+}
+
 // Send sends a user message to the AI and starts the agent loop.
 func (e *DirectEngine) Send(text string) error {
+	text = e.prepareUserText(text)
 	e.mu.Lock()
 	if e.status == engine.StatusRunning {
 		e.mu.Unlock()

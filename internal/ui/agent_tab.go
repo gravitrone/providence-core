@@ -6861,6 +6861,13 @@ func (at *AgentTab) handleEngineCreated(msg engineCreatedMsg) tea.Cmd {
 	at.engine = msg.engine
 	at.currentTokens = 0
 	at.compacting = false
+	// Wire overlay context injector so screen-context reminders are prepended
+	// to the next engine turn.
+	if at.overlayBridge != nil {
+		if de, ok := at.engine.(*direct.DirectEngine); ok {
+			de.SetContextInjector(at.overlayBridge)
+		}
+	}
 	// Transfer any pending images to the newly created engine.
 	at.transferImagesToEngine()
 	// Restore portable state from a prior engine switch if available.

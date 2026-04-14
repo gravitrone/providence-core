@@ -234,6 +234,8 @@ func (b *Bridge) forwardSessionEvent(ev session.Event) {
 
 // formatContextReminder wraps a ContextUpdate as a <system-reminder> block
 // suitable for injection into the engine as a system message.
+// The origin="overlay" attribute signals the model that this is observational
+// screen context, not user input.
 func formatContextReminder(u ContextUpdate) string {
 	ts := u.Timestamp.Format("15:04:05")
 	if u.Timestamp.IsZero() {
@@ -260,9 +262,19 @@ func formatContextReminder(u ContextUpdate) string {
 		transcript = u.Transcript
 	}
 
+	var ocrLine string
+	if u.OCRText != "" {
+		ocrLine = "\nOCR: " + u.OCRText
+	}
+
+	var deltaLine string
+	if u.ChangeKind != "" {
+		deltaLine = "\nDelta: " + u.ChangeKind
+	}
+
 	return fmt.Sprintf(
-		"<system-reminder>\n# Screen Context (as of %s)\nActive: %s (%s)%s\nRecent speech: %s\n</system-reminder>",
-		ts, appInfo, activity, axLine, transcript,
+		"<system-reminder origin=\"overlay\">\n# Screen Context (as of %s)\nActive: %s (%s)%s%s\nRecent speech: %s%s\n</system-reminder>",
+		ts, appInfo, activity, axLine, ocrLine, transcript, deltaLine,
 	)
 }
 

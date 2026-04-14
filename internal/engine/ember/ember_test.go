@@ -1,7 +1,9 @@
 package ember
 
 import (
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,6 +92,79 @@ func TestFocusDetection(t *testing.T) {
 
 	s.UpdateFocus()
 	assert.Equal(t, "unfocused", s.FocusState)
+}
+
+func TestEmber_ActivatePauseResumeRoundtrip(t *testing.T) {
+	s := New()
+	s.Activate()
+	require.True(t, s.Active)
+	require.False(t, s.Paused)
+
+	s.Pause()
+	require.True(t, s.Active)
+	require.True(t, s.Paused)
+	require.False(t, s.ShouldTick(), "paused state must not tick")
+
+	s.Resume()
+	require.True(t, s.Active)
+	require.False(t, s.Paused)
+	require.True(t, s.ShouldTick(), "resumed state must tick")
+}
+
+func TestEmber_DeactivateFromPaused(t *testing.T) {
+	s := New()
+	s.Activate()
+	s.Pause()
+	s.Deactivate()
+	assert.False(t, s.ShouldTick(), "deactivated-from-paused must not tick")
+	assert.False(t, s.Active)
+}
+
+func TestEmber_FocusTimeoutTransitionsUnfocused(t *testing.T) {
+	s := New()
+	s.RecordUserMessage()
+	assert.Equal(t, "focused", s.FocusState)
+
+	// backdate LastUserMsg past FocusTimeout
+	s.mu.Lock()
+	s.LastUserMsg = time.Now().Add(-(FocusTimeout + time.Second))
+	s.mu.Unlock()
+
+	s.UpdateFocus()
+	assert.Equal(t, "unfocused", s.FocusState)
+}
+
+func TestEmber_ConcurrentActivateSafe(t *testing.T) {
+	s := New()
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.Activate()
+		}()
+	}
+	wg.Wait()
+	// all goroutines called Activate - state must be consistent (no race)
+	assert.True(t, s.Active)
+	assert.False(t, s.Paused)
+}
+
+func TestEmber_GenerateTickFormat(t *testing.T) {
+	// GenerateTick uses time.Format("3:04:05 PM") - 12h clock, no leading zero for hour
+	// valid examples: "<tick>1:02:03 AM</tick>", "<tick>12:59:59 PM</tick>"
+	re := regexp.MustCompile(`^<tick>\d{1,2}:\d{2}:\d{2} (AM|PM)</tick>$`)
+	tick := GenerateTick()
+	assert.Regexp(t, re, tick, "tick format must match <tick>H:MM:SS AM/PM</tick>")
+}
+
+func TestEmber_TickCountMonotonicOnRecordTick(t *testing.T) {
+	s := New()
+	const n = 7
+	for i := 0; i < n; i++ {
+		s.RecordTick()
+	}
+	assert.Equal(t, n, s.TickCount, "tick count must increment by 1 per RecordTick call")
 }
 
 func TestStatus(t *testing.T) {

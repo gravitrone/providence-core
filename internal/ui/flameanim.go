@@ -210,19 +210,12 @@ func RenderBannerAnimated(frame int, streaming bool) string {
 
 	rendered += "\n"
 	subtitleText := "The Profaned Core"
-	subtitleWidth := lipgloss.Width(subtitleText)
 
 	subtitleStyle := lipgloss.NewStyle().
 		Foreground(emberBreathe(frame)).
 		Width(maxW).
 		Align(lipgloss.Center)
 	rendered += subtitleStyle.Render(subtitleText) + "\n"
-
-	underlineStyle := lipgloss.NewStyle().
-		Foreground(ColorBorder).
-		Width(maxW).
-		Align(lipgloss.Center)
-	rendered += underlineStyle.Render(strings.Repeat("\u2500", subtitleWidth)) + "\n"
 
 	return rendered
 }

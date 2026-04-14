@@ -470,10 +470,12 @@ func resolveBinaryPath(override string) string {
 // --- .app bundle detection ---
 
 // findAppBundle returns the absolute path to a Providence Overlay .app bundle
-// associated with binPath, or "" if none. Supports two cases:
+// associated with binPath, or "" if none. Two cases considered:
 //  1. binPath already points inside an .app (.../Foo.app/Contents/MacOS/bin).
 //  2. binPath is a shim script that execs into the .app - parse for the .app path.
-//  3. Conventional fallback: ~/Applications/Providence Overlay.app.
+//
+// No conventional-location fallback: callers with a real working binPath that
+// isn't inside an .app should use direct exec. This keeps test doubles working.
 func findAppBundle(binPath string) string {
 	// Case 1: binPath is inside an .app.
 	if idx := strings.Index(binPath, ".app/Contents/MacOS/"); idx != -1 {
@@ -496,14 +498,6 @@ func findAppBundle(binPath string) string {
 					return candidate
 				}
 			}
-		}
-	}
-
-	// Case 3: conventional location.
-	if home, err := os.UserHomeDir(); err == nil {
-		candidate := filepath.Join(home, "Applications", "Providence Overlay.app")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
 		}
 	}
 

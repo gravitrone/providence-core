@@ -16,7 +16,9 @@ final class Dispatcher {
     private let captureEngine: Any?  // typed as Any because CaptureEngine is gated on macOS 12.3+.
 
     static let protocolVersion = "1"
-    static let bridgeVersion = "0.1.0-phase3"
+    static let bridgeVersion = "0.1.0-phase4"
+
+    private let batchQueue = DispatchQueue(label: "bridge.batch", qos: .userInitiated)
 
     init() {
         if #available(macOS 12.3, *) {
@@ -132,6 +134,53 @@ final class Dispatcher {
                     )
                 }
                 return AnyCodable(["ok": AnyCodable(true)])
+            }
+        case "screen_diff":
+            captureQueue.async { [weak self] in
+                guard let self = self else { return }
+                let engine = self.captureEngine
+                let sem = DispatchSemaphore(value: 0)
+                Task {
+                    defer {
+                        self.ioLoop?.workDidFinish()
+                        sem.signal()
+                    }
+                    do {
+                        let p: ScreenDiffParams = try Dispatcher.decode(req.params)
+                        let result = try await Diff.compute(params: p, capture: engine ?? ())
+                        let ac = try Dispatcher.encodeToAnyCodable(result)
+                        self.ioLoop?.emitResponse(Response(id: req.id, ok: true, result: ac))
+                    } catch let err as BridgeError {
+                        self.respondError(id: req.id, code: err.code, message: err.message,
+                                          url: err.url, remediable: err.remediable)
+                    } catch {
+                        self.respondError(id: req.id, code: ErrorCode.captureFailed,
+                                          message: error.localizedDescription)
+                    }
+                }
+                // Block captureQueue until this diff completes so successive
+                // screen_diff calls see each other's FrameMemory updates.
+                sem.wait()
+            }
+        case "action_batch":
+            batchQueue.async { [weak self] in
+                guard let self = self else { return }
+                let engine = self.captureEngine
+                Task {
+                    defer { self.ioLoop?.workDidFinish() }
+                    do {
+                        let p: ActionBatchParams = try Dispatcher.decode(req.params)
+                        let result = try await Batch.execute(p, capture: engine ?? ())
+                        let ac = try Dispatcher.encodeToAnyCodable(result)
+                        self.ioLoop?.emitResponse(Response(id: req.id, ok: true, result: ac))
+                    } catch let err as BridgeError {
+                        self.respondError(id: req.id, code: err.code, message: err.message,
+                                          url: err.url, remediable: err.remediable)
+                    } catch {
+                        self.respondError(id: req.id, code: ErrorCode.badRequest,
+                                          message: "decode failed: \(error.localizedDescription)")
+                    }
+                }
             }
         default:
             // Not implemented in Phase 1.

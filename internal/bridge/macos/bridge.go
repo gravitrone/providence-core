@@ -28,6 +28,8 @@ type swiftBridgeClient interface {
 	AXTree(context.Context, AXTreeParams) (AXTreeResult, error)
 	AXFind(context.Context, AXQuery) (AXFindResult, error)
 	AXPerform(context.Context, string, string) error
+	ScreenDiff(context.Context, ScreenDiffParams) (ScreenDiffResult, error)
+	ActionBatch(context.Context, ActionBatchParams) (ActionBatchResult, error)
 	Close(context.Context) error
 }
 
@@ -397,6 +399,50 @@ func (b *Bridge) AXPerform(ctx context.Context, elementID, action string) error 
 		b.degrade(CapAXPerform, err)
 	}
 	return err
+}
+
+// ScreenDiff returns a perceptual hash diff of the screen since the last captured frame.
+func (b *Bridge) ScreenDiff(ctx context.Context, p ScreenDiffParams) (ScreenDiffResult, error) {
+	if !b.useSwift(CapScreenDiff) {
+		return ScreenDiffResult{}, errors.New("screen_diff requires native bridge")
+	}
+
+	b.mu.Lock()
+	swift := b.swift
+	b.mu.Unlock()
+
+	if swift == nil {
+		return ScreenDiffResult{}, errors.New("screen_diff requires native bridge")
+	}
+
+	result, err := swift.ScreenDiff(ctx, p)
+	if err != nil && b.shouldDegrade(err) {
+		b.degrade(CapScreenDiff, err)
+		return ScreenDiffResult{}, err
+	}
+	return result, err
+}
+
+// ActionBatch executes multiple actions server-side in a single round trip.
+func (b *Bridge) ActionBatch(ctx context.Context, p ActionBatchParams) (ActionBatchResult, error) {
+	if !b.useSwift(CapActionBatch) {
+		return ActionBatchResult{}, errors.New("action_batch requires native bridge")
+	}
+
+	b.mu.Lock()
+	swift := b.swift
+	b.mu.Unlock()
+
+	if swift == nil {
+		return ActionBatchResult{}, errors.New("action_batch requires native bridge")
+	}
+
+	result, err := swift.ActionBatch(ctx, p)
+	if err != nil && b.shouldDegrade(err) {
+		b.degrade(CapActionBatch, err)
+		return ActionBatchResult{}, err
+	}
+	return result, err
 }
 
 // Close shuts down the Swift bridge process if it was started.

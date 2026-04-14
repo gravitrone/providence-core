@@ -118,6 +118,28 @@ Unsolicited event emitted when the AX cache is invalidated (focus changes, windo
 
 `ax_tree` / `ax_find` / `ax_perform` all need Accessibility granted to the process. If the permission is missing the AX C API silently returns no attributes, producing empty trees and zero matches rather than explicit errors. Use `preflight` to check state before calling AX methods.
 
+## Phase 4 scope
+
+Phase 4 adds screen diffing and server-side batching.
+
+- `screen_diff` - captures a fresh frame, computes a 64-bit perceptual dHash, and diffs against the process-local `FrameMemory`. Params: `since_ts_ns` (skip if last hashed frame is older), `max_regions` (default 8), `min_magnitude` (default 0.02 - fraction of cells in a bounding box that must be "changed" to surface the region). Result: `{changed, hamming, regions?, full_hash, capture_ns}`. On first call (no baseline) `changed=true` and `regions` is omitted. `changed` is true when Hamming distance on the dHash exceeds 3. Regions are produced by thresholding per-cell abs-diff on a 64x64 grayscale grid, 8-neighbor connected components, merging clusters within 2 cells, and mapping cell coords back to screen coords. Overflow past `max_regions` collapses into one enclosing box.
+- `action_batch` - runs a sequence of actions server-side, avoiding stdin round-trips between steps. Params: `actions` (array), `stop_on_error` (default true), `screenshot_after` (default false; attaches `final_screenshot` path), `abort_on_focus_change` (default true; aborts with `focus_changed` if the frontmost app changes mid-batch). Result: `{completed, failed_at?, actions[], final_screenshot?}` where each action entry has `{index, type, ok, result?, error?, duration_ms}`.
+
+### Batch action types
+
+- `click` / `double_click` / `right_click` - same params as the top-level methods.
+- `click_element` - `{query: <AXQueryParams>, action: "click"|"double_click"|"right_click"}`. Runs an AX find then `AXPress` (or `AXShowMenu` for right_click) on the top match.
+- `type` / `type_text` - same as `type_text` top-level.
+- `key` / `key_combo` - same as `key_combo` top-level.
+- `wait` - `{ms: int}`. Sleeps without blocking the write queue.
+- `verify_ax` - `{expect: <AXQueryParams>}`. Fails the batch with `element_not_found` if the query returns zero matches.
+- `read_value` - `{element_id: string}`. Returns `{value}` from the AX `kAXValueAttribute`.
+- `focus_app` - `{app: string}` (bundle id or localized-name substring). Activates the app and waits 150ms for it to settle.
+
+### focus_changed semantics
+
+A mid-batch frontmost-app change is treated as a normal signal, not a capability degradation. The batch aborts, the offending action records `error = "focus_changed: ..."`, and subsequent actions are not run. Callers that expect focus to move (e.g. an action that opens a modal in a different app) should pass `abort_on_focus_change: false`.
+
 ## Minimum macOS
 
 - **12.0** floor (`Package.swift` platform). On 12.0-12.2 the bridge falls back to `CGWindowListCreateImage` for screenshots.
@@ -157,6 +179,8 @@ Sources/
     AXTree.swift           # AX BFS walker + flat renderer
     AXCache.swift          # stable-ID cache + focus-change observers
     AXQuery.swift          # role / text / fuzzy matcher
+    Diff.swift             # dHash + 64x64 region diff + FrameMemory
+    Batch.swift            # server-side multi-action executor
   ProvidenceCaptureKit/    # SPM library, placeholder for phase 6
     module.swift
     SCStreamController.swift   # TODO phase 6

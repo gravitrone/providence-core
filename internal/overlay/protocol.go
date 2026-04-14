@@ -111,3 +111,13 @@ type AssistantDelta struct {
 	Text     string `json:"text"`
 	Finished bool   `json:"finished,omitempty"`
 }
+
+// ContextAck is sent TUI -> Overlay on each accepted ContextUpdate so the
+// overlay can display a status footer (tokens injected, running total,
+// injection mode).
+type ContextAck struct {
+	Tokens int    `json:"tokens"`
+	Reason string `json:"reason,omitempty"`
+	Mode   string `json:"mode"` // "system_reminder" | "synthetic_user"
+	Total  int    `json:"total_session_tokens"`
+}

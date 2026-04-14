@@ -196,7 +196,7 @@ var slashCommands = []slashCommand{
 	{"/permissions", "Manage permission rules (allow/deny/ask/reset)"},
 	{"/hooks", "Show hook configuration"},
 	{"/bridge", "Manage native macOS bridge (stats|setup|info)"},
-	{"/overlay", "Manage overlay process (start|stop|status)"},
+	{"/overlay", "Manage overlay process (start|stop|status|cost)"},
 	{"/diff", "Show files changed this session (--git for git diff)"},
 	{"/plan", "Toggle plan mode (read-only tools)"},
 	{"/branch", "Fork conversation into a new session"},
@@ -5585,8 +5585,25 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				return overlayStopResultMsg{err: at.overlayMgr.Stop(ctx)}
 			}
 
+		case "cost":
+			if at.overlayBridge == nil {
+				at.addSystemMessage("Overlay not enabled.")
+				at.refreshViewport()
+				return true, nil
+			}
+			if tp, ok := at.overlayBridge.(overlayTracked); ok {
+				tracker := tp.Tracker()
+				if tracker == nil {
+					at.addSystemMessage("Token tracker unavailable.")
+				} else {
+					at.addSystemMessage(tracker.FormatSummary())
+				}
+			} else {
+				at.addSystemMessage("Token tracker unavailable.")
+			}
+
 		default:
-			at.addSystemMessage("Usage: /overlay [status|start|stop]")
+			at.addSystemMessage("Usage: /overlay [status|start|stop|cost]")
 		}
 		at.refreshViewport()
 		return true, nil

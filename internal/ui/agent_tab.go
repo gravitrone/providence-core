@@ -2292,16 +2292,6 @@ func (at AgentTab) View(width, height int) string {
 		bannerH := lipgloss.Height(bannerBlock)
 		headerLines += bannerH
 		header = bannerBlock
-
-		// Gradient divider below banner.
-		divW := lipgloss.Width(bannerBlock)
-		if divW > width {
-			divW = width
-		}
-		divider := animatedDivider(divW, at.flameFrame)
-		centeredDiv := lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(divider)
-		header += "\n" + centeredDiv
-		headerLines++
 	}
 
 	// Content: sidebar + chat or just chat.

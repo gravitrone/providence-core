@@ -77,6 +77,12 @@ type Bridge struct {
 	chatHistoryLimit int
 	chatAlpha        float64
 	chatPosition     string
+
+	// Phase G: daily budget bookkeeping. budgetWarnedDay holds the start-of-day
+	// marker for the last date we logged the "budget exceeded" warning, so we
+	// warn at most once per local day instead of spamming on every update.
+	budgetMu        sync.Mutex
+	budgetWarnedDay time.Time
 }
 
 // NewBridge creates a Bridge connecting the engine and ember state to the
@@ -112,6 +118,15 @@ func NewBridgeWithMode(eng Engine, em *ember.State, server *Server, manager *Man
 // Tracker returns the per-session token tracker. Never nil for a Bridge
 // constructed via NewBridge / NewBridgeWithMode.
 func (b *Bridge) Tracker() *TokenTracker { return b.tracker }
+
+// SetDailyBudget configures the per-day token breaker on the underlying
+// tracker. 0 disables gating. Phase G.
+func (b *Bridge) SetDailyBudget(limit int) {
+	if b == nil || b.tracker == nil {
+		return
+	}
+	b.tracker.SetDailyBudget(limit)
+}
 
 // InjectionMode returns the configured injection mode.
 func (b *Bridge) InjectionMode() string { return b.injection }
@@ -268,6 +283,26 @@ func (b *Bridge) OnContextUpdate(_ *client, u ContextUpdate) error {
 		mode = "system_reminder"
 	}
 
+	// Phase G: daily budget breaker. Check BEFORE recording so an already-
+	// exceeded budget doesn't keep inflating the counter on silent updates.
+	// We still broadcast a ContextAck below (with tokens=0, budget_exceeded
+	// reason) so the overlay can show a muted indicator.
+	if b.tracker != nil && b.tracker.BudgetExceeded() {
+		b.warnBudgetOncePerDay()
+		if b.server != nil {
+			ack := ContextAck{
+				Tokens: 0,
+				Reason: "budget_exceeded",
+				Mode:   mode,
+				Total:  b.tracker.Total(),
+			}
+			if err := b.server.Broadcast(TypeContextAck, ack); err != nil {
+				b.logger.Debug("overlay: broadcast context_ack failed", "error", err)
+			}
+		}
+		return nil
+	}
+
 	if b.tracker != nil {
 		b.tracker.Record(TokenEntry{
 			Time:   time.Now(),
@@ -321,6 +356,28 @@ func (b *Bridge) OnContextUpdate(_ *client, u ContextUpdate) error {
 		}
 	}
 	return nil
+}
+
+// warnBudgetOncePerDay emits a single Warn log per local day when the daily
+// budget breaker trips. Subsequent trips on the same day are silent to avoid
+// log spam; the next calendar day re-arms the warning.
+func (b *Bridge) warnBudgetOncePerDay() {
+	now := time.Now()
+	sd := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	b.budgetMu.Lock()
+	warned := !b.budgetWarnedDay.Before(sd)
+	if !warned {
+		b.budgetWarnedDay = sd
+	}
+	b.budgetMu.Unlock()
+	if !warned {
+		budget := 0
+		if b.tracker != nil {
+			budget = b.tracker.DailyBudget()
+		}
+		b.logger.Warn("overlay: daily token budget exceeded, skipping injection",
+			"budget", budget)
+	}
 }
 
 // storeAsReminder saves the formatted reminder for later PendingSystemReminder.

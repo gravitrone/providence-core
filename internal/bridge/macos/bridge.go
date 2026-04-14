@@ -20,11 +20,34 @@ var (
 	swiftGlobalInstallDir = "/usr/local/lib/providence/providence-mac-bridge"
 )
 
+type swiftBridgeClient interface {
+	call(context.Context, string, any) (json.RawMessage, error)
+	Click(context.Context, clickParams) error
+	TypeText(context.Context, string) error
+	KeyCombo(context.Context, KeyCombo) error
+	Close(context.Context) error
+}
+
+type shellBridgeClient interface {
+	Screenshot(context.Context) (string, error)
+	ScreenshotRegion(context.Context, int, int, int, int) (string, error)
+	Click(context.Context, int, int) error
+	DoubleClick(context.Context, int, int) error
+	RightClick(context.Context, int, int) error
+	Type(context.Context, string) error
+	Key(context.Context, string) error
+	ClipboardRead(context.Context) (string, error)
+	ClipboardWrite(context.Context, string) error
+	ListApps(context.Context) ([]AppInfo, error)
+	FocusApp(context.Context, string) error
+	LaunchApp(context.Context, string) error
+}
+
 // Bridge provides macOS computer use capabilities with Swift-first fallback behavior.
 type Bridge struct {
 	mode         string
-	swift        *swiftClient
-	shell        *shellClient
+	swift        swiftBridgeClient
+	shell        shellBridgeClient
 	caps         map[Capability]bool
 	mu           sync.Mutex
 	spawnOnce    sync.Once
@@ -52,7 +75,10 @@ func New(opts ...Option) *Bridge {
 		caps: map[Capability]bool{
 			CapScreenshot:  true,
 			CapClick:       true,
+			CapDoubleClick: true,
+			CapRightClick:  true,
 			CapType:        true,
+			CapKey:         true,
 			CapAXTree:      true,
 			CapScreenDiff:  true,
 			CapActionBatch: true,
@@ -144,14 +170,16 @@ func (b *Bridge) ScreenshotRegion(ctx context.Context, x, y, w, h int) (string, 
 
 // Click simulates a mouse click at x, y coordinates via AppleScript.
 func (b *Bridge) Click(ctx context.Context, x, y int) error {
-	params := map[string]int{"x": x, "y": y}
-
-	_, fallback, err := b.trySwift(ctx, CapClick, "click", params)
-	if err != nil {
-		return err
-	}
-	if !fallback {
-		return nil
+	if swift := b.activeSwift(CapClick); swift != nil {
+		err := swift.Click(ctx, clickParams{X: x, Y: y})
+		if err == nil {
+			return nil
+		}
+		if b.shouldDegrade(err) {
+			b.degrade(CapClick, err)
+		} else {
+			return err
+		}
 	}
 
 	return b.shell.Click(ctx, x, y)
@@ -159,14 +187,16 @@ func (b *Bridge) Click(ctx context.Context, x, y int) error {
 
 // DoubleClick simulates a double click at x, y coordinates.
 func (b *Bridge) DoubleClick(ctx context.Context, x, y int) error {
-	params := map[string]int{"x": x, "y": y}
-
-	_, fallback, err := b.trySwift(ctx, CapClick, "double_click", params)
-	if err != nil {
-		return err
-	}
-	if !fallback {
-		return nil
+	if swift := b.activeSwift(CapDoubleClick); swift != nil {
+		err := swift.Click(ctx, clickParams{X: x, Y: y, Count: 2})
+		if err == nil {
+			return nil
+		}
+		if b.shouldDegrade(err) {
+			b.degrade(CapDoubleClick, err)
+		} else {
+			return err
+		}
 	}
 
 	return b.shell.DoubleClick(ctx, x, y)
@@ -174,14 +204,16 @@ func (b *Bridge) DoubleClick(ctx context.Context, x, y int) error {
 
 // RightClick simulates a right click at x, y coordinates.
 func (b *Bridge) RightClick(ctx context.Context, x, y int) error {
-	params := map[string]int{"x": x, "y": y}
-
-	_, fallback, err := b.trySwift(ctx, CapClick, "right_click", params)
-	if err != nil {
-		return err
-	}
-	if !fallback {
-		return nil
+	if swift := b.activeSwift(CapRightClick); swift != nil {
+		err := swift.Click(ctx, clickParams{X: x, Y: y, Button: "right"})
+		if err == nil {
+			return nil
+		}
+		if b.shouldDegrade(err) {
+			b.degrade(CapRightClick, err)
+		} else {
+			return err
+		}
 	}
 
 	return b.shell.RightClick(ctx, x, y)
@@ -189,14 +221,16 @@ func (b *Bridge) RightClick(ctx context.Context, x, y int) error {
 
 // Type types text at the current cursor position via AppleScript keystroke.
 func (b *Bridge) Type(ctx context.Context, text string) error {
-	params := map[string]string{"text": text}
-
-	_, fallback, err := b.trySwift(ctx, CapType, "type_text", params)
-	if err != nil {
-		return err
-	}
-	if !fallback {
-		return nil
+	if swift := b.activeSwift(CapType); swift != nil {
+		err := swift.TypeText(ctx, text)
+		if err == nil {
+			return nil
+		}
+		if b.shouldDegrade(err) {
+			b.degrade(CapType, err)
+		} else {
+			return err
+		}
 	}
 
 	return b.shell.Type(ctx, text)
@@ -204,14 +238,21 @@ func (b *Bridge) Type(ctx context.Context, text string) error {
 
 // Key sends a keyboard shortcut like "command+v", "ctrl+c", "return".
 func (b *Bridge) Key(ctx context.Context, keys string) error {
-	params := map[string]string{"keys": keys}
-
-	_, fallback, err := b.trySwift(ctx, CapType, "key_combo", params)
+	combo, err := ParseKeyCombo(keys)
 	if err != nil {
 		return err
 	}
-	if !fallback {
-		return nil
+
+	if swift := b.activeSwift(CapKey); swift != nil {
+		err = swift.KeyCombo(ctx, combo)
+		if err == nil {
+			return nil
+		}
+		if b.shouldDegrade(err) {
+			b.degrade(CapKey, err)
+		} else {
+			return err
+		}
 	}
 
 	return b.shell.Key(ctx, keys)
@@ -326,9 +367,8 @@ func (b *Bridge) trySwift(
 		return result, false, nil
 	}
 
-	var protocolErr *ProtocolError
-	if errors.As(err, &protocolErr) && isTransient(protocolErr.Code) {
-		b.disableCapability(cap)
+	if b.shouldDegrade(err) {
+		b.degrade(cap, err)
 		return nil, true, nil
 	}
 
@@ -387,11 +427,40 @@ func (b *Bridge) useSwift(cap Capability) bool {
 	return b.caps[cap] && b.swift != nil && b.spawnErr == nil
 }
 
-func (b *Bridge) disableCapability(cap Capability) {
+func (b *Bridge) activeSwift(cap Capability) swiftBridgeClient {
+	if !b.useSwift(cap) {
+		return nil
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	return b.swift
+}
+
+func (b *Bridge) shouldDegrade(err error) bool {
+	var protocolErr *ProtocolError
+	if !errors.As(err, &protocolErr) {
+		return false
+	}
+
+	switch protocolErr.Code {
+	case ErrPermissionDenied, ErrTimeout, ErrUnsupportedOS:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *Bridge) degrade(cap Capability, err error) {
+	b.mu.Lock()
 	b.caps[cap] = false
+	logger := b.logger
+	b.mu.Unlock()
+
+	if logger != nil {
+		logger.Warn("swift bridge capability degraded, falling back to shell", "cap", cap, "error", err)
+	}
 }
 
 func decodeScreenshotPath(result json.RawMessage) (string, error) {
@@ -426,15 +495,6 @@ func decodeAppsResult(result json.RawMessage) ([]AppInfo, error) {
 	}
 
 	return apps, nil
-}
-
-func isTransient(code string) bool {
-	switch code {
-	case ErrPermissionDenied, ErrTimeout, ErrUnsupportedOS:
-		return true
-	default:
-		return false
-	}
 }
 
 func lookupSwiftBinary(cfgPath string) string {

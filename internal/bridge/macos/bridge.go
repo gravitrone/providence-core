@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"sync"
 	"time"
+
+	"github.com/gravitrone/providence-core/internal/config"
 )
 
 var (
@@ -60,6 +62,7 @@ type Bridge struct {
 	logger       *slog.Logger
 	swiftBinary  string
 	spawnTimeout time.Duration
+	metrics      *Metrics
 }
 
 // Option configures a Bridge.
@@ -75,8 +78,9 @@ type AppInfo struct {
 // New creates a new macOS bridge.
 func New(opts ...Option) *Bridge {
 	bridge := &Bridge{
-		mode:  "auto",
-		shell: &shellClient{},
+		mode:    "auto",
+		shell:   &shellClient{},
+		metrics: NewMetrics(),
 		caps: map[Capability]bool{
 			CapScreenshot:  true,
 			CapClick:       true,
@@ -135,6 +139,26 @@ func WithSpawnTimeout(d time.Duration) Option {
 	}
 }
 
+// WithConfig applies a BridgeConfig to the bridge.
+func WithConfig(cfg config.BridgeConfig) Option {
+	return func(b *Bridge) {
+		if cfg.Mode != "" {
+			b.mode = cfg.Mode
+		}
+		if cfg.SwiftPath != "" {
+			b.swiftBinary = cfg.SwiftPath
+		}
+		if cfg.SpawnTimeoutMS > 0 {
+			b.spawnTimeout = time.Duration(cfg.SpawnTimeoutMS) * time.Millisecond
+		}
+	}
+}
+
+// Metrics returns the bridge's metrics tracker.
+func (b *Bridge) Metrics() *Metrics {
+	return b.metrics
+}
+
 // IsAvailable checks if we're on macOS.
 func (b *Bridge) IsAvailable() bool {
 	return runtime.GOOS == "darwin"
@@ -142,19 +166,25 @@ func (b *Bridge) IsAvailable() bool {
 
 // Screenshot captures the screen to a temp file, returns the path.
 func (b *Bridge) Screenshot(ctx context.Context) (string, error) {
+	t0 := time.Now()
 	result, fallback, err := b.trySwift(ctx, CapScreenshot, "screenshot", nil)
 	if err != nil {
+		b.metrics.Record("screenshot", time.Since(t0), false)
 		return "", err
 	}
 	if !fallback {
-		return decodeScreenshotPath(result)
+		path, decErr := decodeScreenshotPath(result)
+		b.metrics.Record("screenshot", time.Since(t0), decErr == nil)
+		return path, decErr
 	}
-
-	return b.shell.Screenshot(ctx)
+	path, shellErr := b.shell.Screenshot(ctx)
+	b.metrics.Record("screenshot", time.Since(t0), shellErr == nil)
+	return path, shellErr
 }
 
 // ScreenshotRegion captures a region of the screen.
 func (b *Bridge) ScreenshotRegion(ctx context.Context, x, y, w, h int) (string, error) {
+	t0 := time.Now()
 	params := map[string]any{
 		"region": map[string]int{
 			"x": x,
@@ -166,85 +196,110 @@ func (b *Bridge) ScreenshotRegion(ctx context.Context, x, y, w, h int) (string, 
 
 	result, fallback, err := b.trySwift(ctx, CapScreenshot, "screenshot", params)
 	if err != nil {
+		b.metrics.Record("screenshot_region", time.Since(t0), false)
 		return "", err
 	}
 	if !fallback {
-		return decodeScreenshotPath(result)
+		path, decErr := decodeScreenshotPath(result)
+		b.metrics.Record("screenshot_region", time.Since(t0), decErr == nil)
+		return path, decErr
 	}
-
-	return b.shell.ScreenshotRegion(ctx, x, y, w, h)
+	path, shellErr := b.shell.ScreenshotRegion(ctx, x, y, w, h)
+	b.metrics.Record("screenshot_region", time.Since(t0), shellErr == nil)
+	return path, shellErr
 }
 
 // Click simulates a mouse click at x, y coordinates via AppleScript.
 func (b *Bridge) Click(ctx context.Context, x, y int) error {
+	t0 := time.Now()
 	if swift := b.activeSwift(CapClick); swift != nil {
 		err := swift.Click(ctx, clickParams{X: x, Y: y})
 		if err == nil {
+			b.metrics.Record("click", time.Since(t0), true)
 			return nil
 		}
 		if b.shouldDegrade(err) {
 			b.degrade(CapClick, err)
 		} else {
+			b.metrics.Record("click", time.Since(t0), false)
 			return err
 		}
 	}
 
-	return b.shell.Click(ctx, x, y)
+	err := b.shell.Click(ctx, x, y)
+	b.metrics.Record("click", time.Since(t0), err == nil)
+	return err
 }
 
 // DoubleClick simulates a double click at x, y coordinates.
 func (b *Bridge) DoubleClick(ctx context.Context, x, y int) error {
+	t0 := time.Now()
 	if swift := b.activeSwift(CapDoubleClick); swift != nil {
 		err := swift.Click(ctx, clickParams{X: x, Y: y, Count: 2})
 		if err == nil {
+			b.metrics.Record("double_click", time.Since(t0), true)
 			return nil
 		}
 		if b.shouldDegrade(err) {
 			b.degrade(CapDoubleClick, err)
 		} else {
+			b.metrics.Record("double_click", time.Since(t0), false)
 			return err
 		}
 	}
 
-	return b.shell.DoubleClick(ctx, x, y)
+	err := b.shell.DoubleClick(ctx, x, y)
+	b.metrics.Record("double_click", time.Since(t0), err == nil)
+	return err
 }
 
 // RightClick simulates a right click at x, y coordinates.
 func (b *Bridge) RightClick(ctx context.Context, x, y int) error {
+	t0 := time.Now()
 	if swift := b.activeSwift(CapRightClick); swift != nil {
 		err := swift.Click(ctx, clickParams{X: x, Y: y, Button: "right"})
 		if err == nil {
+			b.metrics.Record("right_click", time.Since(t0), true)
 			return nil
 		}
 		if b.shouldDegrade(err) {
 			b.degrade(CapRightClick, err)
 		} else {
+			b.metrics.Record("right_click", time.Since(t0), false)
 			return err
 		}
 	}
 
-	return b.shell.RightClick(ctx, x, y)
+	err := b.shell.RightClick(ctx, x, y)
+	b.metrics.Record("right_click", time.Since(t0), err == nil)
+	return err
 }
 
 // Type types text at the current cursor position via AppleScript keystroke.
 func (b *Bridge) Type(ctx context.Context, text string) error {
+	t0 := time.Now()
 	if swift := b.activeSwift(CapType); swift != nil {
 		err := swift.TypeText(ctx, text)
 		if err == nil {
+			b.metrics.Record("type", time.Since(t0), true)
 			return nil
 		}
 		if b.shouldDegrade(err) {
 			b.degrade(CapType, err)
 		} else {
+			b.metrics.Record("type", time.Since(t0), false)
 			return err
 		}
 	}
 
-	return b.shell.Type(ctx, text)
+	err := b.shell.Type(ctx, text)
+	b.metrics.Record("type", time.Since(t0), err == nil)
+	return err
 }
 
 // Key sends a keyboard shortcut like "command+v", "ctrl+c", "return".
 func (b *Bridge) Key(ctx context.Context, keys string) error {
+	t0 := time.Now()
 	combo, err := ParseKeyCombo(keys)
 	if err != nil {
 		return err
@@ -253,91 +308,118 @@ func (b *Bridge) Key(ctx context.Context, keys string) error {
 	if swift := b.activeSwift(CapKey); swift != nil {
 		err = swift.KeyCombo(ctx, combo)
 		if err == nil {
+			b.metrics.Record("key", time.Since(t0), true)
 			return nil
 		}
 		if b.shouldDegrade(err) {
 			b.degrade(CapKey, err)
 		} else {
+			b.metrics.Record("key", time.Since(t0), false)
 			return err
 		}
 	}
 
-	return b.shell.Key(ctx, keys)
+	err = b.shell.Key(ctx, keys)
+	b.metrics.Record("key", time.Since(t0), err == nil)
+	return err
 }
 
 // ClipboardRead reads text from the system clipboard.
 func (b *Bridge) ClipboardRead(ctx context.Context) (string, error) {
+	t0 := time.Now()
 	result, fallback, err := b.trySwift(ctx, CapClipboard, "clipboard_read", nil)
 	if err != nil {
+		b.metrics.Record("clipboard_read", time.Since(t0), false)
 		return "", err
 	}
 	if !fallback {
-		return decodeStringResult(result)
+		v, decErr := decodeStringResult(result)
+		b.metrics.Record("clipboard_read", time.Since(t0), decErr == nil)
+		return v, decErr
 	}
-
-	return b.shell.ClipboardRead(ctx)
+	v, shellErr := b.shell.ClipboardRead(ctx)
+	b.metrics.Record("clipboard_read", time.Since(t0), shellErr == nil)
+	return v, shellErr
 }
 
 // ClipboardWrite writes text to the system clipboard.
 func (b *Bridge) ClipboardWrite(ctx context.Context, text string) error {
+	t0 := time.Now()
 	params := map[string]string{"text": text}
 
 	_, fallback, err := b.trySwift(ctx, CapClipboard, "clipboard_write", params)
 	if err != nil {
+		b.metrics.Record("clipboard_write", time.Since(t0), false)
 		return err
 	}
 	if !fallback {
+		b.metrics.Record("clipboard_write", time.Since(t0), true)
 		return nil
 	}
-
-	return b.shell.ClipboardWrite(ctx, text)
+	err = b.shell.ClipboardWrite(ctx, text)
+	b.metrics.Record("clipboard_write", time.Since(t0), err == nil)
+	return err
 }
 
 // ListApps returns running foreground applications.
 func (b *Bridge) ListApps(ctx context.Context) ([]AppInfo, error) {
+	t0 := time.Now()
 	result, fallback, err := b.trySwift(ctx, CapAppList, "list_apps", nil)
 	if err != nil {
+		b.metrics.Record("list_apps", time.Since(t0), false)
 		return nil, err
 	}
 	if !fallback {
-		return decodeAppsResult(result)
+		apps, decErr := decodeAppsResult(result)
+		b.metrics.Record("list_apps", time.Since(t0), decErr == nil)
+		return apps, decErr
 	}
-
-	return b.shell.ListApps(ctx)
+	apps, shellErr := b.shell.ListApps(ctx)
+	b.metrics.Record("list_apps", time.Since(t0), shellErr == nil)
+	return apps, shellErr
 }
 
 // FocusApp brings an application to the foreground.
 func (b *Bridge) FocusApp(ctx context.Context, appName string) error {
+	t0 := time.Now()
 	params := map[string]string{"app_name": appName}
 
 	_, fallback, err := b.trySwift(ctx, CapAppFocus, "focus_app", params)
 	if err != nil {
+		b.metrics.Record("focus_app", time.Since(t0), false)
 		return err
 	}
 	if !fallback {
+		b.metrics.Record("focus_app", time.Since(t0), true)
 		return nil
 	}
-
-	return b.shell.FocusApp(ctx, appName)
+	err = b.shell.FocusApp(ctx, appName)
+	b.metrics.Record("focus_app", time.Since(t0), err == nil)
+	return err
 }
 
 // LaunchApp opens an application by name.
 func (b *Bridge) LaunchApp(ctx context.Context, appName string) error {
+	t0 := time.Now()
 	params := map[string]string{"app_name": appName}
 
 	_, fallback, err := b.trySwift(ctx, CapAppLaunch, "launch_app", params)
 	if err != nil {
+		b.metrics.Record("launch_app", time.Since(t0), false)
 		return err
 	}
 	if !fallback {
+		b.metrics.Record("launch_app", time.Since(t0), true)
 		return nil
 	}
-
-	return b.shell.LaunchApp(ctx, appName)
+	err = b.shell.LaunchApp(ctx, appName)
+	b.metrics.Record("launch_app", time.Since(t0), err == nil)
+	return err
 }
 
 // AXTree returns the Accessibility tree for the target app.
 func (b *Bridge) AXTree(ctx context.Context, p AXTreeParams) (AXTreeResult, error) {
+	t0 := time.Now()
 	if !b.useSwift(CapAXTree) {
 		return AXTreeResult{}, errors.New("AX tree requires native bridge; install providence-mac-bridge and grant Accessibility permission")
 	}
@@ -351,6 +433,7 @@ func (b *Bridge) AXTree(ctx context.Context, p AXTreeParams) (AXTreeResult, erro
 	}
 
 	result, err := swift.AXTree(ctx, p)
+	b.metrics.Record("ax_tree", time.Since(t0), err == nil)
 	if err != nil && b.shouldDegrade(err) {
 		b.degrade(CapAXTree, err)
 		return AXTreeResult{}, err
@@ -360,6 +443,7 @@ func (b *Bridge) AXTree(ctx context.Context, p AXTreeParams) (AXTreeResult, erro
 
 // AXFind searches for Accessibility elements matching the given query.
 func (b *Bridge) AXFind(ctx context.Context, q AXQuery) (AXFindResult, error) {
+	t0 := time.Now()
 	if !b.useSwift(CapAXFind) {
 		return AXFindResult{}, errors.New("AX find requires native bridge; install providence-mac-bridge and grant Accessibility permission")
 	}
@@ -373,6 +457,7 @@ func (b *Bridge) AXFind(ctx context.Context, q AXQuery) (AXFindResult, error) {
 	}
 
 	result, err := swift.AXFind(ctx, q)
+	b.metrics.Record("ax_find", time.Since(t0), err == nil)
 	if err != nil && b.shouldDegrade(err) {
 		b.degrade(CapAXFind, err)
 		return AXFindResult{}, err
@@ -382,6 +467,7 @@ func (b *Bridge) AXFind(ctx context.Context, q AXQuery) (AXFindResult, error) {
 
 // AXPerform triggers an Accessibility action on an element by ID.
 func (b *Bridge) AXPerform(ctx context.Context, elementID, action string) error {
+	t0 := time.Now()
 	if !b.useSwift(CapAXPerform) {
 		return errors.New("AX perform requires native bridge; install providence-mac-bridge and grant Accessibility permission")
 	}
@@ -395,6 +481,7 @@ func (b *Bridge) AXPerform(ctx context.Context, elementID, action string) error 
 	}
 
 	err := swift.AXPerform(ctx, elementID, action)
+	b.metrics.Record("ax_perform", time.Since(t0), err == nil)
 	if err != nil && b.shouldDegrade(err) {
 		b.degrade(CapAXPerform, err)
 	}
@@ -403,6 +490,7 @@ func (b *Bridge) AXPerform(ctx context.Context, elementID, action string) error 
 
 // ScreenDiff returns a perceptual hash diff of the screen since the last captured frame.
 func (b *Bridge) ScreenDiff(ctx context.Context, p ScreenDiffParams) (ScreenDiffResult, error) {
+	t0 := time.Now()
 	if !b.useSwift(CapScreenDiff) {
 		return ScreenDiffResult{}, errors.New("screen_diff requires native bridge")
 	}
@@ -416,6 +504,7 @@ func (b *Bridge) ScreenDiff(ctx context.Context, p ScreenDiffParams) (ScreenDiff
 	}
 
 	result, err := swift.ScreenDiff(ctx, p)
+	b.metrics.Record("screen_diff", time.Since(t0), err == nil)
 	if err != nil && b.shouldDegrade(err) {
 		b.degrade(CapScreenDiff, err)
 		return ScreenDiffResult{}, err
@@ -425,6 +514,7 @@ func (b *Bridge) ScreenDiff(ctx context.Context, p ScreenDiffParams) (ScreenDiff
 
 // ActionBatch executes multiple actions server-side in a single round trip.
 func (b *Bridge) ActionBatch(ctx context.Context, p ActionBatchParams) (ActionBatchResult, error) {
+	t0 := time.Now()
 	if !b.useSwift(CapActionBatch) {
 		return ActionBatchResult{}, errors.New("action_batch requires native bridge")
 	}
@@ -438,6 +528,7 @@ func (b *Bridge) ActionBatch(ctx context.Context, p ActionBatchParams) (ActionBa
 	}
 
 	result, err := swift.ActionBatch(ctx, p)
+	b.metrics.Record("action_batch", time.Since(t0), err == nil)
 	if err != nil && b.shouldDegrade(err) {
 		b.degrade(CapActionBatch, err)
 		return ActionBatchResult{}, err

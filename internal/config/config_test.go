@@ -333,3 +333,155 @@ func TestSaveCreatesDir(t *testing.T) {
 	loaded := LoadFromTOML(path)
 	assert.Equal(t, "claude", loaded.Engine)
 }
+
+// --- BridgeConfig Tests ---
+
+func TestBridgeConfigDefaults(t *testing.T) {
+	d := Defaults()
+	b := d.Bridge
+	assert.Equal(t, "auto", b.Mode)
+	assert.Equal(t, 2, b.WarmStreamFPS)
+	assert.Equal(t, 30, b.BurstStreamFPS)
+	assert.True(t, b.ActionBatch)
+	assert.True(t, b.ScreenDiffEnabled)
+	assert.Equal(t, 12, b.AXMaxDepth)
+	assert.Equal(t, 2000, b.AXMaxNodes)
+	assert.Equal(t, 1500, b.SpawnTimeoutMS)
+}
+
+func TestBridgeConfigTOMLRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	content := `
+[bridge]
+mode = "swift"
+swift_path = "/usr/local/bin/providence-mac-bridge"
+warm_stream_fps = 5
+burst_stream_fps = 30
+action_batch = true
+screen_diff_enabled = true
+ax_max_depth = 15
+ax_max_nodes = 3000
+spawn_timeout_ms = 2000
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	c := LoadFromTOML(path)
+	assert.Equal(t, "swift", c.Bridge.Mode)
+	assert.Equal(t, "/usr/local/bin/providence-mac-bridge", c.Bridge.SwiftPath)
+	assert.Equal(t, 5, c.Bridge.WarmStreamFPS)
+	assert.Equal(t, 30, c.Bridge.BurstStreamFPS)
+	assert.True(t, c.Bridge.ActionBatch)
+	assert.True(t, c.Bridge.ScreenDiffEnabled)
+	assert.Equal(t, 15, c.Bridge.AXMaxDepth)
+	assert.Equal(t, 3000, c.Bridge.AXMaxNodes)
+	assert.Equal(t, 2000, c.Bridge.SpawnTimeoutMS)
+}
+
+func TestBridgeConfigMerge(t *testing.T) {
+	base := Config{
+		Bridge: BridgeConfig{
+			Mode:           "auto",
+			WarmStreamFPS:  2,
+			BurstStreamFPS: 30,
+			AXMaxDepth:     12,
+			AXMaxNodes:     2000,
+			SpawnTimeoutMS: 1500,
+		},
+	}
+	override := Config{
+		Bridge: BridgeConfig{
+			Mode:           "swift",
+			WarmStreamFPS:  5,
+			SpawnTimeoutMS: 3000,
+		},
+	}
+	mergeConfig(&base, &override)
+	assert.Equal(t, "swift", base.Bridge.Mode)
+	assert.Equal(t, 5, base.Bridge.WarmStreamFPS)
+	assert.Equal(t, 30, base.Bridge.BurstStreamFPS, "unset override should not clear base")
+	assert.Equal(t, 3000, base.Bridge.SpawnTimeoutMS)
+	assert.Equal(t, 2000, base.Bridge.AXMaxNodes, "unset override should not clear base")
+}
+
+func TestBridgeConfigValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfg       BridgeConfig
+		wantError bool
+		errFrag   string
+	}{
+		{
+			name: "valid auto mode",
+			cfg:  BridgeConfig{Mode: "auto", WarmStreamFPS: 2, BurstStreamFPS: 30, AXMaxNodes: 2000, SpawnTimeoutMS: 1500},
+		},
+		{
+			name: "valid swift mode",
+			cfg:  BridgeConfig{Mode: "swift", SpawnTimeoutMS: 500},
+		},
+		{
+			name: "valid shell mode",
+			cfg:  BridgeConfig{Mode: "shell"},
+		},
+		{
+			name:      "invalid mode",
+			cfg:       BridgeConfig{Mode: "invalid"},
+			wantError: true,
+			errFrag:   "bridge.mode",
+		},
+		{
+			name:      "warm fps out of range",
+			cfg:       BridgeConfig{WarmStreamFPS: 61},
+			wantError: true,
+			errFrag:   "warm_stream_fps",
+		},
+		{
+			name:      "burst fps out of range",
+			cfg:       BridgeConfig{BurstStreamFPS: 99},
+			wantError: true,
+			errFrag:   "burst_stream_fps",
+		},
+		{
+			name:      "ax_max_nodes too large",
+			cfg:       BridgeConfig{AXMaxNodes: 10001},
+			wantError: true,
+			errFrag:   "ax_max_nodes",
+		},
+		{
+			name:      "negative spawn timeout",
+			cfg:       BridgeConfig{SpawnTimeoutMS: -1},
+			wantError: true,
+			errFrag:   "spawn_timeout_ms",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Config{Bridge: tc.cfg}
+			err := c.Validate()
+			if tc.wantError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errFrag)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestBridgeConfigEnvVarExpansion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	t.Setenv("BRIDGE_BIN", "/custom/bin/bridge")
+
+	content := `
+[bridge]
+mode = "auto"
+swift_path = "$BRIDGE_BIN"
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+
+	c := LoadFromTOML(path)
+	assert.Equal(t, "/custom/bin/bridge", c.Bridge.SwiftPath)
+}

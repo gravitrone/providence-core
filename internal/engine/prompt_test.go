@@ -15,6 +15,61 @@ func TestBuildSystemPromptContainsIdentity(t *testing.T) {
 	assert.Contains(t, prompt, "flame")
 }
 
+// TestPersonaToneDefaultReturnsEmpty verifies the "", "normal", and unknown
+// persona values all return an empty tone override so the default voice is
+// preserved for every non-bro user.
+func TestPersonaToneDefaultReturnsEmpty(t *testing.T) {
+	t.Parallel()
+
+	for _, p := range []string{"", "normal", "NORMAL", "  normal  ", "garbage", "BRO "} {
+		// "BRO " has trailing space but bro IS a match after trim+lower, so
+		// skip it in this loop by asserting only clear-default cases.
+		if strings.ToLower(strings.TrimSpace(p)) == "bro" {
+			continue
+		}
+		assert.Empty(t, personaTone(p), "persona %q should yield no override", p)
+	}
+}
+
+// TestPersonaToneBroReturnsOverride verifies the "bro" persona (case and
+// whitespace tolerant) returns a tone block that contains the em-dash ban
+// AND the in-code professional-mandate clause. Both are core invariants of
+// the dual-mode contract and MUST NOT drift silently.
+func TestPersonaToneBroReturnsOverride(t *testing.T) {
+	t.Parallel()
+
+	for _, p := range []string{"bro", "BRO", "Bro", "  bro  "} {
+		out := personaTone(p)
+		require.NotEmpty(t, out, "persona %q should yield a tone block", p)
+		assert.Contains(t, out, "em dashes", "bro tone must keep the em-dash ban")
+		assert.Contains(t, out, "U+2014", "bro tone must reference the em-dash codepoint")
+		assert.Contains(t, out, "MANDATORY REGARDLESS OF TONE", "bro tone must keep the in-code professional mandate")
+		assert.Contains(t, out, "Professional code is non-negotiable", "bro tone must keep the non-negotiable clause")
+	}
+}
+
+// TestBuildSystemBlocksInjectsPersonaAfterIdentity verifies the bro tone
+// block lands at index 1 (immediately after identityAndProtocol) when the
+// PromptConfig carries Persona="bro", and that the block is cacheable so
+// it rides the static prefix.
+func TestBuildSystemBlocksInjectsPersonaAfterIdentity(t *testing.T) {
+	t.Parallel()
+
+	cfg := &PromptConfig{Persona: "bro"}
+	blocks := BuildSystemBlocks(cfg)
+	require.GreaterOrEqual(t, len(blocks), 2)
+
+	assert.Contains(t, blocks[0].Text, "Providence", "block 0 must be identity")
+	assert.Contains(t, blocks[1].Text, "Tone (bro mode)", "block 1 must be persona override when bro")
+	assert.True(t, blocks[1].Cacheable, "persona block must be cacheable")
+
+	// Default path: no persona block at all.
+	defaultBlocks := BuildSystemBlocks(&PromptConfig{})
+	for _, b := range defaultBlocks {
+		assert.NotContains(t, b.Text, "Tone (bro mode)", "default persona must never inject bro block")
+	}
+}
+
 func TestBuildSystemBlocksReturnsBlocks(t *testing.T) {
 	blocks := BuildSystemBlocks(nil)
 	require.NotEmpty(t, blocks)

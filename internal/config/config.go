@@ -67,6 +67,7 @@ type Config struct {
 	DashboardVisible bool   `toml:"dashboard_visible" json:"dashboard_visible,omitempty"`
 	BGAgentsEnabled  bool   `toml:"bg_agents_enabled" json:"bg_agents_enabled,omitempty"`
 	OutputStyle      string   `toml:"output_style" json:"output_style,omitempty"`
+	Persona          string   `toml:"persona" json:"persona,omitempty"`
 	SpinnerVerbs     []string `toml:"spinner_verbs" json:"spinner_verbs,omitempty"`
 
 	Bridge      BridgeConfig      `toml:"bridge" json:"bridge,omitempty"`

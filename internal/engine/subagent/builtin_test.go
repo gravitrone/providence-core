@@ -74,3 +74,52 @@ func TestVerificationBackground(t *testing.T) {
 	require.True(t, ok)
 	assert.True(t, verification.Background, "Verification agent should run in background")
 }
+
+// TestBuiltinAgentImplementerLimits pins the Implementer contract: it
+// must carry a bounded MaxTurns so plan-step execution cannot runaway,
+// a non-empty SystemPrompt, and a tool set that includes write-capable
+// tools (the agent explicitly implements code changes).
+func TestBuiltinAgentImplementerLimits(t *testing.T) {
+	t.Parallel()
+
+	impl, ok := BuiltinAgents["Implementer"]
+	require.True(t, ok, "Implementer must be a registered built-in agent")
+
+	assert.Greater(t, impl.MaxTurns, 0, "MaxTurns must be bounded, not 0/unlimited")
+	assert.LessOrEqual(t, impl.MaxTurns, 100, "MaxTurns must be a practical cap, not astronomical")
+	assert.NotEmpty(t, impl.SystemPrompt, "SystemPrompt must be populated - the agent has nothing to follow otherwise")
+	assert.Equal(t, []string{"*"}, impl.Tools, "Implementer writes code and must have the full tool set")
+}
+
+// TestBuiltinAgentSpecReviewerIsReadOnly verifies the Spec-Reviewer
+// cannot mutate state. It uses DisallowedTools (denylist) rather than
+// an Allow-style whitelist, so this test pins every write-capable tool
+// the reviewer MUST NOT gain. If someone adds a new write tool to the
+// registry, they must remember to deny it here as well.
+func TestBuiltinAgentSpecReviewerIsReadOnly(t *testing.T) {
+	t.Parallel()
+
+	reviewer, ok := BuiltinAgents["Spec-Reviewer"]
+	require.True(t, ok, "Spec-Reviewer must be a registered built-in agent")
+
+	deniedTools := []string{"Edit", "Write", "NotebookEdit", "Agent"}
+	for _, dt := range deniedTools {
+		assert.Contains(t, reviewer.DisallowedTools, dt,
+			"Spec-Reviewer must deny %q to stay strictly read-only", dt)
+	}
+	assert.Greater(t, reviewer.MaxTurns, 0, "MaxTurns must be bounded")
+	assert.LessOrEqual(t, reviewer.MaxTurns, 50, "Review work should not sprawl")
+}
+
+// TestBuiltinAgentVerificationMaxTurnsBounded verifies the Verification
+// agent has a concrete MaxTurns cap so background verification work
+// cannot burn the API budget indefinitely if the agent gets stuck.
+func TestBuiltinAgentVerificationMaxTurnsBounded(t *testing.T) {
+	t.Parallel()
+
+	ver, ok := BuiltinAgents["Verification"]
+	require.True(t, ok)
+
+	assert.Greater(t, ver.MaxTurns, 0, "MaxTurns must be bounded, not 0 (unlimited)")
+	assert.LessOrEqual(t, ver.MaxTurns, 100, "MaxTurns must be a practical cap")
+}

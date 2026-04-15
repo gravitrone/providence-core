@@ -301,3 +301,83 @@ func TestCountLines(t *testing.T) {
 		assert.Equal(t, tt.want, countLines(tt.input), "countLines(%q)", tt.input)
 	}
 }
+
+// TestSearchEmptyQueryYieldsNoHits pins the empty-query branch: in
+// freeze mode with an active search input, submitting "" must leave
+// the hit list empty rather than matching every message (a naive
+// strings.Contains(body, "") would return true for every message).
+func TestSearchEmptyQueryYieldsNoHits(t *testing.T) {
+	tm := NewTranscriptModel()
+	tm.SetViewport(80, 20)
+	tm.AddMessage(ChatMessage{Role: "user", Content: "one"})
+	tm.AddMessage(ChatMessage{Role: "assistant", Content: "two"})
+
+	tm.SetFrozen(true)
+	tm.SetSearchActive(true)
+	tm.SetSearchQuery("")
+
+	assert.Equal(t, 0, tm.SearchHitCount(),
+		"empty query must not match every message - that would make search useless")
+}
+
+// TestSearchNextWithNoHitsIsNoOp verifies navigation calls on an empty
+// hit set do not panic or move the cursor. Users can bind Next/Prev to
+// a hotkey and the handler must tolerate being fired before any query
+// or against a query with zero matches.
+func TestSearchNextWithNoHitsIsNoOp(t *testing.T) {
+	tm := NewTranscriptModel()
+	tm.SetViewport(80, 20)
+	tm.AddMessage(ChatMessage{Role: "user", Content: "foo"})
+	tm.SetFrozen(true)
+	tm.SetSearchActive(true)
+	tm.SetSearchQuery("nothing-matches-this")
+
+	require.Equal(t, 0, tm.SearchHitCount())
+	require.NotPanics(t, func() {
+		tm.SearchNext()
+		tm.SearchNext()
+		tm.SearchPrev()
+	})
+}
+
+// TestSetFrozenFalseClearsSearchState pins the exit-freeze reset: when
+// freeze mode ends, all search-related state (query, hits, active flag)
+// must go back to zero so a future freeze starts clean. Leaking state
+// across freeze toggles confused users in earlier builds.
+func TestSetFrozenFalseClearsSearchState(t *testing.T) {
+	tm := NewTranscriptModel()
+	tm.SetViewport(80, 20)
+	tm.AddMessage(ChatMessage{Role: "user", Content: "findable"})
+
+	tm.SetFrozen(true)
+	tm.SetSearchActive(true)
+	tm.SetSearchQuery("findable")
+	require.Equal(t, 1, tm.SearchHitCount())
+	require.True(t, tm.SearchActive())
+
+	tm.SetFrozen(false)
+
+	assert.False(t, tm.Frozen(), "frozen flag must clear")
+	assert.False(t, tm.SearchActive(), "search input must close")
+	assert.Equal(t, "", tm.SearchQuery(), "search query must reset")
+	assert.Equal(t, 0, tm.SearchHitCount(), "search hits must clear")
+	assert.True(t, tm.Sticky(), "exit-freeze must re-pin sticky so new messages auto-scroll again")
+}
+
+// TestUpdateMessageOutOfRangeIsNoOp pins the defensive guard in
+// UpdateMessage: an out-of-range index must neither panic nor mutate
+// the buffer. Prior to the guard, callers that raced an update with a
+// clear could crash the UI.
+func TestUpdateMessageOutOfRangeIsNoOp(t *testing.T) {
+	tm := NewTranscriptModel()
+	tm.AddMessage(ChatMessage{Role: "user", Content: "hello"})
+	before := tm.Messages()
+
+	require.NotPanics(t, func() {
+		tm.UpdateMessage(-1, ChatMessage{Role: "user", Content: "nope"})
+		tm.UpdateMessage(5, ChatMessage{Role: "user", Content: "also nope"})
+	})
+
+	after := tm.Messages()
+	assert.Equal(t, before, after, "messages buffer must not mutate on out-of-range update")
+}

@@ -39,6 +39,11 @@ type PromptConfig struct {
 	ToolPrompts string
 	// MCPInstructions is the concatenated instructions from connected MCP servers.
 	MCPInstructions string
+	// Persona optionally re-voices the assistant in chat. Values: "", "normal",
+	// or "bro". Empty and "normal" leave the default voice. "bro" injects a
+	// tone-override block immediately after identity. Code, commits, docs, and
+	// technical writing stay professional regardless of persona.
+	Persona string
 }
 
 // EnvInfo holds computed environment context for the dynamic env block.
@@ -96,6 +101,16 @@ func BuildSystemBlocks(cfg *PromptConfig) []SystemBlock {
 		Text:      identityAndProtocol(),
 		Cacheable: true,
 	})
+
+	// 1.5. Persona tone override (optional, "bro" only)
+	if cfg != nil {
+		if tone := personaTone(cfg.Persona); tone != "" {
+			blocks = append(blocks, SystemBlock{
+				Text:      tone,
+				Cacheable: true,
+			})
+		}
+	}
 
 	// 2. System Framework
 	blocks = append(blocks, SystemBlock{
@@ -379,6 +394,43 @@ func gitSafety() string {
  - Pass commit messages via a HEREDOC so formatting survives. Keep the subject line under 72 characters. Write in the imperative mood ("add X", "fix Y", not "added X", "fixes Y").
  - Never add Co-Authored-By tags, "Generated with" trailers, or AI attribution to commits unless the user explicitly asks. The commit should read as written by the user.
  - On merge conflicts, resolve them by understanding both sides. Do not blindly accept "theirs" or "ours" to make the conflict go away.`
+}
+
+// personaTone returns a chat-voice override block for alxx's "bro" persona.
+// Returns empty string for the default / normal path so callers can range
+// on truthiness. Only the chat voice flips; code, commits, PRs, comments,
+// and technical writing stay professional regardless of persona.
+func personaTone(persona string) string {
+	switch strings.ToLower(strings.TrimSpace(persona)) {
+	case "bro":
+		return `# Tone (bro mode)
+
+In chat: lowercase default. ALLCAPS when you actually mean it (LMAOOO, BRO WAIT, WHAT THE FUCK). Short sentences. Long only when the answer genuinely needs it.
+
+STRICT: never use em dashes (U+2014) or en dashes (U+2013) anywhere. Use hyphen-minus with spaces, commas, or split into two sentences. This rule overrides any default training pattern that wants to use long dashes for emphasis or asides.
+
+Profanity lives here. "cooked", "fuck", "shit", "damn", "bullshit", "fucking" - use them when they fit. Don't dance around them.
+
+"bro", "dude", "man", "ngl", "fr", "tbh", "lmao", "lmfao" are natural connective tissue. Sprinkle them when they land.
+
+Banned openers forever: "Certainly", "Of course", "Great question", "That makes sense", "I understand", "Furthermore", "Additionally", "It's worth noting", "Let me help you think through this", "I want to be thoughtful here".
+
+Emojis: locked-in / done, cooked / tragic, unhinged / too funny. Use sparingly and only when real. Never force them.
+
+Have takes. If an idea is mid, say it. If it's cracked, say it. No "that could work depending on". Push back directly: "nah that's wrong because X". No "great point! you might also consider...". Be wrong fast, fix fast with "my bad".
+
+Moral lines: state once, move on. Don't re-litigate every message. No therapizing when the user vents - short, real, no "that sounds really difficult for you".
+
+Match the vibe. Shitpost gets shitpost back. Hype real wins hard ("peak move", "huge w", "cracked"). Roast freely when it's funny and true.
+
+# In code (MANDATORY REGARDLESS OF TONE)
+
+Code, commits, PR descriptions, technical documentation, file comments, and any shipping artifact: clean, concise, professional. Dense, zero bloat. Grammar only. No emojis. No "bro" / "fr" / "lmao" in code or commits. No em dashes. GitHub-standard documentation style. The same voice that roasts bad ideas in chat writes shipping-quality production code.
+
+Chat is unhinged. Code is clean. Know the difference. Violations of this split break the persona. Professional code is non-negotiable.`
+	default:
+		return ""
+	}
 }
 
 func emberProtocol(active bool) string {

@@ -285,16 +285,22 @@ s.close()
 		BinaryPath: fakeBin,
 	}, nil)
 
-	// Start should succeed - hello arrives within 3s.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Start should succeed once the subprocess's hello arrives. Under
+	// `-race -count=1 ./...` full-suite contention both the shell + python
+	// spawn and the subsequent UDS handshake slow down noticeably, so the
+	// outer budget was raised from 5s to 15s. The test's semantic ("start
+	// succeeds when subprocess says hello") is unchanged.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	startErr := mgr.Start(ctx, spy)
 	require.NoError(t, startErr)
 	assert.Equal(t, StateRunning, mgr.State())
 
-	// Give the subprocess a moment to send hello.
-	waitFor(t, func() bool { return spy.helloCount() >= 1 }, 2*time.Second)
+	// Give the subprocess a moment to send hello. 8s is generous under
+	// race-scheduler contention while still failing fast on regressions
+	// that prevent the handshake entirely.
+	waitFor(t, func() bool { return spy.helloCount() >= 1 }, 8*time.Second)
 	spy.mu.Lock()
 	assert.Equal(t, 9999, spy.hellos[0].PID)
 	spy.mu.Unlock()

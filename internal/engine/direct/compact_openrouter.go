@@ -33,9 +33,9 @@ func (p *openrouterCompactProvider) Compress(context.Context, int) (int, error) 
 	return 0, nil
 }
 
-func (p *openrouterCompactProvider) Serialize(int) (string, int, error) {
+func (p *openrouterCompactProvider) Serialize(keepRecentTokens int) (string, int, error) {
 	items := append([]openrouterHistoryEntry(nil), (*p.history)...)
-	cutIndex := findOpenRouterCompactionBoundary(items)
+	cutIndex := findOpenRouterCompactionBoundary(items, keepRecentTokens)
 	if cutIndex <= 0 {
 		return "", 0, nil
 	}
@@ -152,21 +152,50 @@ func (p *openrouterCompactProvider) MaxOutputTokens() int {
 	return engine.MaxOutputTokensFor(p.model)
 }
 
-func findOpenRouterCompactionBoundary(items []openrouterHistoryEntry) int {
-	if len(items) == 0 {
+// findOpenRouterCompactionBoundary returns the index where the openrouter
+// history should be cut so the preserved tail contains at least
+// keepRecentTokens worth of content. When keepRecentTokens is zero or
+// negative, falls back to a fixed 70% message count cut. The returned
+// index is advanced past any entry that would orphan a tool message from
+// its originating assistant tool_calls entry.
+func findOpenRouterCompactionBoundary(items []openrouterHistoryEntry, keepRecentTokens int) int {
+	n := len(items)
+	if n == 0 {
 		return 0
 	}
 
-	cutIndex := len(items) * 70 / 100
+	var cutIndex int
+	if keepRecentTokens <= 0 {
+		cutIndex = n * 70 / 100
+	} else {
+		accumulated := 0
+		for i := n - 1; i >= 0; i-- {
+			accumulated += openRouterEntryEstimatedTokens(items[i])
+			if accumulated >= keepRecentTokens {
+				cutIndex = i
+				break
+			}
+		}
+	}
 	if cutIndex <= 0 {
 		return 0
 	}
 
-	for cutIndex < len(items) && openRouterBoundaryOrphansToolOutput(items, cutIndex) {
+	for cutIndex < n && openRouterBoundaryOrphansToolOutput(items, cutIndex) {
 		cutIndex++
 	}
 
 	return cutIndex
+}
+
+// openRouterEntryEstimatedTokens returns the char*4/3 token estimate for a
+// single openrouter history entry including serialized tool_calls metadata.
+func openRouterEntryEstimatedTokens(e openrouterHistoryEntry) int {
+	chars := len(e.Content) + len(e.CallID)
+	for _, tc := range e.ToolCalls {
+		chars += len(tc.ID) + len(tc.Function.Name) + len(tc.Function.Arguments)
+	}
+	return chars * 4 / 3
 }
 
 func openRouterBoundaryOrphansToolOutput(items []openrouterHistoryEntry, cutIndex int) bool {

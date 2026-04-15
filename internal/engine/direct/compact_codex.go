@@ -33,9 +33,9 @@ func (p *codexCompactProvider) Compress(context.Context, int) (int, error) {
 	return 0, nil
 }
 
-func (p *codexCompactProvider) Serialize(int) (string, int, error) {
+func (p *codexCompactProvider) Serialize(keepRecentTokens int) (string, int, error) {
 	items := append([]codexHistoryEntry(nil), (*p.history)...)
-	cutIndex := findCodexCompactionBoundary(items)
+	cutIndex := findCodexCompactionBoundary(items, keepRecentTokens)
 	if cutIndex <= 0 {
 		return "", 0, nil
 	}
@@ -229,21 +229,48 @@ func (p *codexCompactProvider) MaxOutputTokens() int {
 	return engine.MaxOutputTokensFor(p.model)
 }
 
-func findCodexCompactionBoundary(items []codexHistoryEntry) int {
-	if len(items) == 0 {
+// findCodexCompactionBoundary returns the index where the codex history
+// should be cut so the tail starting there preserves at least
+// keepRecentTokens worth of content. When keepRecentTokens is zero or
+// negative, falls back to a fixed 70% message count cut. The returned index
+// is advanced past any entry that would orphan a tool output from its
+// originating function_call.
+func findCodexCompactionBoundary(items []codexHistoryEntry, keepRecentTokens int) int {
+	n := len(items)
+	if n == 0 {
 		return 0
 	}
 
-	cutIndex := len(items) * 70 / 100
+	var cutIndex int
+	if keepRecentTokens <= 0 {
+		cutIndex = n * 70 / 100
+	} else {
+		accumulated := 0
+		for i := n - 1; i >= 0; i-- {
+			accumulated += codexEntryEstimatedTokens(items[i])
+			if accumulated >= keepRecentTokens {
+				cutIndex = i
+				break
+			}
+		}
+	}
 	if cutIndex <= 0 {
 		return 0
 	}
 
-	for cutIndex < len(items) && codexBoundaryOrphansToolOutput(items, cutIndex) {
+	for cutIndex < n && codexBoundaryOrphansToolOutput(items, cutIndex) {
 		cutIndex++
 	}
 
 	return cutIndex
+}
+
+// codexEntryEstimatedTokens returns the char*4/3 token estimate for a
+// single codex history entry, matching CurrentTokens' chars/3 heuristic up
+// to the /3 vs *4/3 difference (kept consistent with the anthropic
+// boundary helper so budget semantics line up across providers).
+func codexEntryEstimatedTokens(e codexHistoryEntry) int {
+	return (len(e.Content) + len(e.FuncName)) * 4 / 3
 }
 
 func codexBoundaryOrphansToolOutput(items []codexHistoryEntry, cutIndex int) bool {

@@ -11,7 +11,7 @@ import (
 func TestFindSafeCompactionBoundaryEmpty(t *testing.T) {
 	t.Parallel()
 
-	require.Zero(t, findSafeCompactionBoundary(nil))
+	require.Zero(t, findSafeCompactionBoundary(nil, 0))
 }
 
 func TestFindSafeCompactionBoundaryBasic(t *testing.T) {
@@ -23,10 +23,31 @@ func TestFindSafeCompactionBoundaryBasic(t *testing.T) {
 	}
 
 	msgs := h.Messages()
-	idx := findSafeCompactionBoundary(msgs)
+	idx := findSafeCompactionBoundary(msgs, 0)
 
 	require.Greater(t, idx, 0)
 	require.Less(t, idx, len(msgs))
+}
+
+// TestFindSafeCompactionBoundaryTokenBudget verifies the keepRecentTokens
+// arg drives a token-accumulated tail cut instead of the 70% fallback. With
+// a budget smaller than a single message's estimate the cut lands on the
+// last index; with a budget larger than the whole history the cut is zero.
+func TestFindSafeCompactionBoundaryTokenBudget(t *testing.T) {
+	t.Parallel()
+
+	h := NewConversationHistory()
+	for i := 0; i < 6; i++ {
+		h.AddUser(strings.Repeat("x", 120))
+	}
+	msgs := h.Messages()
+
+	// Each msg ~120 chars -> ~160 estimated tokens. Budget=1 means the
+	// very last message alone satisfies the floor so cut sits at n-1.
+	require.Equal(t, len(msgs)-1, findSafeCompactionBoundary(msgs, 1))
+
+	// Budget larger than all message tokens combined -> nothing to compact.
+	require.Zero(t, findSafeCompactionBoundary(msgs, 100000))
 }
 
 func TestMessageHasToolResultDetection(t *testing.T) {
@@ -47,7 +68,9 @@ func TestAnthropicProviderSerialize(t *testing.T) {
 	}
 
 	provider := newAnthropicCompactProvider(h, anthropic.Client{}, "claude-sonnet-4-6")
-	transcript, cutIdx, err := provider.Serialize(60000)
+	// budget=0 -> legacy 70% cut path so the assertion remains stable
+	// independent of per-message token estimates.
+	transcript, cutIdx, err := provider.Serialize(0)
 
 	require.NoError(t, err)
 	require.Greater(t, cutIdx, 0)
@@ -114,7 +137,7 @@ func TestAnthropicBoundaryAvoidsToolResultOrphan(t *testing.T) {
 		anthropic.NewUserMessage(anthropic.NewTextBlock("u8")),
 		anthropic.NewUserMessage(anthropic.NewTextBlock("u9")),
 	}
-	idx := findSafeCompactionBoundary(crafted)
+	idx := findSafeCompactionBoundary(crafted, 0)
 	// 10 * 70 / 100 = 7, but index 7 is a tool_result -> must advance to 8.
 	require.Equal(t, 8, idx)
 	require.False(t, messageHasToolResult(crafted[idx]))

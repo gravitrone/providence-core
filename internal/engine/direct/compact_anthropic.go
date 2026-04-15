@@ -30,9 +30,9 @@ func (p *anthropicCompactProvider) Compress(context.Context, int) (int, error) {
 	return 0, nil
 }
 
-func (p *anthropicCompactProvider) Serialize(int) (string, int, error) {
+func (p *anthropicCompactProvider) Serialize(keepRecentTokens int) (string, int, error) {
 	msgs := p.history.Messages()
-	cutIndex := findSafeCompactionBoundary(msgs)
+	cutIndex := findSafeCompactionBoundary(msgs, keepRecentTokens)
 	if cutIndex <= 0 {
 		return "", 0, nil
 	}
@@ -107,21 +107,62 @@ func (p *anthropicCompactProvider) MaxOutputTokens() int {
 	return engine.MaxOutputTokensFor(p.model)
 }
 
-func findSafeCompactionBoundary(msgs []anthropic.MessageParam) int {
-	if len(msgs) == 0 {
+// findSafeCompactionBoundary returns the index where the history should be
+// cut so that the tail starting at the returned index preserves at least
+// keepRecentTokens worth of estimated content (chars * 4 / 3). When
+// keepRecentTokens is zero or negative, falls back to a fixed 70% message
+// count cut (legacy behaviour retained for callers that do not supply a
+// budget). The returned index is advanced past any message that opens with
+// a tool_result block so the preserved tail never orphans a tool_result
+// from its tool_use.
+func findSafeCompactionBoundary(msgs []anthropic.MessageParam, keepRecentTokens int) int {
+	n := len(msgs)
+	if n == 0 {
 		return 0
 	}
 
-	cutIndex := len(msgs) * 70 / 100
+	var cutIndex int
+	if keepRecentTokens <= 0 {
+		cutIndex = n * 70 / 100
+	} else {
+		accumulated := 0
+		for i := n - 1; i >= 0; i-- {
+			accumulated += messageEstimatedTokens(msgs[i])
+			if accumulated >= keepRecentTokens {
+				cutIndex = i
+				break
+			}
+		}
+	}
 	if cutIndex <= 0 {
 		return 0
 	}
 
-	for cutIndex < len(msgs) && messageHasToolResult(msgs[cutIndex]) {
+	for cutIndex < n && messageHasToolResult(msgs[cutIndex]) {
 		cutIndex++
 	}
 
 	return cutIndex
+}
+
+// messageEstimatedTokens returns the char*4/3 token estimate for a single
+// message. Mirrors the heuristic used by ConversationHistory.EstimateTokens
+// so the compactor stays consistent with the rest of the package.
+func messageEstimatedTokens(m anthropic.MessageParam) int {
+	chars := 0
+	for _, block := range m.Content {
+		if block.OfText != nil {
+			chars += len(block.OfText.Text)
+		}
+		if block.OfToolResult != nil {
+			for _, inner := range block.OfToolResult.Content {
+				if inner.OfText != nil {
+					chars += len(inner.OfText.Text)
+				}
+			}
+		}
+	}
+	return chars * 4 / 3
 }
 
 func messageHasToolResult(m anthropic.MessageParam) bool {

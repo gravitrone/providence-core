@@ -54,6 +54,10 @@ func (e *EditTool) InputSchema() map[string]any {
 				"type":        "boolean",
 				"description": "Replace all occurrences (default false).",
 			},
+			"allow_secrets": map[string]any{
+				"type":        "boolean",
+				"description": "Bypass the secret-pattern guard for new_string. Use only after manual review.",
+			},
 		},
 		"required": []string{"file_path", "old_string", "new_string"},
 	}
@@ -64,6 +68,7 @@ func (e *EditTool) Execute(_ context.Context, input map[string]any) ToolResult {
 	oldStr := paramString(input, "old_string", "")
 	newStr := paramString(input, "new_string", "")
 	replaceAll := paramBool(input, "replace_all", false)
+	allowSecrets := paramBool(input, "allow_secrets", false)
 
 	if path == "" {
 		return ToolResult{Content: "file_path is required", IsError: true}
@@ -73,6 +78,12 @@ func (e *EditTool) Execute(_ context.Context, input map[string]any) ToolResult {
 	}
 	if oldStr == newStr {
 		return ToolResult{Content: "old_string and new_string are identical", IsError: true}
+	}
+
+	// Refuse oversized targets up front so we do not spend RAM reading
+	// a multi-gigabyte binary just to reject it after the read.
+	if msg := SizeGuardError(path); msg != "" {
+		return ToolResult{Content: msg, IsError: true}
 	}
 
 	// Must have been read first.
@@ -116,6 +127,23 @@ func (e *EditTool) Execute(_ context.Context, input map[string]any) ToolResult {
 		updated = strings.ReplaceAll(content, oldStr, newStr)
 	} else {
 		updated = strings.Replace(content, oldStr, newStr, 1)
+	}
+
+	// Secret scanner: inspect only the new_string (what the caller is
+	// adding) rather than the whole file so existing secrets in a file
+	// the assistant is legitimately editing do not block unrelated
+	// changes. allow_secrets=true bypasses for cases where the user
+	// really is pasting a credential into a vault file.
+	if !allowSecrets {
+		if names := ScanForSecrets(newStr); len(names) > 0 {
+			return ToolResult{Content: FormatSecretsError(names), IsError: true}
+		}
+	}
+
+	// Settings-file validator: make sure the new content still parses
+	// as the expected format before we overwrite the user's config.
+	if err := ValidateSettingsContent(path, updated); err != nil {
+		return ToolResult{Content: err.Error(), IsError: true}
 	}
 
 	// Write back.

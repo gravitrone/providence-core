@@ -134,6 +134,31 @@ func TestSkillToolMissingParam(t *testing.T) {
 	}
 }
 
+// TestSkillToolEmptyStringSkillParam pins the empty-value branch
+// distinct from the missing-key branch already covered above. A caller
+// that passes {"skill": ""} must get a clean error, not a spurious
+// directory listing or a panic.
+func TestSkillToolEmptyStringSkillParam(t *testing.T) {
+	st := NewSkillTool()
+	result := st.Execute(context.Background(), map[string]any{"skill": ""})
+	if !result.IsError {
+		t.Fatal("expected error when skill param is empty string")
+	}
+}
+
+// TestSkillToolWhitespaceSkillParam verifies whitespace-only input is
+// rejected symmetrically with empty input. Otherwise a typo like
+// "skill:   " would silently fail or match an unrelated skill.
+func TestSkillToolWhitespaceSkillParam(t *testing.T) {
+	st := NewSkillTool()
+	for _, input := range []string{"   ", "\t", "\n", " \t \n "} {
+		result := st.Execute(context.Background(), map[string]any{"skill": input})
+		if !result.IsError {
+			t.Fatalf("expected error for whitespace-only input %q", input)
+		}
+	}
+}
+
 // containsString is a helper since strings.Contains is fine but keeps test readable.
 func containsString(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||

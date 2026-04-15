@@ -221,3 +221,76 @@ Monitor prompt.
 		}
 	}
 }
+
+// TestParseSkillFileMalformedYAMLReturnsError pins the error path for
+// broken frontmatter. Silently dropping a malformed skill would make it
+// invisible at runtime and confuse the user ("why does /skill foo say
+// not found?"). ParseSkillFile must surface the YAML error so the
+// caller can report it.
+func TestParseSkillFileMalformedYAMLReturnsError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "broken.md")
+	// Unclosed bracket in YAML block triggers a scanner error.
+	require.NoError(t, os.WriteFile(path, []byte(`---
+name: broken
+description: [unclosed
+---
+body.
+`), 0o644))
+
+	_, err := ParseSkillFile(path)
+	require.Error(t, err, "malformed YAML frontmatter must surface as an error")
+	assert.Contains(t, err.Error(), "frontmatter", "error must name the culprit section")
+}
+
+// TestParseSkillFileMultilineFrontmatterFields verifies that YAML block
+// scalar fields (description, when_to_use) survive intact through the
+// frontmatter parser. A naive line-oriented parse would truncate at the
+// first newline and silently drop context.
+func TestParseSkillFileMultilineFrontmatterFields(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "multi.md")
+	require.NoError(t, os.WriteFile(path, []byte(`---
+name: multi
+description: |
+  line one of description
+  line two of description
+when_to_use: |
+  first trigger
+  second trigger
+---
+Prompt body here.
+`), 0o644))
+
+	sd, err := ParseSkillFile(path)
+	require.NoError(t, err)
+	require.NotNil(t, sd)
+
+	assert.Equal(t, "multi", sd.Name)
+	assert.Contains(t, sd.Description, "line one of description")
+	assert.Contains(t, sd.Description, "line two of description")
+	assert.Contains(t, sd.WhenToUse, "first trigger")
+	assert.Contains(t, sd.WhenToUse, "second trigger")
+	assert.Equal(t, "Prompt body here.", sd.Prompt)
+}
+
+// TestParseSkillFileNoFrontmatterTreatsWholeFileAsPrompt pins the
+// frontmatter-less path: a plain .md with no YAML header must load as
+// a skill whose Prompt is the whole body and whose fields are defaults.
+func TestParseSkillFileNoFrontmatterTreatsWholeFileAsPrompt(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plain.md")
+	require.NoError(t, os.WriteFile(path, []byte("just a prompt with no frontmatter at all."), 0o644))
+
+	sd, err := ParseSkillFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "just a prompt with no frontmatter at all.", sd.Prompt)
+	assert.Empty(t, sd.Name, "no frontmatter means no name in the struct - caller derives from filename")
+	assert.Empty(t, sd.Description)
+}

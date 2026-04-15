@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -15,7 +14,6 @@ import (
 const (
 	defaultTimeoutMs = 120_000
 	maxTimeoutMs     = 600_000
-	maxOutputLen     = 30_000
 )
 
 // BashTool executes shell commands via /bin/bash.
@@ -223,26 +221,15 @@ func (b *BashTool) runForeground(ctx context.Context, command string, timeout ti
 	err := cmd.Run()
 
 	output := buf.String()
-	truncated := false
-	truncatedLines := 0
-	if len(output) > maxOutputLen {
-		kept := output[:maxOutputLen]
-		dropped := output[maxOutputLen:]
-		truncatedLines = strings.Count(dropped, "\n")
-		// Count a trailing partial line that has no newline.
-		if len(dropped) > 0 && dropped[len(dropped)-1] != '\n' {
-			truncatedLines++
-		}
-		output = kept
-		truncated = true
-	}
+
+	// Spill oversized output to disk so the model gets a head+tail
+	// preview plus a path pointer rather than a silently-truncated
+	// body. The spill threshold lives in resultstore.go.
+	shortOutput, spillPath := SpillIfLarge("", "Bash", output)
 
 	if ctx.Err() == context.DeadlineExceeded {
-		msg := fmt.Sprintf("Command timed out after %s\n\n%s", timeout, output)
-		if truncated {
-			msg += fmt.Sprintf("\n\n... [%d lines truncated] ...", truncatedLines)
-		}
-		return ToolResult{Content: msg, IsError: true}
+		msg := fmt.Sprintf("Command timed out after %s\n\n%s", timeout, shortOutput)
+		return ToolResult{Content: msg, IsError: true, Metadata: spillMetadata(spillPath)}
 	}
 
 	exitCode := 0
@@ -254,15 +241,24 @@ func (b *BashTool) runForeground(ctx context.Context, command string, timeout ti
 		}
 	}
 
-	result := output
-	if truncated {
-		result += fmt.Sprintf("\n\n... [%d lines truncated] ...", truncatedLines)
-	}
-	result += "\n\nExit code: " + strconv.Itoa(exitCode)
+	result := shortOutput + "\n\nExit code: " + strconv.Itoa(exitCode)
 
+	meta := map[string]any{"exit_code": exitCode}
+	if spillPath != "" {
+		meta["spill_path"] = spillPath
+	}
 	return ToolResult{
 		Content:  result,
 		IsError:  exitCode != 0,
-		Metadata: map[string]any{"exit_code": exitCode},
+		Metadata: meta,
 	}
+}
+
+// spillMetadata returns a Metadata map carrying the spill path when
+// one exists, nil otherwise. Keeps the timeout branch concise.
+func spillMetadata(spillPath string) map[string]any {
+	if spillPath == "" {
+		return nil
+	}
+	return map[string]any{"spill_path": spillPath}
 }

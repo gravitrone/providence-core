@@ -305,6 +305,126 @@ s.close()
 	assert.Equal(t, StateStopped, mgr.State())
 }
 
+// --- spawn-disabled + stop idempotency + callbacks ---
+
+// boolPtr returns a pointer to b, used to set Config.Spawn inline.
+func boolPtr(b bool) *bool { return &b }
+
+// TestManager_StartWithSpawnDisabled verifies that when Spawn=false Start returns
+// without forking a subprocess, transitions directly to StateRunning, and the
+// UDS server is active.
+func TestManager_StartWithSpawnDisabled(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "pvd-spawn-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sockPath := filepath.Join(dir, "o.sock")
+
+	mgr := NewManager(Config{
+		SocketPath: sockPath,
+		Spawn:      boolPtr(false),
+	}, nil)
+
+	spy := &spyHandler{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err = mgr.Start(ctx, spy)
+	require.NoError(t, err)
+
+	// State must be running immediately - no hello wait loop.
+	assert.Equal(t, StateRunning, mgr.State())
+	// Server must be active.
+	assert.NotNil(t, mgr.Server())
+	// No process spawned.
+	assert.Equal(t, 0, mgr.cmdPID)
+	assert.Nil(t, mgr.cmd)
+
+	// Clean up.
+	require.NoError(t, mgr.Stop(context.Background()))
+	assert.Equal(t, StateStopped, mgr.State())
+}
+
+// TestManager_StopIdempotent calls Stop twice on a running manager (spawn=false)
+// and asserts the second call returns nil without deadlock.
+func TestManager_StopIdempotent(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "pvd-stop2-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sockPath := filepath.Join(dir, "o.sock")
+
+	mgr := NewManager(Config{SocketPath: sockPath, Spawn: boolPtr(false)}, nil)
+	spy := &spyHandler{}
+	ctx := context.Background()
+
+	require.NoError(t, mgr.Start(ctx, spy))
+	assert.Equal(t, StateRunning, mgr.State())
+
+	err1 := mgr.Stop(ctx)
+	assert.NoError(t, err1, "first Stop must succeed")
+	assert.Equal(t, StateStopped, mgr.State())
+
+	// Second Stop must be idempotent (already stopped).
+	err2 := mgr.Stop(ctx)
+	assert.NoError(t, err2, "second Stop must be idempotent")
+}
+
+// TestManager_CallbacksNilSafe verifies that nil onStart/onStop callbacks do
+// not cause a panic during Start+Stop.
+func TestManager_CallbacksNilSafe(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "pvd-cbnil-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sockPath := filepath.Join(dir, "o.sock")
+
+	mgr := NewManager(Config{SocketPath: sockPath, Spawn: boolPtr(false)}, nil)
+	// Explicitly leave callbacks nil (default).
+	assert.Nil(t, mgr.onStart)
+	assert.Nil(t, mgr.onStop)
+
+	spy := &spyHandler{}
+	ctx := context.Background()
+
+	require.NotPanics(t, func() {
+		require.NoError(t, mgr.Start(ctx, spy))
+		require.NoError(t, mgr.Stop(ctx))
+	})
+}
+
+// TestManager_StopWithNoStartReturnsCleanly asserts that calling Stop on a
+// brand-new Manager that was never started returns nil (StateStopped -> idempotent).
+func TestManager_StopWithNoStartReturnsCleanly(t *testing.T) {
+	mgr := NewManager(Config{}, nil)
+	assert.Equal(t, StateStopped, mgr.State())
+	err := mgr.Stop(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, StateStopped, mgr.State())
+}
+
+// TestManager_StartTwice verifies that calling Start when the manager is
+// already running returns an error and does not change state.
+func TestManager_StartTwice(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "pvd-start2-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sockPath := filepath.Join(dir, "o.sock")
+
+	mgr := NewManager(Config{SocketPath: sockPath, Spawn: boolPtr(false)}, nil)
+	spy := &spyHandler{}
+	ctx := context.Background()
+
+	require.NoError(t, mgr.Start(ctx, spy))
+	assert.Equal(t, StateRunning, mgr.State())
+
+	// Second Start must return an error (cannot start in state running).
+	err2 := mgr.Start(ctx, spy)
+	require.Error(t, err2)
+	assert.Contains(t, err2.Error(), "cannot start")
+	// State must remain running.
+	assert.Equal(t, StateRunning, mgr.State())
+
+	_ = mgr.Stop(ctx)
+}
+
 // --- helpers ---
 
 func findShell() (string, error) {

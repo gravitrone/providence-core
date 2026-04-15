@@ -45,7 +45,22 @@ func TestOpenRouterCompactBoundaryBasic(t *testing.T) {
 		{Role: "assistant", Content: "assistant-9"},
 	}
 
-	assert.Equal(t, 8, findOpenRouterCompactionBoundary(history))
+	assert.Equal(t, 8, findOpenRouterCompactionBoundary(history, 0))
+}
+
+// TestOpenRouterCompactBoundaryTokenBudget verifies keepRecentTokens drives
+// the tail cut based on accumulated content + serialized tool_calls size.
+func TestOpenRouterCompactBoundaryTokenBudget(t *testing.T) {
+	t.Parallel()
+
+	history := []openrouterHistoryEntry{
+		{Role: "user", Content: "aaaaaaaa"},
+		{Role: "assistant", Content: "bbbbbbbb"},
+		{Role: "user", Content: "cccccccc"},
+		{Role: "assistant", Content: "dddddddd"},
+	}
+	assert.Equal(t, len(history)-1, findOpenRouterCompactionBoundary(history, 1))
+	assert.Equal(t, 0, findOpenRouterCompactionBoundary(history, 100000))
 }
 
 func TestOpenRouterCompactSerialize(t *testing.T) {
@@ -71,7 +86,8 @@ func TestOpenRouterCompactSerialize(t *testing.T) {
 	}
 
 	provider := newOpenRouterCompactProvider(&history, "test-key", "anthropic/claude-sonnet-4-5")
-	transcript, cutIndex, err := provider.Serialize(60000)
+	// budget=0 -> legacy 70% cut (5 * 70 / 100 = 3, not a tool orphan).
+	transcript, cutIndex, err := provider.Serialize(0)
 
 	require.NoError(t, err)
 	assert.Equal(t, 3, cutIndex)
@@ -119,7 +135,7 @@ func TestOpenRouterCompactEmptyNoOp(t *testing.T) {
 	t.Parallel()
 
 	history := []openrouterHistoryEntry{}
-	assert.Equal(t, 0, findOpenRouterCompactionBoundary(history))
+	assert.Equal(t, 0, findOpenRouterCompactionBoundary(history, 0))
 
 	provider := newOpenRouterCompactProvider(&history, "k", "anthropic/claude-sonnet-4-5")
 	transcript, cutIdx, err := provider.Serialize(60000)

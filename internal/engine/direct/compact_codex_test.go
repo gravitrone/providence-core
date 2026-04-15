@@ -23,7 +23,24 @@ func TestCodexCompactBoundaryBasic(t *testing.T) {
 		{Role: "assistant", Content: "assistant-9"},
 	}
 
-	assert.Equal(t, 8, findCodexCompactionBoundary(history))
+	assert.Equal(t, 8, findCodexCompactionBoundary(history, 0))
+}
+
+// TestCodexCompactBoundaryTokenBudget verifies keepRecentTokens drives the
+// tail cut based on accumulated per-entry content size.
+func TestCodexCompactBoundaryTokenBudget(t *testing.T) {
+	t.Parallel()
+
+	history := []codexHistoryEntry{
+		{Role: "user", Content: "aaaaaaaa"},
+		{Role: "assistant", Content: "bbbbbbbb"},
+		{Role: "user", Content: "cccccccc"},
+		{Role: "assistant", Content: "dddddddd"},
+	}
+	// Each entry ~8 chars -> ~10 tokens. Budget=1 keeps only the last
+	// entry; budget larger than combined history returns 0.
+	assert.Equal(t, len(history)-1, findCodexCompactionBoundary(history, 1))
+	assert.Equal(t, 0, findCodexCompactionBoundary(history, 100000))
 }
 
 func TestCodexCompactSerialize(t *testing.T) {
@@ -39,7 +56,8 @@ func TestCodexCompactSerialize(t *testing.T) {
 	}
 
 	provider := newCodexCompactProvider(&history, "gpt-5.4")
-	transcript, cutIndex, err := provider.Serialize(60000)
+	// budget=0 -> legacy 70% cut (6 * 70 / 100 = 4, advanced past tool).
+	transcript, cutIndex, err := provider.Serialize(0)
 
 	require.NoError(t, err)
 	assert.Equal(t, 4, cutIndex)
@@ -77,7 +95,7 @@ func TestCodexCompactEmptyNoOp(t *testing.T) {
 	t.Parallel()
 
 	history := []codexHistoryEntry{}
-	assert.Equal(t, 0, findCodexCompactionBoundary(history))
+	assert.Equal(t, 0, findCodexCompactionBoundary(history, 0))
 
 	provider := newCodexCompactProvider(&history, "gpt-5.4")
 	transcript, cutIdx, err := provider.Serialize(60000)

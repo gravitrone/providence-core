@@ -93,6 +93,10 @@ func (w *WriteTool) Execute(_ context.Context, input map[string]any) ToolResult 
 		return ToolResult{Content: err.Error(), IsError: true}
 	}
 
+	// Snapshot existing content before overwrite so the model can
+	// recover via the FileHistory tool. No-op for new files.
+	_, _ = SnapshotFile(path)
+
 	// Ensure parent directories exist.
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

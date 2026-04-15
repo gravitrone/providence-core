@@ -249,6 +249,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		tools.NewEnterPlanModeTool(planState),
 		tools.NewExitPlanModeTool(planState),
 		tools.NewSkillTool(),
+		tools.NewFileHistoryTool(),
 	}
 
 	// Register computer use tools on macOS only.

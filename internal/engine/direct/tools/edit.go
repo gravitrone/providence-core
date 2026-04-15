@@ -121,6 +121,10 @@ func (e *EditTool) Execute(_ context.Context, input map[string]any) ToolResult {
 		}
 	}
 
+	// Snapshot current content before we rewrite so the model can
+	// recover via the FileHistory tool if this edit is wrong.
+	_, _ = SnapshotFile(path)
+
 	// Perform replacement.
 	var updated string
 	if replaceAll {

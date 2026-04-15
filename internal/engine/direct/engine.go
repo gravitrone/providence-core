@@ -89,6 +89,12 @@ type DirectEngine struct {
 	// Structured system prompt blocks (preferred over e.system).
 	blocks []engine.SystemBlock
 
+	// Cache-break diagnostics: last fingerprint of the inputs that
+	// contribute to the Anthropic prompt cache key. Compared on every
+	// API call so we can write a diff when the cache prefix changes.
+	lastFingerprint CacheFingerprint
+	cacheFpMu       sync.Mutex
+
 	// Per-session TodoWrite tool instance.
 	todoTool *tools.TodoWriteTool
 
@@ -1422,6 +1428,10 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		// Keep macOS awake during active streaming.
 		e.caffeinator.Start()
+
+		// Record any cache-prefix drift just before the API call. Fire
+		// and forget - diagnostics must never fail a real request.
+		e.checkAndRecordCacheBreak()
 
 		accumulated, streamErr := e.streamWithRetry(ctx, apiParams)
 

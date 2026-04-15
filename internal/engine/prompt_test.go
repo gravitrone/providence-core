@@ -32,9 +32,11 @@ func TestPersonaToneDefaultReturnsEmpty(t *testing.T) {
 }
 
 // TestPersonaToneBroReturnsOverride verifies the "bro" persona (case and
-// whitespace tolerant) returns a tone block that contains the em-dash ban
-// AND the in-code professional-mandate clause. Both are core invariants of
-// the dual-mode contract and MUST NOT drift silently.
+// whitespace tolerant) returns a tone block that contains the core
+// invariants of the dual-mode contract: em-dash ban, forbidden-openers
+// list, the in-code section preserving professional output, the split
+// rationale, and few-shot examples with commentary wrappers. None of
+// these may drift silently; all are asserted below.
 func TestPersonaToneBroReturnsOverride(t *testing.T) {
 	t.Parallel()
 
@@ -43,8 +45,11 @@ func TestPersonaToneBroReturnsOverride(t *testing.T) {
 		require.NotEmpty(t, out, "persona %q should yield a tone block", p)
 		assert.Contains(t, out, "em dashes", "bro tone must keep the em-dash ban")
 		assert.Contains(t, out, "U+2014", "bro tone must reference the em-dash codepoint")
-		assert.Contains(t, out, "MANDATORY REGARDLESS OF TONE", "bro tone must keep the in-code professional mandate")
-		assert.Contains(t, out, "Professional code is non-negotiable", "bro tone must keep the non-negotiable clause")
+		assert.Contains(t, out, "Forbidden openers", "bro tone must keep the forbidden openers list")
+		assert.Contains(t, out, "In code (stays professional)", "bro tone must keep the in-code section")
+		assert.Contains(t, out, "Keep them separate", "bro tone must keep the dual-mode split rationale")
+		assert.Contains(t, out, "<example>", "bro tone must carry few-shot examples")
+		assert.Contains(t, out, "<commentary>", "bro tone must wrap examples in commentary explaining intent")
 	}
 }
 

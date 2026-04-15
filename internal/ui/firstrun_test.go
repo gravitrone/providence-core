@@ -1,11 +1,41 @@
 package ui
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+// providenceRepoRoot walks up from this test file's location until it
+// finds a go.mod, returning the repo root path. This keeps the
+// real-git-repo integration tests hermetic across machines and CI.
+// Skips the calling test if the repo root cannot be located.
+func providenceRepoRoot(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Skip("runtime.Caller failed - cannot locate test file")
+	}
+	dir := filepath.Dir(thisFile)
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+				return dir
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	t.Skip("could not locate Providence repo root (go.mod + .git) from test binary")
+	return ""
+}
 
 func TestNonEmptyFiltersBlankLines(t *testing.T) {
 	input := []string{"hello", "", "  ", "world", "\t", "ok"}
@@ -102,7 +132,7 @@ func TestFormatGitSuggestionsStartsWithNewline(t *testing.T) {
 
 func TestGenerateGitSuggestionsRealRepo(t *testing.T) {
 	// Use the Providence repo root as a known git repo.
-	repoDir := "/Users/alxx/Code/Gravitrone/Providence/providence-core"
+	repoDir := providenceRepoRoot(t)
 	suggestions := GenerateGitSuggestions(repoDir)
 	if suggestions == nil {
 		t.Skip("Providence repo not available or no git history")
@@ -114,7 +144,7 @@ func TestGenerateGitSuggestionsRealRepo(t *testing.T) {
 }
 
 func TestGenerateGitSuggestionsRealRepoHasFiles(t *testing.T) {
-	repoDir := "/Users/alxx/Code/Gravitrone/Providence/providence-core"
+	repoDir := providenceRepoRoot(t)
 	suggestions := GenerateGitSuggestions(repoDir)
 	if suggestions == nil {
 		t.Skip("Providence repo not available")
@@ -152,7 +182,7 @@ func TestGenerateGitSuggestionsShortCommitNoTruncation(t *testing.T) {
 }
 
 func TestGenerateGitSuggestionsMaxThree(t *testing.T) {
-	repoDir := "/Users/alxx/Code/Gravitrone/Providence/providence-core"
+	repoDir := providenceRepoRoot(t)
 	suggestions := GenerateGitSuggestions(repoDir)
 	if suggestions == nil {
 		t.Skip("Providence repo not available")

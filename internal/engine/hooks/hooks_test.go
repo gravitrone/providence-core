@@ -257,14 +257,24 @@ func TestRunnerAsync(t *testing.T) {
 		SessionEnd: {{Command: script, Timeout: 5 * time.Second}},
 	})
 
-	// RunAsync should return immediately
+	// RunAsync must return nearly immediately (well before the hook itself
+	// finishes). Assert the async semantics directly so a future refactor
+	// that accidentally makes the call synchronous fails loudly.
+	start := time.Now()
 	r.RunAsync(context.Background(), SessionEnd, HookInput{})
+	assert.Less(t, time.Since(start), 500*time.Millisecond,
+		"RunAsync must return before the hook finishes executing")
 
-	// Give async hooks a moment to complete
+	// The hook itself runs in a background goroutine. Poll up to 30s for
+	// the marker file to appear. The previous 10s bound was enough for
+	// isolated runs but flaked under `-race -count=1 ./...` full-suite
+	// contention where goroutine scheduling + shell spawn latency spike.
+	// 30s is generous and does not weaken the test: if RunAsync were
+	// silently synchronous the elapsed-time assertion above already fails.
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(marker)
 		return err == nil
-	}, 10*time.Second, 50*time.Millisecond, "async hook should have created marker file")
+	}, 30*time.Second, 50*time.Millisecond, "async hook should have created marker file")
 }
 
 func TestHookInputSerialization(t *testing.T) {

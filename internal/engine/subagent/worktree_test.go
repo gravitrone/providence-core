@@ -115,3 +115,31 @@ func TestHasWorktreeChangesBadPath(t *testing.T) {
 	// Should return false for nonexistent path (not panic).
 	assert.False(t, HasWorktreeChanges("/nonexistent/path"))
 }
+
+// TestSlugifyAllSpecialCharsFallsBackToAgent pins the fallback path
+// when an input strips to the empty string. The Slugify contract is
+// that a non-empty branch-safe slug always comes back, so downstream
+// worktree/branch naming never hits an invalid git ref.
+func TestSlugifyAllSpecialCharsFallsBackToAgent(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{"!!!", "@@@@@", "$$$$", "   ", "\t\n", "?!?"}
+	for _, input := range cases {
+		assert.Equal(t, "agent", Slugify(input),
+			"Slugify(%q) must fall back to %q for a valid branch name", input, "agent")
+	}
+}
+
+// TestSlugifyUnicodeStripped verifies non-ASCII characters are stripped
+// so branch names remain portable across filesystems and git hosts.
+// Mixed ASCII + Unicode input keeps the ASCII portion.
+func TestSlugifyUnicodeStripped(t *testing.T) {
+	t.Parallel()
+
+	// "héllo" - the é is a 2-byte UTF-8 sequence; regex strips non-ASCII
+	// bytes individually, so the "é" disappears entirely and the
+	// surrounding ASCII letters concatenate.
+	assert.Equal(t, "hllo", Slugify("héllo"), "accented characters stripped byte-wise")
+	assert.Equal(t, "emoji", Slugify("emoji🔥"), "emoji stripped")
+	assert.Equal(t, "agent", Slugify("🔥🔥🔥"), "all-unicode falls back to agent")
+}

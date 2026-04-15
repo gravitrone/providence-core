@@ -73,6 +73,14 @@ var slashPulseSpring = harmonica.NewSpring(harmonica.FPS(12), 5.0, 0.45)
 // Same shape as the completion spring so the dissolve feels consistent.
 var compactSpring = harmonica.NewSpring(harmonica.FPS(12), 6.0, 0.8)
 
+// overlayLauncher opens the Providence Overlay bundle as a fallback for
+// /ember activation when the overlay manager is configured with spawn=false
+// (the TCC detach workaround). Exposed as a package-level var so tests can
+// stub the launch side effect.
+var overlayLauncher = func(appPath, socketPath string) error {
+	return exec.Command("open", "-n", "-a", appPath, "--args", "--socket="+socketPath).Run()
+}
+
 // DoublePressTimeoutMS is the window (in ms) within which a second ctrl+c or
 // ctrl+d press is interpreted as "exit". Outside this window the press resets.
 const DoublePressTimeoutMS = 800
@@ -5168,6 +5176,22 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 					de.SetUnattendedRetry(true)
 				}
 				at.addSystemMessage("Ember autonomous mode activated - ticks will fire after each turn")
+				// Kickstart ember with the first tick immediately so the model
+				// greets or begins work instead of waiting for a user turn
+				// that may never arrive (especially in ambient mode where the
+				// user can stay silent for long stretches). The 150ms delay
+				// lets the activation message render first; the inner guard
+				// re-checks state so a fast /ember off cancels cleanly.
+				if at.engine != nil && at.ember.ShouldTick() {
+					at.ember.RecordTick()
+					tickMsg := ember.GenerateTick()
+					go func() {
+						time.Sleep(150 * time.Millisecond)
+						if at.engine != nil && at.ember.ShouldTick() {
+							_ = at.engine.Send(tickMsg)
+						}
+					}()
+				}
 				// Auto-launch overlay when ember activates, if it is wired but not yet running.
 				if at.overlayMgr != nil && at.overlayBridge != nil {
 					info := at.overlayMgr.StatusInfo()
@@ -5178,6 +5202,18 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 								// Best-effort: overlay start failure does not block ember.
 								_ = err
 							}
+						}()
+					}
+					// Honour [overlay].spawn=false (the TCC detach workaround):
+					// the manager runs only the UDS server in that mode and
+					// never forks the .app bundle. /ember explicitly wants
+					// the chat surface, so launch the bundle via `open -n -a`
+					// regardless of the spawn flag. Best-effort, fire-and-forget.
+					if !at.cfg.Overlay.SpawnEnabled() {
+						socketPath := os.ExpandEnv("$HOME/.providence/run/overlay.sock")
+						appPath := os.ExpandEnv("$HOME/Applications/Providence Overlay.app")
+						go func() {
+							_ = overlayLauncher(appPath, socketPath)
 						}()
 					}
 				}

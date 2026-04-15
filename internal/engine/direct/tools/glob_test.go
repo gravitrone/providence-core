@@ -142,3 +142,118 @@ func TestGlobNoMatches(t *testing.T) {
 	assert.False(t, res.IsError)
 	assert.Equal(t, "", res.Content)
 }
+
+// TestGlobStarStarMatchesArbitraryDepth verifies the real correctness
+// fix: patterns like `src/**/*.ts` must match files at depth 1, 2, 3+
+// under src, and must NOT match files outside src. The previous
+// implementation only matched the base-name pattern against each entry
+// which produced false positives for sibling dirs and false negatives
+// for deep nesting.
+func TestGlobStarStarMatchesArbitraryDepth(t *testing.T) {
+	gt := NewGlobTool()
+	tmp := t.TempDir()
+
+	// src/a.ts (depth 1), src/sub/b.ts (depth 2), src/sub/deep/c.ts (depth 3).
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "src", "sub", "deep"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "src", "a.ts"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "src", "sub", "b.ts"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "src", "sub", "deep", "c.ts"), []byte("x"), 0o644))
+
+	// Sibling dir that must NOT be included.
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "other"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "other", "nope.ts"), []byte("x"), 0o644))
+
+	// Non-ts file inside src must also be filtered out.
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "src", "keep.go"), []byte("x"), 0o644))
+
+	res := gt.Execute(context.Background(), map[string]any{
+		"pattern": "src/**/*.ts",
+		"path":    tmp,
+	})
+	require.False(t, res.IsError, "walk must succeed: %s", res.Content)
+
+	body := res.Content
+	assert.Contains(t, body, filepath.Join("src", "a.ts"), "depth-1 match missing")
+	assert.Contains(t, body, filepath.Join("src", "sub", "b.ts"), "depth-2 match missing")
+	assert.Contains(t, body, filepath.Join("src", "sub", "deep", "c.ts"), "depth-3 match missing")
+	assert.NotContains(t, body, filepath.Join("other", "nope.ts"),
+		"sibling tree must not leak through a **/ prefix rooted at src/")
+	assert.NotContains(t, body, "keep.go",
+		"non-ts file in src must be filtered by the *.ts suffix")
+}
+
+// TestGlobTopLevelStarStarMatchesRoot verifies a pattern whose ** is
+// the entire path prefix matches files in the root directory too.
+// doublestar semantics: `**/*.go` includes `foo.go` at the walk root.
+func TestGlobTopLevelStarStarMatchesRoot(t *testing.T) {
+	gt := NewGlobTool()
+	tmp := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "root.go"), []byte("x"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "nested", "sub.go"), []byte("x"), 0o644))
+
+	res := gt.Execute(context.Background(), map[string]any{
+		"pattern": "**/*.go",
+		"path":    tmp,
+	})
+	require.False(t, res.IsError)
+	assert.Contains(t, res.Content, "root.go", "**/*.go must match files at the walk root")
+	assert.Contains(t, res.Content, filepath.Join("nested", "sub.go"))
+}
+
+// TestGlobInvalidPatternReturnsError verifies doublestar.ValidatePattern
+// catches syntactically broken patterns up front instead of silently
+// producing zero results.
+func TestGlobInvalidPatternReturnsError(t *testing.T) {
+	gt := NewGlobTool()
+	tmp := t.TempDir()
+
+	res := gt.Execute(context.Background(), map[string]any{
+		"pattern": "[unclosed",
+		"path":    tmp,
+	})
+	assert.True(t, res.IsError, "malformed pattern must surface as an error")
+	assert.Contains(t, res.Content, "invalid glob pattern")
+}
+
+// TestGlobBraceExpansionMultipleExtensions verifies brace syntax
+// (supported by doublestar/v4) so users can glob multiple extensions
+// in a single pattern - a notable UX win over the old impl.
+func TestGlobBraceExpansionMultipleExtensions(t *testing.T) {
+	gt := NewGlobTool()
+	tmp := t.TempDir()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "src", "a.go"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "src", "b.ts"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "src", "c.py"), []byte("x"), 0o644))
+
+	res := gt.Execute(context.Background(), map[string]any{
+		"pattern": "src/*.{go,ts}",
+		"path":    tmp,
+	})
+	require.False(t, res.IsError)
+	assert.Contains(t, res.Content, "a.go")
+	assert.Contains(t, res.Content, "b.ts")
+	assert.NotContains(t, res.Content, "c.py", "py file must not be picked up by {go,ts} alternation")
+}
+
+// TestGlobQuestionMarkMatchesSingleChar verifies the ? metacharacter
+// matches exactly one character, round-tripped through the doublestar
+// path.
+func TestGlobQuestionMarkMatchesSingleChar(t *testing.T) {
+	gt := NewGlobTool()
+	tmp := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "a1.go"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "a12.go"), []byte("x"), 0o644))
+
+	res := gt.Execute(context.Background(), map[string]any{
+		"pattern": "a?.go",
+		"path":    tmp,
+	})
+	require.False(t, res.IsError)
+	assert.Contains(t, res.Content, "a1.go", "single-char ? must match")
+	assert.NotContains(t, res.Content, "a12.go", "? matches exactly one char, not many")
+}

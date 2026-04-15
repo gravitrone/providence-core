@@ -45,6 +45,10 @@ func (w *WriteTool) InputSchema() map[string]any {
 				"type":        "string",
 				"description": "The content to write to the file.",
 			},
+			"allow_secrets": map[string]any{
+				"type":        "boolean",
+				"description": "Bypass the secret-pattern guard for the content. Use only after manual review.",
+			},
 		},
 		"required": []string{"file_path", "content"},
 	}
@@ -53,9 +57,16 @@ func (w *WriteTool) InputSchema() map[string]any {
 func (w *WriteTool) Execute(_ context.Context, input map[string]any) ToolResult {
 	path := paramString(input, "file_path", "")
 	content := paramString(input, "content", "")
+	allowSecrets := paramBool(input, "allow_secrets", false)
 
 	if path == "" {
 		return ToolResult{Content: "file_path is required", IsError: true}
+	}
+
+	// Size guard fires on the EXISTING file. A fresh create always
+	// passes because SizeGuardError returns empty on ENOENT.
+	if msg := SizeGuardError(path); msg != "" {
+		return ToolResult{Content: msg, IsError: true}
 	}
 
 	// Check if file already exists.
@@ -69,6 +80,22 @@ func (w *WriteTool) Execute(_ context.Context, input map[string]any) ToolResult 
 			IsError: true,
 		}
 	}
+
+	// Secret scanner on the proposed content.
+	if !allowSecrets {
+		if names := ScanForSecrets(content); len(names) > 0 {
+			return ToolResult{Content: FormatSecretsError(names), IsError: true}
+		}
+	}
+
+	// Settings-file validator: must parse in the target format.
+	if err := ValidateSettingsContent(path, content); err != nil {
+		return ToolResult{Content: err.Error(), IsError: true}
+	}
+
+	// Snapshot existing content before overwrite so the model can
+	// recover via the FileHistory tool. No-op for new files.
+	_, _ = SnapshotFile(path)
 
 	// Ensure parent directories exist.
 	dir := filepath.Dir(path)

@@ -274,7 +274,7 @@ func TestSafetyPaths(t *testing.T) {
 		{"claude settings via Write", "Write", fileInput("/project/.claude/settings.json"), true},
 		{"bashrc via Edit", "Edit", fileInput("/home/user/.bashrc"), true},
 		{"zshrc via Read", "Read", fileInput("/home/user/.zshrc"), true},
-		{"zprofile", "Edit", fileInput("/Users/alxx/.zprofile"), true},
+		{"zprofile", "Edit", fileInput("/home/user/.zprofile"), true},
 		{"profile", "Write", fileInput("/home/user/.profile"), true},
 		{"fish config", "Edit", fileInput("/home/user/.config/fish/config.fish"), true},
 		{"normal file", "Read", fileInput("/tmp/test.go"), false},

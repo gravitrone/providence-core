@@ -4,9 +4,12 @@ package macos
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,22 +79,80 @@ func TestShell_ExitCodeNonZeroReturnsError(t *testing.T) {
 // osascript timeout
 // ---------------------------------------------------------------------------
 
-// TestShell_OsascriptTimeoutReturnsError documents a known production bug:
-// runOsascript uses exec.CommandContext which sends SIGKILL to the shell
-// process on context cancellation, but the shell's child process (e.g. `sleep`)
-// is not in the same process group and keeps the stdout/stderr pipe open.
-// CombinedOutput then blocks on that pipe, causing runOsascript to hang
-// indefinitely regardless of the context deadline.
-//
-// BUG: shell.go runOsascript / runOsascriptOutput must use cmd.Process.Kill
-// with explicit pipe closing, or use os.StartProcessAttr to put the child in
-// its own process group (syscall.SysProcAttr{Setpgid: true}) and kill the
-// whole group on ctx cancellation.
-//
-// This test is skipped to avoid hanging CI until the production code is fixed.
+// TestShell_OsascriptTimeoutReturnsError exercises the ctx-timeout path on
+// runOsascript. Prior to the Setpgid + killpg fix this test would hang
+// forever because the shell child spawned by `do shell script` survived
+// the SIGKILL delivered to osascript alone. The fix now kills the entire
+// process group, so this returns with a ctx.DeadlineExceeded wrap within
+// the timeout window.
 func TestShell_OsascriptTimeoutReturnsError(t *testing.T) {
-	t.Skip("PRODUCTION BUG: runOsascript hangs when shell child process survives SIGKILL - " +
-		"fix: use Setpgid+killpg or explicit pipe close before cmd.Wait")
+	if _, err := exec.LookPath("osascript"); err != nil {
+		t.Skip("osascript not available on this runner")
+	}
+
+	sc := newShell()
+	// 300ms ctx against a script that asks the shell to sleep 10s.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := sc.runOsascript(ctx, `do shell script "sleep 10"`)
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "runOsascript must return an error when ctx expires")
+	assert.ErrorIs(t, err, context.DeadlineExceeded, "error must wrap ctx.DeadlineExceeded")
+	assert.Less(t, elapsed, 2*time.Second,
+		"runOsascript must return within a couple of seconds of ctx expiry, not hang on the child pipe")
+}
+
+// TestShell_OsascriptCtxCancellationKillsChildProcessGroup verifies that
+// the ctx-cancellation path actually reaps the shell's sleep child rather
+// than leaving it orphaned. We use a sentinel file that the sleep shell
+// would have written to if it outran the kill; the file's absence after
+// a grace period proves the group was killed.
+func TestShell_OsascriptCtxCancellationKillsChildProcessGroup(t *testing.T) {
+	if _, err := exec.LookPath("osascript"); err != nil {
+		t.Skip("osascript not available on this runner")
+	}
+
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "child-survived")
+
+	sc := newShell()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	// `sleep 2; touch sentinel` via AppleScript. If the group survives the
+	// kill the sleep finishes and the sentinel appears.
+	script := fmt.Sprintf(`do shell script "sleep 2; touch %s"`, sentinel)
+	err := sc.runOsascript(ctx, script)
+	require.Error(t, err)
+
+	// Wait past the would-be sleep completion. If the child survived the
+	// group kill, it would have touched the sentinel by now.
+	time.Sleep(2500 * time.Millisecond)
+	_, statErr := os.Stat(sentinel)
+	assert.True(t, os.IsNotExist(statErr),
+		"sentinel %s must not exist - its presence means the shell child outlived runOsascript's ctx kill", sentinel)
+}
+
+// TestShell_OsascriptFastPathNoLeak verifies the happy path still works
+// after the ctx-cancellation rewrite: a trivial script that finishes
+// quickly returns cleanly, without leaving zombies or consuming the ctx
+// deadline.
+func TestShell_OsascriptFastPathNoLeak(t *testing.T) {
+	if _, err := exec.LookPath("osascript"); err != nil {
+		t.Skip("osascript not available on this runner")
+	}
+
+	sc := newShell()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := sc.runOsascript(ctx, `return 1`)
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 2*time.Second, "trivial script must return promptly")
 }
 
 // ---------------------------------------------------------------------------

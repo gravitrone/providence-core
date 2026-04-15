@@ -1402,9 +1402,22 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 		return at, nil
 
 	case "esc":
-		// Exit queue selection without clearing queue.
+		// Queue selection close takes precedence so the same keystroke that
+		// opens queue review can also dismiss it.
 		if at.queueCursor >= 0 {
 			at.queueCursor = -1
+			at.refreshViewport()
+			return at, nil
+		}
+		// Single-press interrupt: when a turn is in flight and no modal
+		// has already consumed the key, Escape aborts the current turn via
+		// engine.Interrupt(). Ctrl+C and Ctrl+D cover the same path but
+		// require a double-press to exit, which is overloaded and slow
+		// compared to a dedicated interrupt key. When no turn is in
+		// flight Escape remains a no-op so it does not steal focus.
+		if at.streaming && at.engine != nil {
+			at.engine.Interrupt()
+			at.addSystemMessage("Interrupted.")
 			at.refreshViewport()
 			return at, nil
 		}

@@ -25,9 +25,10 @@ import (
 // /ember activation tests. Only Send is observed; everything else is a
 // no-op that satisfies the interface.
 type emberTestEngine struct {
-	sent   []string
-	sentMu sync.Mutex
-	events chan engine.ParsedEvent
+	sent             []string
+	sentMu           sync.Mutex
+	events           chan engine.ParsedEvent
+	interruptedCount int32
 }
 
 func newEmberTestEngine() *emberTestEngine {
@@ -49,10 +50,11 @@ func (e *emberTestEngine) SentMessages() []string {
 	return out
 }
 
-func (e *emberTestEngine) Events() <-chan engine.ParsedEvent               { return e.events }
-func (e *emberTestEngine) RespondPermission(_, _ string) error             { return nil }
-func (e *emberTestEngine) Interrupt()                                      {}
-func (e *emberTestEngine) Cancel()                                         {}
+func (e *emberTestEngine) Events() <-chan engine.ParsedEvent   { return e.events }
+func (e *emberTestEngine) RespondPermission(_, _ string) error { return nil }
+func (e *emberTestEngine) Interrupt()                          { atomic.AddInt32(&e.interruptedCount, 1) }
+func (e *emberTestEngine) InterruptCount() int32               { return atomic.LoadInt32(&e.interruptedCount) }
+func (e *emberTestEngine) Cancel()                             {}
 func (e *emberTestEngine) Close()                                          {}
 func (e *emberTestEngine) Status() engine.SessionStatus                    { return engine.StatusIdle }
 func (e *emberTestEngine) RestoreHistory(_ []engine.RestoredMessage) error { return nil }

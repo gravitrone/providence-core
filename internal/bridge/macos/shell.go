@@ -3,11 +3,13 @@
 package macos
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -167,21 +169,67 @@ const osascriptTimeout = 15 * time.Second
 func (c *shellClient) runOsascript(ctx context.Context, script string) error {
 	ctx, cancel := context.WithTimeout(ctx, osascriptTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "osascript", "-e", script)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("osascript failed: %w: %s", err, string(out))
-	}
-	return nil
+	_, err := runOsascriptIsolated(ctx, script, true)
+	return err
 }
 
 func (c *shellClient) runOsascriptOutput(ctx context.Context, script string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, osascriptTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "osascript", "-e", script).Output()
-	if err != nil {
-		return "", err
+	return runOsascriptIsolated(ctx, script, false)
+}
+
+// runOsascriptIsolated runs osascript in its own Unix process group so a
+// ctx timeout can kill both the shell parent and any `do shell script`
+// children in one syscall. Without this, `exec.CommandContext` only
+// SIGKILLs osascript itself, while children (e.g. a `sleep` inside a
+// `do shell script` block) survive, keep the stdout/stderr pipe open, and
+// block the caller indefinitely.
+//
+// combined=true returns stdout+stderr concatenated as the "output" buffer
+// for error reporting (mirrors the prior cmd.CombinedOutput() contract
+// that runOsascript relied on). combined=false returns only stdout.
+func runOsascriptIsolated(ctx context.Context, script string, combined bool) (string, error) {
+	cmd := exec.Command("osascript", "-e", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	if combined {
+		cmd.Stderr = &stdout
+	} else {
+		cmd.Stderr = &stderr
 	}
-	return string(out), nil
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("osascript start: %w", err)
+	}
+
+	// Kill the whole process group when ctx fires. The watcher exits when
+	// the command finishes naturally (done channel closes).
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+		case <-done:
+		}
+	}()
+
+	waitErr := cmd.Wait()
+	close(done)
+
+	// If ctx tripped the watcher, surface the ctx error so callers can
+	// distinguish "osascript returned non-zero" from "we killed it".
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return stdout.String(), fmt.Errorf("osascript cancelled: %w", ctxErr)
+	}
+	if waitErr != nil {
+		return stdout.String(), fmt.Errorf("osascript failed: %w: %s", waitErr, stdout.String())
+	}
+	return stdout.String(), nil
 }
 
 var appleScriptModifierMap = map[string]string{

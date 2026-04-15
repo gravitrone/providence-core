@@ -79,3 +79,62 @@ func TestTruncate(t *testing.T) {
 	require.Equal(t, "abc", truncate("abc", 10))
 	require.Equal(t, "abcde...", truncate("abcdef", 5))
 }
+
+// TestAnthropicSerializeEmptyNoOp verifies Serialize on empty history is a
+// no-op (empty transcript, zero cut index, no error).
+func TestAnthropicSerializeEmptyNoOp(t *testing.T) {
+	t.Parallel()
+
+	h := NewConversationHistory()
+	provider := newAnthropicCompactProvider(h, anthropic.Client{}, "claude-sonnet-4-6")
+
+	transcript, cutIdx, err := provider.Serialize(60000)
+	require.NoError(t, err)
+	require.Equal(t, 0, cutIdx)
+	require.Equal(t, "", transcript)
+}
+
+// TestAnthropicBoundaryAvoidsToolResultOrphan verifies the boundary advances
+// past messages carrying tool_result blocks so a tool_result is never severed
+// from its originating tool_use in the tail.
+func TestAnthropicBoundaryAvoidsToolResultOrphan(t *testing.T) {
+	t.Parallel()
+
+	// Directly build a 10-msg slice with a tool_result at the 70% boundary
+	// (index 7) to exercise the advance-past-tool-result branch.
+	crafted := []anthropic.MessageParam{
+		anthropic.NewUserMessage(anthropic.NewTextBlock("u0")),
+		anthropic.NewUserMessage(anthropic.NewTextBlock("u1")),
+		anthropic.NewUserMessage(anthropic.NewTextBlock("u2")),
+		anthropic.NewUserMessage(anthropic.NewTextBlock("u3")),
+		anthropic.NewUserMessage(anthropic.NewTextBlock("u4")),
+		anthropic.NewUserMessage(anthropic.NewTextBlock("u5")),
+		anthropic.NewUserMessage(anthropic.NewTextBlock("u6")),
+		anthropic.NewUserMessage(anthropic.NewToolResultBlock("t1", "tool result", false)),
+		anthropic.NewUserMessage(anthropic.NewTextBlock("u8")),
+		anthropic.NewUserMessage(anthropic.NewTextBlock("u9")),
+	}
+	idx := findSafeCompactionBoundary(crafted)
+	// 10 * 70 / 100 = 7, but index 7 is a tool_result -> must advance to 8.
+	require.Equal(t, 8, idx)
+	require.False(t, messageHasToolResult(crafted[idx]))
+}
+
+// TestAnthropicReplaceOutOfRangeRejected verifies Replace returns an error
+// for an invalid cut index (preserves history-integrity invariant).
+func TestAnthropicReplaceOutOfRangeRejected(t *testing.T) {
+	t.Parallel()
+
+	h := NewConversationHistory()
+	for i := 0; i < 3; i++ {
+		h.AddUser("m" + truncate("abc", i+1))
+	}
+	provider := newAnthropicCompactProvider(h, anthropic.Client{}, "claude-sonnet-4-6")
+
+	// zero index: rejected
+	require.Error(t, provider.Replace("summary", 0))
+	// past end: rejected
+	require.Error(t, provider.Replace("summary", 999))
+	// History untouched.
+	require.Len(t, h.Messages(), 3)
+}

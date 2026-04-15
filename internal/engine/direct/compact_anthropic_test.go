@@ -154,9 +154,9 @@ func TestAnthropicReplaceOutOfRangeRejected(t *testing.T) {
 	}
 	provider := newAnthropicCompactProvider(h, anthropic.Client{}, "claude-sonnet-4-6")
 
-	// zero index: rejected
+	// Zero index: rejected.
 	require.Error(t, provider.Replace("summary", 0))
-	// past end: rejected
+	// Past end: rejected.
 	require.Error(t, provider.Replace("summary", 999))
 	// History untouched.
 	require.Len(t, h.Messages(), 3)

@@ -274,6 +274,7 @@ func expandConfigEnvVars(c *Config) {
 	c.Effort = expandEnvVars(c.Effort)
 	c.OpenRouterAPIKey = expandEnvVars(c.OpenRouterAPIKey)
 	c.OutputStyle = expandEnvVars(c.OutputStyle)
+	c.Persona = expandEnvVars(c.Persona)
 	c.Bridge.Mode = expandEnvVars(c.Bridge.Mode)
 	c.Bridge.SwiftPath = expandEnvVars(c.Bridge.SwiftPath)
 	c.Overlay.SocketPath = expandEnvVars(c.Overlay.SocketPath)
@@ -400,6 +401,9 @@ func mergeConfig(base, override *Config) {
 	}
 	if override.OutputStyle != "" {
 		base.OutputStyle = override.OutputStyle
+	}
+	if override.Persona != "" {
+		base.Persona = override.Persona
 	}
 	if len(override.SpinnerVerbs) > 0 {
 		base.SpinnerVerbs = override.SpinnerVerbs

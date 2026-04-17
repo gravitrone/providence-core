@@ -359,6 +359,7 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 			return
 		}
 
+		processedResults := make([]ToolCallResult, 0, len(toolCalls))
 		for _, tc := range toolCalls {
 			var input map[string]any
 			_ = json.Unmarshal([]byte(tc.RawArgs), &input)
@@ -366,32 +367,22 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 				input = make(map[string]any)
 			}
 
-			tool, ok := e.registry.Get(tc.Name)
-			if !ok {
-				e.openrouterHistory = append(e.openrouterHistory, openrouterHistoryEntry{
-					Role:    "tool",
-					Content: "unknown tool: " + tc.Name,
-					CallID:  tc.ID,
-				})
-				continue
+			call := ToolCall{
+				ID:    tc.ID,
+				Name:  tc.Name,
+				Input: input,
 			}
 
-			if e.permissions.NeedsPermission(tool, input) {
-				approved, err := e.permissions.RequestPermission(ctx, tc.ID, e.events, tc.Name, input)
-				if err != nil {
-					return
-				}
-				if !approved {
-					e.openrouterHistory = append(e.openrouterHistory, openrouterHistoryEntry{
-						Role:    "tool",
-						Content: "permission denied",
-						CallID:  tc.ID,
-					})
-					continue
-				}
+			result, err := e.executeProviderToolCall(ctx, call)
+			if err != nil {
+				return
 			}
 
-			result := tool.Execute(ctx, input)
+			result, err = e.postToolPipeline(ctx, call, result)
+			if err != nil {
+				e.emitError(err)
+				return
+			}
 
 			e.events <- engine.ParsedEvent{
 				Type: "tool_result",
@@ -404,6 +395,10 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 				},
 			}
 
+			processedResults = append(processedResults, ToolCallResult{
+				ToolCall: call,
+				Result:   result,
+			})
 			e.openrouterHistory = append(e.openrouterHistory, openrouterHistoryEntry{
 				Role:    "tool",
 				Content: result.Content,
@@ -419,6 +414,7 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 				}
 			}
 		}
+		e.cleanupComputerUse(processedResults)
 
 		e.drainSteeredMessagesOpenRouter()
 	}

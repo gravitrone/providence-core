@@ -1,10 +1,15 @@
 package direct
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -380,6 +385,109 @@ func TestSessionBusWiring(t *testing.T) {
 	}
 
 	bus.Unsubscribe(ch)
+}
+
+func TestPostToolPipelineParityAcrossProviders(t *testing.T) {
+	t.Setenv("PROVIDENCE_HOOKS_ALLOW_LOOPBACK", "1")
+
+	tests := []struct {
+		name          string
+		config        engine.EngineConfig
+		run           func(*testing.T, *DirectEngine, ToolCall) (tools.ToolResult, error)
+		assertHistory func(*testing.T, *DirectEngine, string)
+	}{
+		{
+			name: "anthropic",
+			config: engine.EngineConfig{
+				Type:   engine.EngineTypeDirect,
+				Model:  "claude-sonnet-4-20250514",
+				APIKey: "test-key-not-real",
+			},
+			run:           runAnthropicParityToolPipeline,
+			assertHistory: assertAnthropicParityHistory,
+		},
+		{
+			name: "codex",
+			config: engine.EngineConfig{
+				Type:     engine.EngineTypeDirect,
+				Provider: "openai",
+				Model:    "gpt-5.4",
+			},
+			run:           runCodexParityToolPipeline,
+			assertHistory: assertCodexParityHistory,
+		},
+		{
+			name: "openrouter",
+			config: engine.EngineConfig{
+				Type:             engine.EngineTypeDirect,
+				Provider:         "openrouter",
+				Model:            "anthropic/claude-sonnet-4-5",
+				OpenRouterAPIKey: "test-key",
+			},
+			run:           runOpenRouterParityToolPipeline,
+			assertHistory: assertOpenRouterParityHistory,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool := &parityTool{}
+			hookServer, hookRecorder := newParityHookServer(t)
+			defer hookServer.Close()
+
+			cfg := tt.config
+			cfg.HooksMap = newParityHooksMap(hookServer.URL)
+
+			e, err := NewDirectEngine(cfg)
+			require.NoError(t, err)
+			defer e.Close()
+			e.SetRegistry(tools.NewRegistry(tool))
+			e.permissions.SetMode("auto")
+
+			bus := e.SessionBus()
+			require.NotNil(t, bus)
+
+			ch := bus.Subscribe(16)
+			defer bus.Unsubscribe(ch)
+
+			call := ToolCall{
+				ID:    "call_1",
+				Name:  tool.Name(),
+				Input: map[string]any{"value": "ember"},
+			}
+			result, err := tt.run(t, e, call)
+			require.NoError(t, err)
+			assert.Equal(t, normalizedParityOutput, result.Content)
+			assert.False(t, result.IsError)
+
+			startEvent := waitForSessionEventType(t, ch, session.EventToolCallStart)
+			assert.Equal(t, "Parity", startEvent.Data)
+
+			resultEvent := waitForSessionEventType(t, ch, session.EventToolCallResult)
+			assert.Equal(t, normalizedParityOutput, resultEvent.Data)
+
+			waitForParityHooks(t, hookRecorder)
+
+			assert.Equal(t, 1, hookRecorder.count(hooks.PreToolUse))
+			assert.Equal(t, 1, hookRecorder.count(hooks.PostToolUse))
+			assert.Equal(t, 0, hookRecorder.count(hooks.PostToolUseFailure))
+			assert.True(t, tool.contextModifierRan(), "context modifier should run for %s", tt.name)
+
+			preHook, ok := hookRecorder.latest(hooks.PreToolUse)
+			require.True(t, ok)
+			assert.Equal(t, "Parity", preHook.ToolName)
+			preInput, ok := preHook.ToolInput.(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, "ember", preInput["value"])
+
+			postHook, ok := hookRecorder.latest(hooks.PostToolUse)
+			require.True(t, ok)
+			assert.Equal(t, "Parity", postHook.ToolName)
+			assert.Equal(t, normalizedParityOutput, postHook.ToolInput)
+
+			tt.assertHistory(t, e, normalizedParityOutput)
+		})
+	}
 }
 
 func TestMaxOutputTokensRecoveryResetOnSend(t *testing.T) {
@@ -830,4 +938,249 @@ func TestSelectAmbientFrames_PreservesByteSliceIdentity(t *testing.T) {
 	assert.Equal(t, &pngs[0][0], &got[0][0])
 	assert.Equal(t, &pngs[5][0], &got[1][0])
 	assert.Equal(t, &pngs[6][0], &got[2][0])
+}
+
+const normalizedParityOutput = "tool output"
+
+type parityTool struct {
+	contextModifiers atomic.Int32
+}
+
+func (t *parityTool) Name() string { return "Parity" }
+
+func (t *parityTool) Description() string { return "Parity test tool." }
+
+func (t *parityTool) InputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"value": map[string]any{"type": "string"},
+		},
+	}
+}
+
+func (t *parityTool) ReadOnly() bool { return false }
+
+func (t *parityTool) Execute(_ context.Context, _ map[string]any) tools.ToolResult {
+	return tools.ToolResult{
+		Content: normalizedParityOutput + " \n",
+		ContextModifier: func() {
+			t.contextModifiers.Add(1)
+		},
+	}
+}
+
+func (t *parityTool) contextModifierRan() bool {
+	return t.contextModifiers.Load() > 0
+}
+
+type parityHookRecorder struct {
+	mu    sync.Mutex
+	calls []hooks.HookInput
+}
+
+func (r *parityHookRecorder) record(input hooks.HookInput) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, input)
+}
+
+func (r *parityHookRecorder) count(event string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	count := 0
+	for _, call := range r.calls {
+		if call.Event == event {
+			count++
+		}
+	}
+	return count
+}
+
+func (r *parityHookRecorder) latest(event string) (hooks.HookInput, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for i := len(r.calls) - 1; i >= 0; i-- {
+		if r.calls[i].Event == event {
+			return r.calls[i], true
+		}
+	}
+	return hooks.HookInput{}, false
+}
+
+func newParityHookServer(t *testing.T) (*httptest.Server, *parityHookRecorder) {
+	t.Helper()
+
+	recorder := &parityHookRecorder{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input hooks.HookInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Errorf("decode hook input: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		recorder.record(input)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+
+	return server, recorder
+}
+
+func newParityHooksMap(hookURL string) map[string][]engine.HookConfigEntry {
+	return map[string][]engine.HookConfigEntry{
+		hooks.PreToolUse:  {{URL: hookURL, Timeout: 2000}},
+		hooks.PostToolUse: {{URL: hookURL, Timeout: 2000}},
+	}
+}
+
+func waitForParityHooks(t *testing.T, recorder *parityHookRecorder) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if recorder.count(hooks.PreToolUse) >= 1 && recorder.count(hooks.PostToolUse) >= 1 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatalf(
+		"timed out waiting for parity hooks: pre=%d post=%d",
+		recorder.count(hooks.PreToolUse),
+		recorder.count(hooks.PostToolUse),
+	)
+}
+
+func waitForSessionEventType(t *testing.T, ch <-chan session.Event, wantType string) session.Event {
+	t.Helper()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Type == wantType {
+				return ev
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s session event", wantType)
+		}
+	}
+}
+
+func runAnthropicParityToolPipeline(t *testing.T, e *DirectEngine, call ToolCall) (tools.ToolResult, error) {
+	t.Helper()
+
+	e.sessionBus.Publish(session.Event{Type: session.EventToolCallStart, Data: call.Name})
+
+	if hookOut, hookErr := e.fireHook(hooks.PreToolUse, hooks.HookInput{
+		ToolName:  call.Name,
+		ToolInput: call.Input,
+	}); hookErr != nil {
+		var blockingErr *hooks.BlockingError
+		if errors.As(hookErr, &blockingErr) {
+			result, err := e.postToolPipeline(context.Background(), call, tools.ToolResult{
+				Content: "blocked by PreToolUse hook: " + hookErr.Error(),
+				IsError: true,
+			})
+			if err != nil {
+				return tools.ToolResult{}, err
+			}
+			e.history.AddToolResults([]anthropic.ContentBlockParamUnion{
+				anthropic.NewToolResultBlock(call.ID, result.Content, result.IsError),
+			})
+			return result, nil
+		}
+	} else if hookOut != nil && hookOut.SuppressOutput {
+		result, err := e.postToolPipeline(context.Background(), call, tools.ToolResult{
+			Content: "suppressed by PreToolUse hook",
+		})
+		if err != nil {
+			return tools.ToolResult{}, err
+		}
+		e.history.AddToolResults([]anthropic.ContentBlockParamUnion{
+			anthropic.NewToolResultBlock(call.ID, result.Content, result.IsError),
+		})
+		return result, nil
+	}
+
+	tool, ok := e.registry.Get(call.Name)
+	require.True(t, ok)
+
+	result, err := e.postToolPipeline(context.Background(), call, tool.Execute(context.Background(), call.Input))
+	if err != nil {
+		return tools.ToolResult{}, err
+	}
+
+	e.history.AddToolResults([]anthropic.ContentBlockParamUnion{
+		anthropic.NewToolResultBlock(call.ID, result.Content, result.IsError),
+	})
+	return result, nil
+}
+
+func runCodexParityToolPipeline(_ *testing.T, e *DirectEngine, call ToolCall) (tools.ToolResult, error) {
+	result, err := e.executeProviderToolCall(context.Background(), call)
+	if err != nil {
+		return tools.ToolResult{}, err
+	}
+
+	result, err = e.postToolPipeline(context.Background(), call, result)
+	if err != nil {
+		return tools.ToolResult{}, err
+	}
+
+	e.codexHistory = append(e.codexHistory, codexHistoryEntry{
+		Role:    "tool",
+		Content: result.Content,
+		CallID:  call.ID,
+	})
+	return result, nil
+}
+
+func runOpenRouterParityToolPipeline(_ *testing.T, e *DirectEngine, call ToolCall) (tools.ToolResult, error) {
+	result, err := e.executeProviderToolCall(context.Background(), call)
+	if err != nil {
+		return tools.ToolResult{}, err
+	}
+
+	result, err = e.postToolPipeline(context.Background(), call, result)
+	if err != nil {
+		return tools.ToolResult{}, err
+	}
+
+	e.openrouterHistory = append(e.openrouterHistory, openrouterHistoryEntry{
+		Role:    "tool",
+		Content: result.Content,
+		CallID:  call.ID,
+	})
+	return result, nil
+}
+
+func assertAnthropicParityHistory(t *testing.T, e *DirectEngine, want string) {
+	t.Helper()
+
+	msgs := e.history.Messages()
+	require.Len(t, msgs, 1)
+	require.Len(t, msgs[0].Content, 1)
+	toolResult := msgs[0].Content[0].OfToolResult
+	require.NotNil(t, toolResult)
+	require.Len(t, toolResult.Content, 1)
+	assert.Equal(t, want, toolResult.Content[0].OfText.Text)
+}
+
+func assertCodexParityHistory(t *testing.T, e *DirectEngine, want string) {
+	t.Helper()
+
+	require.Len(t, e.codexHistory, 1)
+	assert.Equal(t, want, e.codexHistory[0].Content)
+}
+
+func assertOpenRouterParityHistory(t *testing.T, e *DirectEngine, want string) {
+	t.Helper()
+
+	require.Len(t, e.openrouterHistory, 1)
+	assert.Equal(t, want, e.openrouterHistory[0].Content)
 }

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -90,8 +92,16 @@ func writeTextTurn(w http.ResponseWriter, text string) {
 // given httptest server. Retries are tightened to 1 so error paths terminate
 // quickly. Returns the engine and a cleanup func.
 func newFakeEngine(t *testing.T, srv *httptest.Server) *DirectEngine {
+	return newFakeEngineWithRetries(t, srv, 1)
+}
+
+func newFakeEngineWithRetries(t *testing.T, srv *httptest.Server, maxRetries int) *DirectEngine {
 	t.Helper()
-	return newFakeEngineWithWorkDir(t, srv, t.TempDir())
+	e := newFakeEngineWithWorkDir(t, srv, t.TempDir())
+	// Override the default "1" that newFakeEngineWithWorkDir sets so callers
+	// that need a specific retry budget (e.g. 529-backoff tests) get it.
+	t.Setenv("PROVIDENCE_MAX_RETRIES", strconv.Itoa(maxRetries))
+	return e
 }
 
 func newFakeEngineWithWorkDir(t *testing.T, srv *httptest.Server, workDir string) *DirectEngine {
@@ -108,9 +118,12 @@ func newFakeEngineWithWorkDir(t *testing.T, srv *httptest.Server, workDir string
 	})
 	require.NoError(t, err)
 	// Swap the SDK client for one pointed at the fake server.
+	e.anthropicAPIKey = "test-key"
+	e.anthropicBaseURL = srv.URL
 	e.client = anthropic.NewClient(
-		option.WithAPIKey("test-key"),
-		option.WithBaseURL(srv.URL),
+		option.WithAPIKey(e.anthropicAPIKey),
+		option.WithBaseURL(e.anthropicBaseURL),
+		option.WithHTTPClient(newAnthropicHTTPClient(false)),
 		option.WithMaxRetries(0),
 	)
 	return e
@@ -283,6 +296,96 @@ func TestSend_NoEngineStatusLeakOnError(t *testing.T) {
 	st := e.Status()
 	assert.NotEqual(t, engine.StatusRunning, st, "status must leave Running on error")
 	assert.Equal(t, engine.StatusFailed, st)
+}
+
+func TestRetries529WithBackoff(t *testing.T) {
+	var attempts atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := attempts.Add(1)
+		if attempt <= 2 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(529)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"overloaded_error","message":"cooked"}}`))
+			return
+		}
+		writeTextTurn(w, "recovered")
+	}))
+	defer srv.Close()
+
+	e := newFakeEngineWithRetries(t, srv, 1)
+
+	start := time.Now()
+	require.NoError(t, e.Send("hi"))
+
+	res, _ := waitForResult(t, e, 10*time.Second)
+	require.NotNil(t, res)
+	assert.False(t, res.IsError)
+	assert.Equal(t, int32(3), attempts.Load())
+	assert.GreaterOrEqual(t, time.Since(start), 3*time.Second)
+}
+
+func TestECONNRESETDisablesKeepAliveAndRetries(t *testing.T) {
+	var attempts atomic.Int32
+	var sawCloseHeader atomic.Bool
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := attempts.Add(1)
+		if attempt == 1 {
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Errorf("response writer does not support hijacking")
+				return
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Errorf("hijack connection: %v", err)
+				return
+			}
+			if tcpConn, ok := conn.(*net.TCPConn); ok {
+				_ = tcpConn.SetLinger(0)
+			}
+			_ = conn.Close()
+			return
+		}
+
+		sawCloseHeader.Store(r.Close || strings.EqualFold(r.Header.Get("Connection"), "close"))
+		writeTextTurn(w, "recovered")
+	}))
+	defer srv.Close()
+
+	e := newFakeEngineWithRetries(t, srv, 1)
+
+	require.NoError(t, e.Send("hi"))
+
+	res, _ := waitForResult(t, e, 10*time.Second)
+	require.NotNil(t, res)
+	assert.False(t, res.IsError)
+	assert.Equal(t, int32(2), attempts.Load())
+	assert.True(t, sawCloseHeader.Load())
+	assert.True(t, e.retryStates[engine.ProviderAnthropic].disableKeepAlives)
+}
+
+func TestMaxRetriesSurfacesError(t *testing.T) {
+	var attempts atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(529)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"overloaded_error","message":"still cooked"}}`))
+	}))
+	defer srv.Close()
+
+	e := newFakeEngineWithRetries(t, srv, 1)
+
+	require.NoError(t, e.Send("hi"))
+
+	res, _ := waitForResult(t, e, 30*time.Second)
+	require.NotNil(t, res)
+	assert.True(t, res.IsError)
+	assert.Contains(t, res.Result, "anthropic: overloaded after 4 retries")
+	assert.Equal(t, int32(5), attempts.Load())
 }
 
 // TestSend_PendingImagesClearedAfterSend verifies that pendingImages is

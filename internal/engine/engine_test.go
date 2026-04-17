@@ -1,12 +1,107 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
+	"github.com/gravitrone/providence-core/internal/engine/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// --- Capability Matrix Fixtures ---
+
+// baseOnlyEngine implements only the Engine base interface. Used to prove
+// that engines without the optional capabilities cleanly fail feature
+// detection instead of being forced to stub the methods.
+type baseOnlyEngine struct{}
+
+func (baseOnlyEngine) Send(string) error                      { return nil }
+func (baseOnlyEngine) Events() <-chan ParsedEvent             { return nil }
+func (baseOnlyEngine) RespondPermission(string, string) error { return nil }
+func (baseOnlyEngine) Interrupt()                             {}
+func (baseOnlyEngine) Cancel()                                {}
+func (baseOnlyEngine) Close()                                 {}
+func (baseOnlyEngine) Status() SessionStatus                  { return StatusIdle }
+
+// fullEngine implements every capability interface. Used to prove
+// engines that do support the optional methods are correctly detected.
+type fullEngine struct{ baseOnlyEngine }
+
+func (fullEngine) RestoreHistory([]RestoredMessage) error { return nil }
+func (fullEngine) TriggerCompact(context.Context) error   { return nil }
+func (fullEngine) SessionBus() *session.Bus               { return session.NewBus() }
+
+// compactorOnlyEngine satisfies Engine + Compactor, mirroring the claude
+// headless shape (real /compact support, no bus, no history restore).
+type compactorOnlyEngine struct{ baseOnlyEngine }
+
+func (compactorOnlyEngine) TriggerCompact(context.Context) error { return nil }
+
+// busOnlyEngine satisfies Engine + SessionBusProvider, mirroring the
+// codex_headless shape (real bus, no compaction, no history restore).
+type busOnlyEngine struct{ baseOnlyEngine }
+
+func (busOnlyEngine) SessionBus() *session.Bus { return session.NewBus() }
+
+// TestEngineInterfaceSatisfactionMatrix pins which engine shapes satisfy
+// which capability interface. The prior design forced every engine to
+// implement all three optional methods as no-ops that callers couldn't
+// tell from real support. The new design relies on feature detection, so
+// a regression that reintroduced a stub (or lost a real capability)
+// would show up here as a row flipping from false to true or vice versa.
+func TestEngineInterfaceSatisfactionMatrix(t *testing.T) {
+	cases := []struct {
+		name            string
+		eng             Engine
+		wantRestorer    bool
+		wantCompactor   bool
+		wantBusProvider bool
+	}{
+		{
+			name:            "full-engine-direct-shape",
+			eng:             fullEngine{},
+			wantRestorer:    true,
+			wantCompactor:   true,
+			wantBusProvider: true,
+		},
+		{
+			name:            "compactor-only-claude-shape",
+			eng:             compactorOnlyEngine{},
+			wantRestorer:    false,
+			wantCompactor:   true,
+			wantBusProvider: false,
+		},
+		{
+			name:            "bus-only-codex-shape",
+			eng:             busOnlyEngine{},
+			wantRestorer:    false,
+			wantCompactor:   false,
+			wantBusProvider: true,
+		},
+		{
+			name:            "base-only-opencode-shape",
+			eng:             baseOnlyEngine{},
+			wantRestorer:    false,
+			wantCompactor:   false,
+			wantBusProvider: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			_, gotRestorer := tc.eng.(HistoryRestorer)
+			_, gotCompactor := tc.eng.(Compactor)
+			_, gotBus := tc.eng.(SessionBusProvider)
+
+			assert.Equal(t, tc.wantRestorer, gotRestorer, "HistoryRestorer satisfaction")
+			assert.Equal(t, tc.wantCompactor, gotCompactor, "Compactor satisfaction")
+			assert.Equal(t, tc.wantBusProvider, gotBus, "SessionBusProvider satisfaction")
+		})
+	}
+}
 
 func TestEngineFactoryRegistration(t *testing.T) {
 	// Register mock factories to verify the registration mechanism works.

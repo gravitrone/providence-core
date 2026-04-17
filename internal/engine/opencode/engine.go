@@ -1,13 +1,11 @@
 package opencode
 
 import (
-	"context"
 	"fmt"
 	"os/exec"
 	"sync"
 
 	"github.com/gravitrone/providence-core/internal/engine"
-	"github.com/gravitrone/providence-core/internal/engine/session"
 )
 
 // EngineTypeOpenCode is the engine type identifier for the OpenCode backend.
@@ -96,18 +94,6 @@ func (e *OpenCodeEngine) Status() engine.SessionStatus {
 	return e.status
 }
 
-// RestoreHistory is a no-op for the opencode backend. OpenCode manages its own
-// conversation state via its REST API.
-func (e *OpenCodeEngine) RestoreHistory(_ []engine.RestoredMessage) error {
-	return nil
-}
-
-// TriggerCompact requests manual context compaction. Not supported by opencode.
-func (e *OpenCodeEngine) TriggerCompact(_ context.Context) error {
-	return fmt.Errorf("opencode engine does not support manual compaction")
-}
-
-// SessionBus returns a no-op bus. OpenCode manages its own event system.
-func (e *OpenCodeEngine) SessionBus() *session.Bus {
-	return session.NewBus()
-}
+// OpenCodeEngine intentionally does NOT implement HistoryRestorer,
+// Compactor, or SessionBusProvider. Callers feature-detect those
+// capabilities and fall back cleanly instead of hitting forced stubs.

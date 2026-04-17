@@ -1,7 +1,6 @@
 package opencode
 
 import (
-	"context"
 	"sync"
 	"testing"
 
@@ -122,18 +121,29 @@ func TestOpenCodeRespondPermissionReturnsStubError(t *testing.T) {
 		"error must identify which capability is missing so callers can diagnose")
 }
 
-// TestOpenCodeTriggerCompactReturnsStubError verifies TriggerCompact
-// surfaces as a clean error so the compaction orchestrator falls back
-// to another strategy rather than hanging waiting for a result.
-func TestOpenCodeTriggerCompactReturnsStubError(t *testing.T) {
+// TestOpenCodeOptsOutOfCapabilityInterfaces verifies the opencode engine
+// does NOT satisfy HistoryRestorer, Compactor, or SessionBusProvider.
+// Before the capability split, opencode implemented forced stubs
+// (no-op / "not supported" errors); those stubs could not be
+// distinguished from real support at the call site. The new contract
+// relies on feature detection - a missing interface cleanly signals
+// "this engine can't do that" so callers fall back instead of invoking
+// a stub and getting an unhelpful error downstream.
+func TestOpenCodeOptsOutOfCapabilityInterfaces(t *testing.T) {
 	t.Parallel()
 
 	e, err := NewOpenCodeEngine(engine.EngineConfig{Model: "gpt-4o"})
 	require.NoError(t, err)
 
-	err = e.TriggerCompact(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "compaction")
+	if _, ok := e.(engine.HistoryRestorer); ok {
+		t.Error("opencode must not satisfy HistoryRestorer")
+	}
+	if _, ok := e.(engine.Compactor); ok {
+		t.Error("opencode must not satisfy Compactor")
+	}
+	if _, ok := e.(engine.SessionBusProvider); ok {
+		t.Error("opencode must not satisfy SessionBusProvider")
+	}
 }
 
 // TestOpenCodeStatusConcurrentReadsAreRaceFree spins N goroutines each

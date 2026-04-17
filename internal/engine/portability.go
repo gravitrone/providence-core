@@ -61,13 +61,23 @@ func SerializeState(e Engine, messages []RestoredMessage, systemPrompt, model, e
 }
 
 // RestoreState applies a ConversationState to an engine by converting portable
-// messages back to RestoredMessage format and calling RestoreHistory.
+// messages back to RestoredMessage format and calling RestoreHistory on
+// engines that implement HistoryRestorer. Engines without history injection
+// accept the restore as a no-op so resumed sessions still load their UI
+// history even if the model-side memory can't be rehydrated.
 func RestoreState(e Engine, state *ConversationState) error {
 	if e == nil {
 		return fmt.Errorf("cannot restore into nil engine")
 	}
 	if state == nil {
 		return fmt.Errorf("cannot restore nil state")
+	}
+
+	hr, ok := e.(HistoryRestorer)
+	if !ok {
+		// engine doesn't support history injection - UI state is still
+		// repopulated by the caller, so this isn't an error.
+		return nil
 	}
 
 	restored := make([]RestoredMessage, 0, len(state.Messages))
@@ -81,7 +91,7 @@ func RestoreState(e Engine, state *ConversationState) error {
 		})
 	}
 
-	return e.RestoreHistory(restored)
+	return hr.RestoreHistory(restored)
 }
 
 // MarshalState serializes a ConversationState to JSON.

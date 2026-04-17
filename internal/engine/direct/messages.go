@@ -36,6 +36,7 @@ func (h *ConversationHistory) AddUser(text string) {
 	h.messages = append(h.messages, anthropic.NewUserMessage(
 		anthropic.NewTextBlock(text),
 	))
+	h.invalidateReportedTokensLocked()
 }
 
 // AddUserWithImages appends a user message with image content blocks followed by a text block.
@@ -52,6 +53,7 @@ func (h *ConversationHistory) AddUserWithImages(text string, images []ImageData)
 	}
 	blocks = append(blocks, anthropic.NewTextBlock(text))
 	h.messages = append(h.messages, anthropic.NewUserMessage(blocks...))
+	h.invalidateReportedTokensLocked()
 }
 
 // AddAssistant appends an assistant message (from a completed API response) to the history.
@@ -59,6 +61,7 @@ func (h *ConversationHistory) AddAssistant(msg anthropic.Message) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.messages = append(h.messages, msg.ToParam())
+	h.invalidateReportedTokensLocked()
 }
 
 // AddAssistantText appends a plain text assistant message (no tool calls).
@@ -69,6 +72,7 @@ func (h *ConversationHistory) AddAssistantText(text string) {
 	h.messages = append(h.messages, anthropic.NewAssistantMessage(
 		anthropic.NewTextBlock(text),
 	))
+	h.invalidateReportedTokensLocked()
 }
 
 // RemoveLastAssistant removes the last message from history if it is an
@@ -79,6 +83,7 @@ func (h *ConversationHistory) RemoveLastAssistant() {
 	defer h.mu.Unlock()
 	if len(h.messages) > 0 && h.messages[len(h.messages)-1].Role == anthropic.MessageParamRoleAssistant {
 		h.messages = h.messages[:len(h.messages)-1]
+		h.invalidateReportedTokensLocked()
 	}
 }
 
@@ -87,6 +92,7 @@ func (h *ConversationHistory) AddToolResults(results []anthropic.ContentBlockPar
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.messages = append(h.messages, anthropic.NewUserMessage(results...))
+	h.invalidateReportedTokensLocked()
 }
 
 // Messages returns a copy of the current message list.
@@ -126,6 +132,12 @@ func (h *ConversationHistory) SetReportedTokens(input, output int) {
 	h.lastInputTokens = input
 	h.lastOutputTokens = output
 	h.lastReportedTokens = input + output
+}
+
+func (h *ConversationHistory) invalidateReportedTokensLocked() {
+	h.lastReportedTokens = 0
+	h.lastInputTokens = 0
+	h.lastOutputTokens = 0
 }
 
 func (h *ConversationHistory) estimateTokensLocked() int {
@@ -168,6 +180,8 @@ func (h *ConversationHistory) StripThinkingBlocks() {
 		}
 		msg.Content = filtered
 	}
+
+	h.invalidateReportedTokensLocked()
 }
 
 // --- W5 microcompact ---
@@ -213,9 +227,7 @@ func (h *ConversationHistory) CompressLongToolResults(minLen int) int {
 	}
 
 	if compressed > 0 {
-		h.lastReportedTokens = 0
-		h.lastInputTokens = 0
-		h.lastOutputTokens = 0
+		h.invalidateReportedTokensLocked()
 	}
 
 	return compressed
@@ -235,9 +247,7 @@ func (h *ConversationHistory) ReplaceTail(replacement anthropic.MessageParam, cu
 
 	tail := append([]anthropic.MessageParam(nil), h.messages[cutIndex:]...)
 	h.messages = append([]anthropic.MessageParam{replacement}, tail...)
-	h.lastReportedTokens = 0
-	h.lastInputTokens = 0
-	h.lastOutputTokens = 0
+	h.invalidateReportedTokensLocked()
 
 	return nil
 }
@@ -248,9 +258,7 @@ func (h *ConversationHistory) ReplaceAll(msgs []anthropic.MessageParam) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.messages = msgs
-	h.lastReportedTokens = 0
-	h.lastInputTokens = 0
-	h.lastOutputTokens = 0
+	h.invalidateReportedTokensLocked()
 }
 
 // MessagesBefore returns a copy of the messages before idx.

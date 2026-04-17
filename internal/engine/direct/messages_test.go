@@ -88,6 +88,19 @@ func TestCurrentTokensFromReported(t *testing.T) {
 	assert.Equal(t, 15, h.CurrentTokens())
 }
 
+func TestCurrentTokensInvalidatesAfterAppend(t *testing.T) {
+	h := NewConversationHistory()
+	h.AddUser("hello world!")
+	h.SetReportedTokens(16, 0)
+	require.Equal(t, 16, h.CurrentTokens())
+
+	h.AddUser("more text")
+
+	current := h.CurrentTokens()
+	assert.Equal(t, 28, current)
+	assert.Greater(t, current, 16)
+}
+
 func TestSetReportedTokens(t *testing.T) {
 	h := NewConversationHistory()
 	h.SetReportedTokens(12, 8)

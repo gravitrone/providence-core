@@ -17,11 +17,11 @@ import (
 // --- Mock Engine ---
 
 type mockEngine struct {
-	events     chan engine.ParsedEvent
-	sent       []string
+	events      chan engine.ParsedEvent
+	sent        []string
 	interrupted bool
-	closed     bool
-	permResp   map[string]string // questionID -> optionID
+	closed      bool
+	permResp    map[string]string // questionID -> optionID
 }
 
 func newMockEngine() *mockEngine {
@@ -257,6 +257,55 @@ func TestServerTranslatesAssistantEvent(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "should have emitted an assistant event")
+}
+
+func TestHeadlessEmitsSummary(t *testing.T) {
+	eng := newMockEngine()
+
+	eng.events <- engine.ParsedEvent{
+		Type: "assistant",
+		Data: &engine.AssistantEvent{
+			Type: "assistant",
+			Message: engine.AssistantMsg{
+				Content: []engine.ContentPart{
+					{
+						Type: "tool_use",
+						ID:   "tool-1",
+						Name: "Read",
+						Input: map[string]any{
+							"file_path": "/repo/internal/engine/headless/server.go",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	stdin := strings.NewReader("")
+	var stdout bytes.Buffer
+
+	srv := NewServer(eng, stdin, &stdout, "test-model", "test-engine")
+	srv.WithCwd("/repo")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_ = srv.Run(ctx)
+
+	lines := nonEmptyLines(stdout.String())
+	assert.Contains(t, stdout.String(), `"summary":"Reading internal/engine/headless/server.go"`)
+
+	found := false
+	for _, line := range lines {
+		var ev OutputEvent
+		if err := json.Unmarshal([]byte(line), &ev); err == nil && ev.Type == TypeAssistant {
+			found = true
+			require.NotNil(t, ev.Message)
+			require.Len(t, ev.Message.Content, 1)
+			assert.Equal(t, "Reading internal/engine/headless/server.go", ev.Message.Content[0].Summary)
+		}
+	}
+	assert.True(t, found, "should have emitted an assistant event with summary")
 }
 
 func TestServerTranslatesResultEvent(t *testing.T) {

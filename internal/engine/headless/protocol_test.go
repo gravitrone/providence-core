@@ -2,6 +2,7 @@ package headless
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -136,4 +137,88 @@ func TestHarnessSwitchEventJSON(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &decoded))
 
 	assert.Equal(t, ev, decoded)
+}
+
+func TestToolSummary_Bash(t *testing.T) {
+	command := strings.Repeat("x", 70)
+
+	summary := summarizeToolCall("Bash", map[string]any{
+		"command": command,
+	}, "/repo")
+
+	assert.Equal(t, "Running: "+strings.Repeat("x", 57)+"...", summary)
+	assert.LessOrEqual(t, len(summary), 80)
+}
+
+func TestToolSummary_Read(t *testing.T) {
+	summary := summarizeToolCall("Read", map[string]any{
+		"file_path": "/repo/internal/engine/headless/server.go",
+	}, "/repo")
+
+	assert.Equal(t, "Reading internal/engine/headless/server.go", summary)
+	assert.LessOrEqual(t, len(summary), 80)
+}
+
+func TestToolSummary_Write(t *testing.T) {
+	summary := summarizeToolCall("Write", map[string]any{
+		"file_path": "/repo/internal/engine/headless/server.go",
+	}, "/repo")
+
+	assert.Equal(t, "Writing internal/engine/headless/server.go", summary)
+	assert.LessOrEqual(t, len(summary), 80)
+}
+
+func TestToolSummary_Edit(t *testing.T) {
+	summary := summarizeToolCall("Edit", map[string]any{
+		"file_path": "/repo/internal/engine/headless/server.go",
+	}, "/repo")
+
+	assert.Equal(t, "Editing internal/engine/headless/server.go", summary)
+	assert.LessOrEqual(t, len(summary), 80)
+}
+
+func TestToolSummary_Grep(t *testing.T) {
+	summary := summarizeToolCall("Grep", map[string]any{
+		"pattern": "TODO",
+		"path":    "/repo/internal/engine",
+	}, "/repo")
+
+	assert.Equal(t, "Searching for 'TODO' in internal/engine", summary)
+	assert.LessOrEqual(t, len(summary), 80)
+}
+
+func TestToolSummary_Glob(t *testing.T) {
+	summary := summarizeToolCall("Glob", map[string]any{
+		"pattern": "**/*_test.go",
+	}, "/repo")
+
+	assert.Equal(t, "Finding files matching **/*_test.go", summary)
+	assert.LessOrEqual(t, len(summary), 80)
+}
+
+func TestToolSummary_WebFetch(t *testing.T) {
+	summary := summarizeToolCall("WebFetch", map[string]any{
+		"url": "https://example.com/docs",
+	}, "/repo")
+
+	assert.Equal(t, "Fetching https://example.com/docs", summary)
+	assert.LessOrEqual(t, len(summary), 80)
+}
+
+func TestToolSummary_WebSearch(t *testing.T) {
+	query := strings.Repeat("q", 70)
+
+	summary := summarizeToolCall("WebSearch", map[string]any{
+		"query": query,
+	}, "/repo")
+
+	assert.Equal(t, "Searching web for '"+strings.Repeat("q", 57)+"...'", summary)
+	assert.LessOrEqual(t, len(summary), 80)
+}
+
+func TestToolSummary_DefaultFallback(t *testing.T) {
+	summary := summarizeToolCall("Sleep", map[string]any{}, "/repo")
+
+	assert.Equal(t, "Sleep call", summary)
+	assert.LessOrEqual(t, len(summary), 80)
 }

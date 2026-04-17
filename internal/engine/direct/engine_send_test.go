@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -88,13 +91,20 @@ func writeTextTurn(w http.ResponseWriter, text string) {
 // quickly. Returns the engine and a cleanup func.
 func newFakeEngine(t *testing.T, srv *httptest.Server) *DirectEngine {
 	t.Helper()
+	return newFakeEngineWithWorkDir(t, srv, t.TempDir())
+}
+
+func newFakeEngineWithWorkDir(t *testing.T, srv *httptest.Server, workDir string) *DirectEngine {
+	t.Helper()
 	t.Setenv("PROVIDENCE_MAX_RETRIES", "1")
 	t.Setenv("PROVIDENCE_STREAM_IDLE_TIMEOUT_MS", "2000")
+	t.Setenv("HOME", t.TempDir())
 
 	e, err := NewDirectEngine(engine.EngineConfig{
-		Type:   engine.EngineTypeDirect,
-		Model:  "claude-sonnet-4-20250514",
-		APIKey: "test-key-not-real",
+		Type:    engine.EngineTypeDirect,
+		Model:   "claude-sonnet-4-20250514",
+		APIKey:  "test-key-not-real",
+		WorkDir: workDir,
 	})
 	require.NoError(t, err)
 	// Swap the SDK client for one pointed at the fake server.
@@ -104,6 +114,18 @@ func newFakeEngine(t *testing.T, srv *httptest.Server) *DirectEngine {
 		option.WithMaxRetries(0),
 	)
 	return e
+}
+
+func writeCompactTTLConfig(t *testing.T, workDir, ttl string) {
+	t.Helper()
+
+	configDir := filepath.Join(workDir, ".providence")
+	require.NoError(t, os.MkdirAll(configDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(configDir, "config.toml"),
+		[]byte(fmt.Sprintf("[compact]\ncache_ttl = %q\n", ttl)),
+		0o644,
+	))
 }
 
 // waitForResult drains events until a result event arrives or timeout.
@@ -128,6 +150,66 @@ func waitForResult(t *testing.T, e *DirectEngine, timeout time.Duration) (*engin
 }
 
 // --- Tests ---
+
+func TestCacheControlEmits5mByDefault(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		select {
+		case bodyCh <- string(body):
+		default:
+		}
+		writeTextTurn(w, "ok")
+	}))
+	defer srv.Close()
+
+	e := newFakeEngine(t, srv)
+	e.blocks = []engine.SystemBlock{{Text: "cacheable system prompt", Cacheable: true}}
+	require.NoError(t, e.Send("hi"))
+	_, _ = waitForResult(t, e, 5*time.Second)
+
+	select {
+	case body := <-bodyCh:
+		assert.Contains(t, body, "\"cache_control\"")
+		assert.Contains(t, body, "\"type\":\"ephemeral\"")
+		assert.NotContains(t, body, "\"ttl\":\"1h\"")
+		if strings.Contains(body, "\"ttl\":") {
+			assert.Contains(t, body, "\"ttl\":\"5m\"")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for request body")
+	}
+}
+
+func TestCacheControlEmits1hWhenConfigured(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		select {
+		case bodyCh <- string(body):
+		default:
+		}
+		writeTextTurn(w, "ok")
+	}))
+	defer srv.Close()
+
+	workDir := t.TempDir()
+	writeCompactTTLConfig(t, workDir, "1h")
+
+	e := newFakeEngineWithWorkDir(t, srv, workDir)
+	e.blocks = []engine.SystemBlock{{Text: "cacheable system prompt", Cacheable: true}}
+	require.NoError(t, e.Send("hi"))
+	_, _ = waitForResult(t, e, 5*time.Second)
+
+	select {
+	case body := <-bodyCh:
+		assert.Contains(t, body, "\"cache_control\"")
+		assert.Contains(t, body, "\"type\":\"ephemeral\"")
+		assert.Contains(t, body, "\"ttl\":\"1h\"")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for request body")
+	}
+}
 
 // TestSend_NaturalEndCompletes drives a single-turn Send through the real
 // agent loop against a fake server that returns a natural end_turn response.

@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gravitrone/providence-core/internal/auth"
 	"github.com/gravitrone/providence-core/internal/bridge/macos"
+	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/compact"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
@@ -39,6 +40,11 @@ const DefaultMaxOutputTokens = 16384
 
 // EscalatedMaxOutputTokens is the higher limit tried before multi-turn recovery.
 const EscalatedMaxOutputTokens = 64000
+
+const (
+	compactCacheTTL5m = "5m"
+	compactCacheTTL1h = "1h"
+)
 
 func init() {
 	engine.RegisterFactory(engine.EngineTypeDirect, func(cfg engine.EngineConfig) (engine.Engine, error) {
@@ -89,6 +95,8 @@ type DirectEngine struct {
 
 	// Structured system prompt blocks (preferred over e.system).
 	blocks []engine.SystemBlock
+
+	cacheTTL string
 
 	// Cache-break diagnostics: last fingerprint of the inputs that
 	// contribute to the Anthropic prompt cache key. Compared on every
@@ -311,6 +319,13 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		}
 	}
 	hooksRunner := hooks.NewRunner(hooksMap)
+	cacheTTL := compactCacheTTL5m
+	if cfg.WorkDir != "" {
+		loaded := config.LoadMerged(cfg.WorkDir)
+		if loaded.Compact.CacheTTL == compactCacheTTL1h {
+			cacheTTL = compactCacheTTL1h
+		}
+	}
 
 	e := &DirectEngine{
 		client:              client,
@@ -322,6 +337,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		registry:            registry,
 		permissions:         NewPermissionHandler(),
 		workDir:             cfg.WorkDir,
+		cacheTTL:            cacheTTL,
 		sessionID:           uuid.New().String(),
 		status:              engine.StatusIdle,
 		ctx:                 ctx,
@@ -1963,6 +1979,14 @@ func (e *DirectEngine) toolParams() []anthropic.ToolUnionParam {
 	return params
 }
 
+func cacheControlForTTL(ttl string) anthropic.CacheControlEphemeralParam {
+	cacheControl := anthropic.NewCacheControlEphemeralParam()
+	if ttl == compactCacheTTL1h {
+		cacheControl.TTL = anthropic.CacheControlEphemeralTTLTTL1h
+	}
+	return cacheControl
+}
+
 // systemBlocks returns the system prompt as TextBlockParam slice.
 // Uses pre-computed e.blocks directly - no comparison hack needed.
 func (e *DirectEngine) systemBlocks() []anthropic.TextBlockParam {
@@ -1991,7 +2015,7 @@ func (e *DirectEngine) systemBlocks() []anthropic.TextBlockParam {
 		}
 	}
 	if lastCacheable >= 0 {
-		params[lastCacheable].CacheControl = anthropic.NewCacheControlEphemeralParam()
+		params[lastCacheable].CacheControl = cacheControlForTTL(e.cacheTTL)
 	}
 	return params
 }

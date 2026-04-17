@@ -398,7 +398,14 @@ func TestBuildHTTPClientRejectsCrossHostRedirect(t *testing.T) {
 	// client directly rather than through fetchPage.
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 	require.NoError(t, err)
-	_, err = client.Do(req)
+	resp, err := client.Do(req)
+	// When CheckRedirect aborts, the Go http client returns the prior
+	// response with its Body already closed. Close defensively so the
+	// bodyclose linter stops flagging and any future refactor that
+	// changes that invariant does not leak a socket.
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
 	require.Error(t, err)
 
 	var uerr *url.Error

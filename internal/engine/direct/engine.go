@@ -137,6 +137,7 @@ type DirectEngine struct {
 	preExecResults map[string]tools.ToolResult
 	preExecMu      sync.Mutex
 	preExecWg      sync.WaitGroup
+	summaryWg      sync.WaitGroup
 
 	// Unattended retry mode: when true, 429/529 errors retry indefinitely
 	// (with max 5min backoff, 30s heartbeat, 6hr total cap) instead of
@@ -585,6 +586,9 @@ func (e *DirectEngine) isUnattendedRetry() bool {
 func (e *DirectEngine) EnableBackgroundAgents(agents map[string]subagent.BackgroundAgentType) {
 	e.bgAgentsEnabled = true
 	e.backgroundAgents = agents
+	if e.bgCancel != nil {
+		e.bgCancel()
+	}
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	e.bgCancel = bgCancel
 	go e.runBackgroundAgents(bgCtx)
@@ -826,14 +830,20 @@ func (e *DirectEngine) Close() {
 		}
 	})
 
-	// Step 2: Close MCP servers (3s timeout).
+	// Step 2: Wait for in-flight background engine work to finish.
+	runWithDeadline(failsafe, 2*time.Second, func() {
+		e.preExecWg.Wait()
+		e.summaryWg.Wait()
+	})
+
+	// Step 3: Close MCP servers (3s timeout).
 	runWithDeadline(failsafe, 3*time.Second, func() {
 		if e.mcpManager != nil {
 			e.mcpManager.CloseAll()
 		}
 	})
 
-	// Step 3: Fire SessionEnd hook (1.5s timeout).
+	// Step 4: Fire SessionEnd hook (1.5s timeout).
 	runWithDeadline(failsafe, 1500*time.Millisecond, func() {
 		if e.hooksRunner != nil {
 			ctx, cancel := context.WithTimeout(failsafe, 1500*time.Millisecond)
@@ -845,7 +855,7 @@ func (e *DirectEngine) Close() {
 		}
 	})
 
-	// Step 4: Save learnings.
+	// Step 5: Save learnings.
 	runWithDeadline(failsafe, 2*time.Second, func() {
 		if e.store != nil {
 			e.saveSessionLearnings(e.store, e.startTime)
@@ -1775,7 +1785,13 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 		// prepended to the next turn's context so the model can skip re-reading
 		// full tool results, saving tokens.
 		if len(queue.Results()) >= 2 {
-			go e.generateToolSummary(queue.Results())
+			summaryCtx := e.ctx
+			results := queue.Results()
+			e.summaryWg.Add(1)
+			go func() {
+				defer e.summaryWg.Done()
+				e.generateToolSummary(summaryCtx, results)
+			}()
 		}
 
 		e.drainSteeredMessages()
@@ -2462,9 +2478,9 @@ func (e *DirectEngine) fireHookAsync(event string, input hooks.HookInput) {
 // generateToolSummary uses the fast-tier model to produce a short summary of
 // what the tool batch accomplished. The summary is injected as a system note
 // so the primary model can skip re-reading verbose tool output on the next turn.
-func (e *DirectEngine) generateToolSummary(results []ToolCallResult) {
+func (e *DirectEngine) generateToolSummary(ctx context.Context, results []ToolCallResult) {
 	fastModel := engine.FastForProvider(e.provider)
-	if fastModel == "" || e.codexMode || e.openrouterMode {
+	if fastModel == "" || e.codexMode || e.openrouterMode || ctx == nil {
 		return
 	}
 
@@ -2478,10 +2494,10 @@ func (e *DirectEngine) generateToolSummary(results []ToolCallResult) {
 		sb.WriteString(fmt.Sprintf("- %s: %s\n", r.Name, content))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	summaryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	resp, err := e.client.Messages.New(ctx, anthropic.MessageNewParams{
+	resp, err := e.client.Messages.New(summaryCtx, anthropic.MessageNewParams{
 		Model:     anthropic.Model(fastModel),
 		MaxTokens: 64,
 		Messages: []anthropic.MessageParam{

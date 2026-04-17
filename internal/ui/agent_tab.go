@@ -7006,6 +7006,16 @@ func createEngineAndRestore(restored []engine.RestoredMessage, model string, eng
 			}
 		}
 
+		// Detect OpenRouter models ("provider/model" slugs) and configure
+		// the openrouter provider. Mirrors createEngineAndSend so /resume
+		// preserves the original provider instead of silently downgrading
+		// the conversation to direct Anthropic Claude.
+		if isOpenRouterModel(model) {
+			cfg.Type = engine.EngineTypeDirect
+			cfg.Provider = engine.ProviderOpenRouter
+			cfg.OpenRouterAPIKey = os.Getenv("OPENROUTER_API_KEY")
+		}
+
 		eng, err := engine.NewEngine(cfg)
 		if err != nil {
 			return engineRestoredMsg{err: fmt.Errorf("failed to create session: %w", err)}

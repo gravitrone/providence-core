@@ -29,6 +29,13 @@ func execHTTPHook(ctx context.Context, cfg HookConfig, input HookInput) (*HookOu
 	if err != nil {
 		return nil, fmt.Errorf("failed to create hook request: %w", err)
 	}
+
+	host := req.URL.Hostname()
+	blocked, reason, _ := IsSSRFTarget(host)
+	if blocked {
+		return nil, fmt.Errorf("ssrf: refused target %s: %s", host, reason)
+	}
+
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)

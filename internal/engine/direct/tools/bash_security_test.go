@@ -139,6 +139,75 @@ func TestCheckBashSecurity_BlocksControlChars(t *testing.T) {
 	assert.Contains(t, check.Reason, "control characters")
 }
 
+func TestCheckBashSecurityRejectsInPlaceEdit(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		allowed bool
+	}{
+		{
+			name:    "sed short flag",
+			command: "sed -i 's/foo/bar/' file.txt",
+		},
+		{
+			name:    "sed short flag without suffix separator",
+			command: "sed -i'' 's/foo/bar/' file.txt",
+		},
+		{
+			name:    "sed bsd empty suffix argument",
+			command: "sed -i '' 's/foo/bar/' file.txt",
+		},
+		{
+			name:    "sed backup suffix",
+			command: "sed -i.bak 's/foo/bar/' file.txt",
+		},
+		{
+			name:    "sed long flag",
+			command: "sed --in-place 's/foo/bar/' file.txt",
+		},
+		{
+			name:    "perl short flag",
+			command: "perl -i -pe 's/foo/bar/' file.txt",
+		},
+		{
+			name:    "perl backup suffix",
+			command: "perl -i.bak -pe 's/foo/bar/' file.txt",
+		},
+		{
+			name:    "awk inplace extension",
+			command: `awk -i inplace '{gsub(/foo/, "bar")}1' file.txt`,
+		},
+		{
+			name:    "compound command",
+			command: "echo ok; sed -i 's/foo/bar/' file.txt",
+		},
+		{
+			name:    "plain sed substitute",
+			command: "sed 's/foo/bar/' file.txt",
+			allowed: true,
+		},
+		{
+			name:    "sed line print",
+			command: "sed -n '10p' file.txt",
+			allowed: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			check := CheckBashSecurity(tc.command)
+			assert.Equal(t, tc.allowed, check.Allowed)
+
+			if tc.allowed {
+				assert.Equal(t, "passed all checks", check.Reason)
+				return
+			}
+
+			assert.Equal(t, "bash: in-place edit (sed -i) not allowed; use Edit or Write tools", check.Reason)
+		})
+	}
+}
+
 func TestCheckBashSecurity_PipelineSplit(t *testing.T) {
 	// zmodload after a pipe should still be caught
 	check := CheckBashSecurity("echo test | zmodload zsh/system")

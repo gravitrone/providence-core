@@ -2,8 +2,10 @@ package tools
 
 import (
 	"context"
+	"sync"
 	"testing"
 
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -12,6 +14,28 @@ import (
 type stubTool struct {
 	name     string
 	readOnly bool
+}
+
+type hookSpy struct {
+	mu     sync.Mutex
+	events []string
+	inputs []hooks.HookInput
+}
+
+func (s *hookSpy) record(event string, input hooks.HookInput) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, event)
+	s.inputs = append(s.inputs, input)
+}
+
+func (s *hookSpy) snapshot() ([]string, []hooks.HookInput) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	events := append([]string(nil), s.events...)
+	inputs := append([]hooks.HookInput(nil), s.inputs...)
+	return events, inputs
 }
 
 func (s *stubTool) Name() string                                           { return s.name }

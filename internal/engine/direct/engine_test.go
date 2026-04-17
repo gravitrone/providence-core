@@ -2,6 +2,8 @@ package direct
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 	"github.com/gravitrone/providence-core/internal/engine/session"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
 	"github.com/stretchr/testify/assert"
@@ -707,6 +710,53 @@ func TestDirectEngineModelAndEngineType(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "claude-sonnet-4-20250514", e.Model())
 	assert.Equal(t, "direct", e.EngineType())
+}
+
+func TestDirectEngine_SetModelFiresModelChangedHook(t *testing.T) {
+	recorder := &hookRecorder{}
+	hookSrv := httptest.NewServer(http.HandlerFunc(recorder.handler))
+	defer hookSrv.Close()
+
+	t.Setenv("PROVIDENCE_HOOKS_ALLOW_LOOPBACK", "1")
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:   engine.EngineTypeDirect,
+		Model:  "claude-sonnet-4-20250514",
+		APIKey: "test-key-not-real",
+		HooksMap: map[string][]engine.HookConfigEntry{
+			hooks.ModelChanged: {{URL: hookSrv.URL, Timeout: 2000}},
+		},
+	})
+	require.NoError(t, err)
+
+	e.SetModel("claude-opus-4-6")
+
+	inputs := recorder.waitForCount(t, 1, 2*time.Second)
+	require.Len(t, inputs, 1)
+	assert.Equal(t, hooks.ModelChanged, inputs[0].Event)
+	assert.Equal(t, "claude-opus-4-6", e.Model())
+}
+
+func TestDirectEngine_CloseFiresSessionClosedHook(t *testing.T) {
+	recorder := &hookRecorder{}
+	hookSrv := httptest.NewServer(http.HandlerFunc(recorder.handler))
+	defer hookSrv.Close()
+
+	t.Setenv("PROVIDENCE_HOOKS_ALLOW_LOOPBACK", "1")
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:   engine.EngineTypeDirect,
+		Model:  "claude-sonnet-4-20250514",
+		APIKey: "test-key-not-real",
+		HooksMap: map[string][]engine.HookConfigEntry{
+			hooks.SessionClosed: {{URL: hookSrv.URL, Timeout: 2000}},
+		},
+	})
+	require.NoError(t, err)
+
+	e.Close()
+
+	inputs := recorder.waitForCount(t, 1, 2*time.Second)
+	require.Len(t, inputs, 1)
+	assert.Equal(t, hooks.SessionClosed, inputs[0].Event)
 }
 
 // --- selectAmbientFrames tests ---

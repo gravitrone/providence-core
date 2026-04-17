@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -118,4 +119,23 @@ func TestReadTruncatesLargeFile(t *testing.T) {
 	assert.False(t, res.IsError)
 	assert.Contains(t, res.Content, "truncated")
 	assert.LessOrEqual(t, len(res.Content), maxReadChars+200) // some slack for truncation msg
+}
+
+func TestRead_FiresFileReadHook(t *testing.T) {
+	rt, _ := newReadTool()
+	spy := &hookSpy{}
+	rt.SetHookEmitter(spy.record)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hooked.txt")
+	require.NoError(t, os.WriteFile(path, []byte("hello\n"), 0o644))
+
+	res := rt.Execute(context.Background(), map[string]any{"file_path": path})
+	require.False(t, res.IsError, res.Content)
+
+	events, inputs := spy.snapshot()
+	require.Equal(t, []string{hooks.FileRead}, events)
+	require.Len(t, inputs, 1)
+	assert.Equal(t, "Read", inputs[0].ToolName)
+	assert.Equal(t, map[string]string{"file_path": path}, inputs[0].ToolInput)
 }

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 )
 
 const (
@@ -32,6 +34,7 @@ var imageExts = map[string]string{
 // ReadTool reads text files with line numbers (cat -n format).
 type ReadTool struct {
 	fileState *FileState
+	emitter   HookEmitter
 
 	cacheMu   sync.Mutex
 	readCache map[string]string // "path:offset:limit" -> content sha256 hex
@@ -43,6 +46,11 @@ func NewReadTool(fs *FileState) *ReadTool {
 		fileState: fs,
 		readCache: make(map[string]string),
 	}
+}
+
+// SetHookEmitter wires lifecycle hook dispatch for successful reads.
+func (r *ReadTool) SetHookEmitter(emitter HookEmitter) {
+	r.emitter = emitter
 }
 
 func (r *ReadTool) Name() string        { return "Read" }
@@ -186,12 +194,14 @@ func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult
 	if cached, ok := r.readCache[cacheKey]; ok && cached == hash {
 		r.cacheMu.Unlock()
 		r.fileState.MarkRead(path)
+		r.emitFileRead(path)
 		return ToolResult{Content: "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current - refer to that instead of re-reading."}
 	}
 	r.readCache[cacheKey] = hash
 	r.cacheMu.Unlock()
 
 	r.fileState.MarkRead(path)
+	r.emitFileRead(path)
 	return ToolResult{Content: content}
 }
 
@@ -205,6 +215,7 @@ func (r *ReadTool) readImage(path, mime string) ToolResult {
 	}
 	encoded := base64.StdEncoding.EncodeToString(data)
 	r.fileState.MarkRead(path)
+	r.emitFileRead(path)
 	return ToolResult{
 		Content: fmt.Sprintf("[image: %s (%d bytes)]", filepath.Base(path), len(data)),
 		Metadata: map[string]any{
@@ -246,6 +257,7 @@ func (r *ReadTool) readPDF(ctx context.Context, path string, offset, limit int) 
 	}
 
 	r.fileState.MarkRead(path)
+	r.emitFileRead(path)
 	return ToolResult{Content: b.String()}
 }
 
@@ -287,7 +299,20 @@ func (r *ReadTool) readNotebook(path string) ToolResult {
 	}
 
 	r.fileState.MarkRead(path)
+	r.emitFileRead(path)
 	return ToolResult{Content: sb.String()}
+}
+
+func (r *ReadTool) emitFileRead(path string) {
+	if r.emitter == nil {
+		return
+	}
+	r.emitter(hooks.FileRead, hooks.HookInput{
+		ToolName: r.Name(),
+		ToolInput: map[string]string{
+			"file_path": path,
+		},
+	})
 }
 
 // isBinaryFile checks if a file looks like binary by reading the first 8KB.

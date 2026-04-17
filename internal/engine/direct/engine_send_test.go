@@ -39,6 +39,39 @@ type sseWriter struct {
 	f http.Flusher
 }
 
+type hookRecorder struct {
+	mu     sync.Mutex
+	inputs []hooks.HookInput
+}
+
+func (r *hookRecorder) handler(w http.ResponseWriter, req *http.Request) {
+	var input hooks.HookInput
+	_ = json.NewDecoder(req.Body).Decode(&input)
+
+	r.mu.Lock()
+	r.inputs = append(r.inputs, input)
+	r.mu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{}`))
+}
+
+func (r *hookRecorder) snapshot() []hooks.HookInput {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]hooks.HookInput(nil), r.inputs...)
+}
+
+func (r *hookRecorder) waitForCount(t *testing.T, want int, timeout time.Duration) []hooks.HookInput {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		return len(r.snapshot()) >= want
+	}, timeout, 20*time.Millisecond)
+
+	return r.snapshot()
+}
+
 func newSSE(w http.ResponseWriter) *sseWriter {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -523,6 +556,141 @@ func TestSend_UserPromptSubmitHookFires(t *testing.T) {
 	assert.GreaterOrEqual(t, hookHits.Load(), int32(1), "UserPromptSubmit hook should fire at least once")
 	if v := gotInput.Load(); v != nil {
 		assert.Equal(t, "look at this", v.(string))
+	}
+}
+
+func TestSend_SessionStartedHookFires(t *testing.T) {
+	recorder := &hookRecorder{}
+	hookSrv := httptest.NewServer(http.HandlerFunc(recorder.handler))
+	defer hookSrv.Close()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeTextTurn(w, "done")
+	}))
+	defer apiSrv.Close()
+
+	t.Setenv("PROVIDENCE_MAX_RETRIES", "1")
+	t.Setenv("PROVIDENCE_HOOKS_ALLOW_LOOPBACK", "1")
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:   engine.EngineTypeDirect,
+		Model:  "claude-sonnet-4-20250514",
+		APIKey: "test-key-not-real",
+		HooksMap: map[string][]engine.HookConfigEntry{
+			hooks.SessionStarted: {{URL: hookSrv.URL, Timeout: 2000}},
+		},
+	})
+	require.NoError(t, err)
+	e.client = anthropic.NewClient(
+		option.WithAPIKey("k"),
+		option.WithBaseURL(apiSrv.URL),
+		option.WithMaxRetries(0),
+	)
+
+	require.NoError(t, e.Send("start session"))
+	_, _ = waitForResult(t, e, 5*time.Second)
+
+	inputs := recorder.waitForCount(t, 1, 2*time.Second)
+	require.Len(t, inputs, 1)
+	assert.Equal(t, hooks.SessionStarted, inputs[0].Event)
+}
+
+func TestSend_TurnStartedHookFires(t *testing.T) {
+	recorder := &hookRecorder{}
+	hookSrv := httptest.NewServer(http.HandlerFunc(recorder.handler))
+	defer hookSrv.Close()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeTextTurn(w, "done")
+	}))
+	defer apiSrv.Close()
+
+	t.Setenv("PROVIDENCE_MAX_RETRIES", "1")
+	t.Setenv("PROVIDENCE_HOOKS_ALLOW_LOOPBACK", "1")
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:   engine.EngineTypeDirect,
+		Model:  "claude-sonnet-4-20250514",
+		APIKey: "test-key-not-real",
+		HooksMap: map[string][]engine.HookConfigEntry{
+			hooks.TurnStarted: {{URL: hookSrv.URL, Timeout: 2000}},
+		},
+	})
+	require.NoError(t, err)
+	e.client = anthropic.NewClient(
+		option.WithAPIKey("k"),
+		option.WithBaseURL(apiSrv.URL),
+		option.WithMaxRetries(0),
+	)
+
+	require.NoError(t, e.Send("turn start"))
+	_, _ = waitForResult(t, e, 5*time.Second)
+
+	inputs := recorder.waitForCount(t, 1, 2*time.Second)
+	require.Len(t, inputs, 1)
+	assert.Equal(t, hooks.TurnStarted, inputs[0].Event)
+	assert.Equal(t, "turn start", inputs[0].ToolInput)
+}
+
+func TestSend_TurnCompletedHookFires(t *testing.T) {
+	tests := []struct {
+		name   string
+		server func(w http.ResponseWriter, r *http.Request)
+		status string
+	}{
+		{
+			name: "success",
+			server: func(w http.ResponseWriter, r *http.Request) {
+				writeTextTurn(w, "done")
+			},
+			status: "success",
+		},
+		{
+			name: "error",
+			server: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`))
+			},
+			status: "error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := &hookRecorder{}
+			hookSrv := httptest.NewServer(http.HandlerFunc(recorder.handler))
+			defer hookSrv.Close()
+
+			apiSrv := httptest.NewServer(http.HandlerFunc(tt.server))
+			defer apiSrv.Close()
+
+			t.Setenv("PROVIDENCE_MAX_RETRIES", "1")
+			t.Setenv("PROVIDENCE_HOOKS_ALLOW_LOOPBACK", "1")
+			e, err := NewDirectEngine(engine.EngineConfig{
+				Type:   engine.EngineTypeDirect,
+				Model:  "claude-sonnet-4-20250514",
+				APIKey: "test-key-not-real",
+				HooksMap: map[string][]engine.HookConfigEntry{
+					hooks.TurnCompleted: {{URL: hookSrv.URL, Timeout: 2000}},
+				},
+			})
+			require.NoError(t, err)
+			e.client = anthropic.NewClient(
+				option.WithAPIKey("k"),
+				option.WithBaseURL(apiSrv.URL),
+				option.WithMaxRetries(0),
+			)
+
+			require.NoError(t, e.Send("turn complete"))
+			_, _ = waitForResult(t, e, 5*time.Second)
+
+			inputs := recorder.waitForCount(t, 1, 2*time.Second)
+			require.Len(t, inputs, 1)
+			assert.Equal(t, hooks.TurnCompleted, inputs[0].Event)
+
+			payload, ok := inputs[0].ToolInput.(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, tt.status, payload["status"])
+		})
 	}
 }
 

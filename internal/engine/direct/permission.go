@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 	"github.com/gravitrone/providence-core/internal/engine/permissions"
 )
 
@@ -26,6 +27,7 @@ type PermissionHandler struct {
 	denyRules  []permissions.Rule
 	askRules   []permissions.Rule
 	mode       string // "", "auto", "deny", "plan"
+	emitter    tools.HookEmitter
 }
 
 // NewPermissionHandler creates a permission handler with default allow rules
@@ -79,19 +81,35 @@ func (p *PermissionHandler) SetMode(mode string) {
 	p.mode = mode
 }
 
-// NeedsPermission returns true if the tool requires explicit user approval
-// according to the 7-step permission chain.
-func (p *PermissionHandler) NeedsPermission(t tools.Tool, input map[string]any) bool {
+// SetHookEmitter wires lifecycle hook dispatch for permission outcomes.
+func (p *PermissionHandler) SetHookEmitter(emitter tools.HookEmitter) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.emitter = emitter
+}
+
+// Check evaluates the permission chain for the given tool invocation.
+func (p *PermissionHandler) Check(t tools.Tool, input map[string]any) *permissions.Result {
 	p.mu.Lock()
 	mode := p.mode
+	emitter := p.emitter
 	p.mu.Unlock()
 
-	// Short-circuit for override modes.
 	switch mode {
 	case "auto":
-		return false // auto-approve everything
+		return &permissions.Result{
+			Decision: permissions.Allow,
+			Reason:   "auto mode",
+			ToolName: t.Name(),
+		}
 	case "deny":
-		return true // always ask (caller will deny)
+		result := &permissions.Result{
+			Decision: permissions.Deny,
+			Reason:   "deny mode",
+			ToolName: t.Name(),
+		}
+		emitPermissionHook(emitter, hooks.PermissionDenied, t.Name(), input, result.Reason)
+		return result
 	}
 
 	permMode := permissions.ModeDefault
@@ -106,6 +124,19 @@ func (p *PermissionHandler) NeedsPermission(t tools.Tool, input map[string]any) 
 		AlwaysAskRules:   p.askRules,
 	}
 	result := permissions.CheckPermission(ctx, t.Name(), input)
+	if result != nil && result.Decision == permissions.Deny {
+		emitPermissionHook(emitter, hooks.PermissionDenied, t.Name(), input, result.Reason)
+	}
+	return result
+}
+
+// NeedsPermission returns true if the tool requires explicit user approval
+// according to the 7-step permission chain.
+func (p *PermissionHandler) NeedsPermission(t tools.Tool, input map[string]any) bool {
+	result := p.Check(t, input)
+	if result == nil {
+		return false
+	}
 	return result.Decision == permissions.Ask
 }
 
@@ -150,6 +181,12 @@ func (p *PermissionHandler) RequestPermission(ctx context.Context, toolCallID st
 
 	select {
 	case approved := <-ch:
+		if approved {
+			p.mu.Lock()
+			emitter := p.emitter
+			p.mu.Unlock()
+			emitPermissionHook(emitter, hooks.PermissionGranted, toolName, toolInput, "approved by user")
+		}
 		return approved, nil
 	case <-ctx.Done():
 		return false, ctx.Err()
@@ -169,4 +206,17 @@ func (p *PermissionHandler) Respond(questionID string, approved bool) {
 		default:
 		}
 	}
+}
+
+func emitPermissionHook(emitter tools.HookEmitter, event string, toolName string, toolInput any, reason string) {
+	if emitter == nil {
+		return
+	}
+	emitter(event, hooks.HookInput{
+		ToolName: toolName,
+		ToolInput: map[string]any{
+			"input":  toolInput,
+			"reason": reason,
+		},
+	})
 }

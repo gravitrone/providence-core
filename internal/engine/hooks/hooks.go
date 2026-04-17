@@ -24,9 +24,13 @@ const (
 	Stop                 = "Stop"
 	SessionStart         = "SessionStart"
 	SessionEnd           = "SessionEnd"
+	SessionStarted       = "SessionStarted"
+	SessionClosed        = "SessionClosed"
 	PreCompact           = "PreCompact"
 	PostCompact          = "PostCompact"
 	PermissionRequest    = "PermissionRequest"
+	PermissionDenied     = "PermissionDenied"
+	PermissionGranted    = "PermissionGranted"
 	SubagentStart        = "SubagentStart"
 	SubagentStop         = "SubagentStop"
 	TaskCreated          = "TaskCreated"
@@ -39,6 +43,13 @@ const (
 	WorktreeRemove       = "WorktreeRemove"
 	DashboardPanelUpdate = "DashboardPanelUpdate"
 	PostSampling         = "PostSampling"
+	CwdChanged           = "CwdChanged"
+	FileChanged          = "FileChanged"
+	FileRead             = "FileRead"
+	HookExecuted         = "HookExecuted"
+	TurnStarted          = "TurnStarted"
+	TurnCompleted        = "TurnCompleted"
+	ModelChanged         = "ModelChanged"
 )
 
 // --- Types ---
@@ -104,6 +115,12 @@ func (r *Runner) HasHooks(event string) bool {
 // Run executes all hooks for an event sequentially, returning the first
 // non-nil output or error. If no hooks produce output, returns nil.
 func (r *Runner) Run(ctx context.Context, event string, input HookInput) (*HookOutput, error) {
+	out, err := r.run(ctx, event, input)
+	r.runHookExecuted(ctx, event, input)
+	return out, err
+}
+
+func (r *Runner) run(ctx context.Context, event string, input HookInput) (*HookOutput, error) {
 	configs, ok := r.hooks[event]
 	if !ok {
 		return nil, nil
@@ -138,14 +155,18 @@ func (r *Runner) RunAsync(ctx context.Context, event string, input HookInput) {
 		input.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	var wg sync.WaitGroup
-	for _, cfg := range configs {
-		wg.Add(1)
-		go func(c HookConfig) {
-			defer wg.Done()
-			_, _ = r.execOne(ctx, c, input)
-		}(cfg)
-	}
+	go func() {
+		var wg sync.WaitGroup
+		for _, cfg := range configs {
+			wg.Add(1)
+			go func(c HookConfig) {
+				defer wg.Done()
+				_, _ = r.execOne(ctx, c, input)
+			}(cfg)
+		}
+		wg.Wait()
+		r.runHookExecuted(ctx, event, input)
+	}()
 }
 
 // execOne dispatches to the appropriate executor based on config.
@@ -157,4 +178,19 @@ func (r *Runner) execOne(ctx context.Context, cfg HookConfig, input HookInput) (
 		return execHTTPHook(ctx, cfg, input)
 	}
 	return nil, nil
+}
+
+func (r *Runner) runHookExecuted(ctx context.Context, event string, input HookInput) {
+	if event == HookExecuted || !r.HasHooks(event) || !r.HasHooks(HookExecuted) {
+		return
+	}
+
+	_, _ = r.run(ctx, HookExecuted, HookInput{
+		SessionID: input.SessionID,
+		ToolName:  event,
+		ToolInput: map[string]any{
+			"trigger_event": event,
+			"trigger_input": input,
+		},
+	})
 }

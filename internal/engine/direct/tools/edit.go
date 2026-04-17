@@ -5,16 +5,24 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 )
 
 // EditTool performs string replacements in files with stale-write detection.
 type EditTool struct {
-	fs *FileState
+	fs      *FileState
+	emitter HookEmitter
 }
 
 // NewEditTool creates an EditTool backed by the given FileState.
 func NewEditTool(fs *FileState) *EditTool {
 	return &EditTool{fs: fs}
+}
+
+// SetHookEmitter wires lifecycle hook dispatch for successful edits.
+func (e *EditTool) SetHookEmitter(emitter HookEmitter) {
+	e.emitter = emitter
 }
 
 func (e *EditTool) Name() string        { return "Edit" }
@@ -157,9 +165,22 @@ func (e *EditTool) Execute(_ context.Context, input map[string]any) ToolResult {
 
 	// Update file state so subsequent edits see this write.
 	e.fs.MarkRead(path)
+	e.emitFileChanged(path)
 
 	if replaceAll {
 		return ToolResult{Content: fmt.Sprintf("Replaced %d occurrences in %s", count, path)}
 	}
 	return ToolResult{Content: fmt.Sprintf("Replaced 1 occurrence in %s", path)}
+}
+
+func (e *EditTool) emitFileChanged(path string) {
+	if e.emitter == nil {
+		return
+	}
+	e.emitter(hooks.FileChanged, hooks.HookInput{
+		ToolName: e.Name(),
+		ToolInput: map[string]string{
+			"file_path": path,
+		},
+	})
 }

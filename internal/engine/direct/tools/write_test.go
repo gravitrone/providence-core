@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -103,4 +104,58 @@ func TestWrite_EmptyContent(t *testing.T) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "", string(data))
+}
+
+func TestFileChangedHookFiresOnWriteAndEdit(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T, spy *hookSpy)
+	}{
+		{
+			name: "write",
+			run: func(t *testing.T, spy *hookSpy) {
+				dir := t.TempDir()
+				fs := NewFileState()
+				w := NewWriteTool(fs)
+				w.SetHookEmitter(spy.record)
+
+				path := filepath.Join(dir, "created.txt")
+				res := w.Execute(context.Background(), map[string]any{
+					"file_path": path,
+					"content":   "created",
+				})
+				require.False(t, res.IsError, res.Content)
+			},
+		},
+		{
+			name: "edit",
+			run: func(t *testing.T, spy *hookSpy) {
+				path, fs := setupEditFile(t, "before")
+				e := NewEditTool(fs)
+				e.SetHookEmitter(spy.record)
+
+				res := e.Execute(context.Background(), map[string]any{
+					"file_path":  path,
+					"old_string": "before",
+					"new_string": "after",
+				})
+				require.False(t, res.IsError, res.Content)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spy := &hookSpy{}
+			tt.run(t, spy)
+
+			events, inputs := spy.snapshot()
+			require.Equal(t, []string{hooks.FileChanged}, events)
+			require.Len(t, inputs, 1)
+			assert.Contains(t, []string{"Write", "Edit"}, inputs[0].ToolName)
+			payload, ok := inputs[0].ToolInput.(map[string]string)
+			require.True(t, ok)
+			assert.NotEmpty(t, payload["file_path"])
+		})
+	}
 }

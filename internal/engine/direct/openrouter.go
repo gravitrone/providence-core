@@ -278,7 +278,7 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 		req.Header.Set("HTTP-Referer", "https://github.com/gravitrone/providence-core")
 		req.Header.Set("X-Title", "Providence")
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := providerHTTPClient.Do(req)
 		if err != nil {
 			e.emitError(fmt.Errorf("openrouter request: %w", err))
 			return

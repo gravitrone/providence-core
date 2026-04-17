@@ -32,6 +32,7 @@ type Session struct {
 	status    engine.SessionStatus
 	events    chan engine.ParsedEvent
 	mu        sync.Mutex
+	closeOnce sync.Once
 }
 
 // NewSession spawns a Claude Code subprocess in headless mode.
@@ -109,6 +110,8 @@ func NewSession(systemPrompt string, allowedTools []string, model string) (*Sess
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start claude: %w", err)
 	}
+
+	go io.Copy(io.Discard, stderr)
 
 	s := &Session{
 		cmd:    cmd,
@@ -268,9 +271,27 @@ func (s *Session) Cancel() {
 	s.mu.Unlock()
 }
 
-// Close closes stdin, triggering a clean process exit after the current run completes.
+// Close closes stdin, terminates the subprocess, and waits for it to exit.
 func (s *Session) Close() {
-	_ = s.stdin.Close()
+	s.closeOnce.Do(func() {
+		if s.stdin != nil {
+			_ = s.stdin.Close()
+		}
+
+		if s.cmd == nil || s.cmd.Process == nil || s.cmd.ProcessState != nil {
+			return
+		}
+
+		process := s.cmd.Process
+		_ = process.Signal(syscall.SIGTERM)
+
+		killTimer := time.AfterFunc(5*time.Second, func() {
+			_ = process.Kill()
+		})
+		defer killTimer.Stop()
+
+		_ = s.cmd.Wait()
+	})
 }
 
 // Status returns the current session status.

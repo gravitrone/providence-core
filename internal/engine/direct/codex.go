@@ -224,7 +224,7 @@ func (e *DirectEngine) codexAgentLoop(ctx context.Context) {
 			req.Header.Set("X-OpenAI-Account-ID", tokens.AccountID)
 		}
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := providerHTTPClient.Do(req)
 		if err != nil {
 			e.emitError(fmt.Errorf("codex request: %w", err))
 			return

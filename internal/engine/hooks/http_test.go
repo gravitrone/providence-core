@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +30,7 @@ func TestHTTPHookSuccess(t *testing.T) {
 		_, _ = fmt.Fprint(w, `{"decision":"approve","system_message":"continue"}`)
 	}))
 	defer srv.Close()
+	allowHookLookup(t, srv.URL, "1.1.1.1")
 
 	out, err := execHTTPHook(context.Background(), HookConfig{
 		URL:     srv.URL,
@@ -48,6 +52,7 @@ func TestHTTPHookServerError(t *testing.T) {
 		_, _ = fmt.Fprint(w, "internal hook failure")
 	}))
 	defer srv.Close()
+	allowHookLookup(t, srv.URL, "1.1.1.1")
 
 	out, err := execHTTPHook(context.Background(), HookConfig{
 		URL:     srv.URL,
@@ -67,6 +72,7 @@ func TestHTTPHookEmptyBody(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
+	allowHookLookup(t, srv.URL, "1.1.1.1")
 
 	out, err := execHTTPHook(context.Background(), HookConfig{
 		URL:     srv.URL,
@@ -77,4 +83,83 @@ func TestHTTPHookEmptyBody(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Nil(t, out)
+}
+
+func TestHTTPHookRefusesSSRFTargetBeforeRequest(t *testing.T) {
+	originalLookupIP := lookupIP
+	lookupIP = net.LookupIP
+	t.Cleanup(func() {
+		lookupIP = originalLookupIP
+	})
+
+	var hits atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	parsedURL, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	host := parsedURL.Hostname()
+
+	out, err := execHTTPHook(context.Background(), HookConfig{
+		URL:     srv.URL,
+		Timeout: time.Second,
+	}, HookInput{
+		Event: PreToolUse,
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, out)
+	assert.Equal(t, int32(0), hits.Load())
+	assert.Equal(t, fmt.Sprintf("ssrf: refused target %s: resolved to loopback address %s", host, host), err.Error())
+}
+
+func TestHTTPHookRefusesTargetWhenDNSResolutionFails(t *testing.T) {
+	originalLookupIP := lookupIP
+	lookupIP = func(host string) ([]net.IP, error) {
+		return nil, fmt.Errorf("lookup %s: no such host", host)
+	}
+	t.Cleanup(func() {
+		lookupIP = originalLookupIP
+	})
+
+	out, err := execHTTPHook(context.Background(), HookConfig{
+		URL:     "http://missing.invalid/hook",
+		Timeout: time.Second,
+	}, HookInput{
+		Event: PreToolUse,
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, out)
+	assert.Equal(t, "ssrf: refused target missing.invalid: dns resolution failed", err.Error())
+}
+
+func allowHookLookup(t *testing.T, rawURL string, ips ...string) {
+	t.Helper()
+
+	parsedURL, err := url.Parse(rawURL)
+	require.NoError(t, err)
+
+	host := parsedURL.Hostname()
+	allowedIPs := make([]net.IP, 0, len(ips))
+	for _, rawIP := range ips {
+		ip := net.ParseIP(rawIP)
+		require.NotNil(t, ip)
+		allowedIPs = append(allowedIPs, ip)
+	}
+
+	originalLookupIP := lookupIP
+	lookupIP = func(lookupHost string) ([]net.IP, error) {
+		if lookupHost == host {
+			return allowedIPs, nil
+		}
+		return originalLookupIP(lookupHost)
+	}
+	t.Cleanup(func() {
+		lookupIP = originalLookupIP
+	})
 }

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,7 +59,7 @@ type OutputEvent struct {
 	PermissionMode string   `json:"permission_mode,omitempty"`
 
 	// Assistant fields.
-	Message *engine.AssistantMsg `json:"message,omitempty"`
+	Message *headlessAssistantMsg `json:"message,omitempty"`
 
 	// Stream event fields.
 	Event *engine.StreamEventData `json:"event,omitempty"`
@@ -461,7 +463,7 @@ func (s *Server) translateEvent(ev engine.ParsedEvent) {
 		if ae, ok := ev.Data.(*engine.AssistantEvent); ok {
 			s.emit(OutputEvent{
 				Type:    TypeAssistant,
-				Message: &ae.Message,
+				Message: s.headlessAssistantMessage(ae.Message),
 			})
 		}
 
@@ -586,6 +588,166 @@ func (s *Server) translateEvent(ev engine.ParsedEvent) {
 			})
 		}
 	}
+}
+
+func (s *Server) headlessAssistantMessage(msg engine.AssistantMsg) *headlessAssistantMsg {
+	content := make([]headlessContentPart, 0, len(msg.Content))
+	cwd := s.summaryCwd()
+	for _, part := range msg.Content {
+		headlessPart := headlessContentPart{
+			Type:  part.Type,
+			Text:  part.Text,
+			ID:    part.ID,
+			Name:  part.Name,
+			Input: part.Input,
+		}
+		if part.Type == "tool_use" {
+			headlessPart.Summary = summarizeToolCall(part.Name, part.Input, cwd)
+		}
+		content = append(content, headlessPart)
+	}
+	return &headlessAssistantMsg{Content: content}
+}
+
+func (s *Server) summaryCwd() string {
+	if s.cwd != "" {
+		return s.cwd
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
+}
+
+func summarizeToolCall(toolName string, input any, cwd string) string {
+	inputMap, ok := input.(map[string]any)
+	if !ok {
+		return clampSummary(toolName + " call")
+	}
+
+	var summary string
+	switch toolName {
+	case "Bash":
+		command := summaryString(inputMap, "command")
+		if command != "" {
+			summary = "Running: " + truncateSummaryValue(command, 60)
+		}
+	case "Read":
+		filePath := summaryPath(inputMap, "file_path", cwd)
+		if filePath != "" {
+			summary = "Reading " + filePath
+		}
+	case "Write":
+		filePath := summaryPath(inputMap, "file_path", cwd)
+		if filePath != "" {
+			summary = "Writing " + filePath
+		}
+	case "Edit":
+		filePath := summaryPath(inputMap, "file_path", cwd)
+		if filePath != "" {
+			summary = "Editing " + filePath
+		}
+	case "Grep":
+		pattern := summaryQuotedValue(inputMap, "pattern")
+		if pattern != "" {
+			searchPath := summaryPath(inputMap, "path", cwd)
+			if searchPath == "" || searchPath == "." {
+				searchPath = "workspace"
+			}
+			summary = "Searching for " + pattern + " in " + searchPath
+		}
+	case "Glob":
+		pattern := summaryString(inputMap, "pattern")
+		if pattern != "" {
+			summary = "Finding files matching " + pattern
+		}
+	case "WebFetch":
+		url := summaryString(inputMap, "url")
+		if url != "" {
+			summary = "Fetching " + url
+		}
+	case "WebSearch":
+		query := summaryString(inputMap, "query")
+		if query != "" {
+			summary = "Searching web for '" + truncateSummaryValue(escapeSingleQuotes(query), 60) + "'"
+		}
+	}
+
+	if summary == "" {
+		summary = toolName + " call"
+	}
+	return clampSummary(summary)
+}
+
+func summaryString(input map[string]any, key string) string {
+	value, ok := input[key]
+	if !ok {
+		return ""
+	}
+	str, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(str)
+}
+
+func summaryQuotedValue(input map[string]any, key string) string {
+	value := summaryString(input, key)
+	if value == "" {
+		return ""
+	}
+	return "'" + escapeSingleQuotes(value) + "'"
+}
+
+func summaryPath(input map[string]any, key, cwd string) string {
+	path := summaryString(input, key)
+	if path == "" {
+		return ""
+	}
+
+	cleanPath := filepath.Clean(path)
+	if cwd == "" || !filepath.IsAbs(cleanPath) {
+		return cleanPath
+	}
+
+	relPath, err := filepath.Rel(cwd, cleanPath)
+	if err != nil {
+		return cleanPath
+	}
+	if relPath == "." || relPath == "" {
+		return filepath.Base(cleanPath)
+	}
+	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
+		return cleanPath
+	}
+	return relPath
+}
+
+func truncateSummaryValue(value string, limit int) string {
+	if limit <= 3 {
+		return clampSummary(value)
+	}
+
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit-3]) + "..."
+}
+
+func clampSummary(summary string) string {
+	const maxSummaryLen = 80
+
+	runes := []rune(strings.TrimSpace(summary))
+	if len(runes) <= maxSummaryLen {
+		return string(runes)
+	}
+	return string(runes[:maxSummaryLen-3]) + "..."
+}
+
+func escapeSingleQuotes(value string) string {
+	return strings.ReplaceAll(value, "'", "\\'")
 }
 
 // --- State Tracking ---

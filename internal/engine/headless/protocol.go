@@ -113,3 +113,16 @@ type CompactEvent struct {
 	TokensBefore int    `json:"tokens_before,omitempty"`
 	TokensAfter  int    `json:"tokens_after,omitempty"`
 }
+
+type headlessAssistantMsg struct {
+	Content []headlessContentPart `json:"content"`
+}
+
+type headlessContentPart struct {
+	Type    string `json:"type"`
+	Text    string `json:"text,omitempty"`
+	ID      string `json:"id,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Input   any    `json:"input,omitempty"`
+	Summary string `json:"summary,omitempty"`
+}

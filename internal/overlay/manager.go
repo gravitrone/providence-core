@@ -75,10 +75,11 @@ func (c Config) spawnEnabled() bool {
 // Manager coordinates the overlay process lifecycle: spawning the subprocess,
 // running the UDS server, and tracking connection state.
 type Manager struct {
-	config  Config
-	server  *Server
-	cmd     *exec.Cmd
-	cmdPID  int // captured at start, safe to read after start completes
+	config    Config
+	server    *Server
+	srvCancel context.CancelFunc
+	cmd       *exec.Cmd
+	cmdPID    int // captured at start, safe to read after start completes
 	// cmdDone is closed by the Start watch goroutine once cmd.Wait() returns.
 	// Stop waits on this instead of calling cmd.Wait() itself to avoid a data race.
 	cmdDone chan struct{}
@@ -87,8 +88,8 @@ type Manager struct {
 	logger  *slog.Logger
 
 	// helloAt records when the last successful hello was received.
-	helloAt   time.Time
-	helloMu   sync.Mutex
+	helloAt time.Time
+	helloMu sync.Mutex
 
 	// onStart is invoked once after the overlay process has sent its Hello
 	// and the bridge has replied with Welcome.
@@ -150,6 +151,9 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 		return fmt.Errorf("overlay: start server: %w", err)
 	}
 	m.server = srv
+	if setter, ok := handler.(interface{ SetServer(*Server) }); ok {
+		setter.SetServer(srv)
+	}
 
 	// Start accepting connections in background.
 	srvCtx, srvCancel := context.WithCancel(ctx)
@@ -182,6 +186,7 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 	// hang when spawned from providence on some macOS versions.
 	if !m.config.spawnEnabled() {
 		m.logger.Info("overlay: server running, spawn disabled - launch overlay manually")
+		m.srvCancel = srvCancel
 		m.setStateSafe(StateRunning)
 		if m.onStart != nil {
 			m.onStart()
@@ -284,8 +289,7 @@ func (m *Manager) Start(ctx context.Context, handler ServerHandler) error {
 		}
 	}
 
-	// Prevent the cancel from leaking after we're done with startup.
-	_ = srvCancel // the serve goroutine will be cancelled on Stop or ctx done
+	m.srvCancel = srvCancel
 
 	m.setStateSafe(StateRunning)
 	m.logger.Info("overlay: running", "pid", m.cmdPID)
@@ -346,8 +350,13 @@ func (m *Manager) Stop(ctx context.Context) error {
 		m.stateMu.Unlock()
 		return fmt.Errorf("overlay: cannot stop in state %s", state)
 	}
+	srvCancel := m.srvCancel
+	m.srvCancel = nil
 	m.state = StateStopping
 	m.stateMu.Unlock()
+	if srvCancel != nil {
+		srvCancel()
+	}
 
 	// Send bye.
 	if m.server != nil {

@@ -74,6 +74,8 @@ type Bridge struct {
 
 	// engineMu guards late-wire of engine via SetEngine.
 	engineMu sync.RWMutex
+	// serverMu guards late-wire of server via SetServer.
+	serverMu sync.RWMutex
 
 	// TUI-side runtime prefs forwarded to the overlay in Welcome. Now reduced
 	// to TTS-only after the ambient rewire dropped position/exclusion/UI fields.
@@ -143,7 +145,11 @@ func (b *Bridge) InjectionMode() string { return b.injection }
 
 // SetServer wires a server after construction (used when the server is
 // created by the manager at Start time).
-func (b *Bridge) SetServer(srv *Server) { b.server = srv }
+func (b *Bridge) SetServer(srv *Server) {
+	b.serverMu.Lock()
+	defer b.serverMu.Unlock()
+	b.server = srv
+}
 
 // SetSessionID sets the session ID to include in Welcome messages.
 func (b *Bridge) SetSessionID(id string) { b.sessionID = id }
@@ -155,6 +161,20 @@ func (b *Bridge) SetEngine(eng Engine) {
 	b.engineMu.Lock()
 	defer b.engineMu.Unlock()
 	b.engine = eng
+}
+
+// getServer returns the current server under the read lock.
+func (b *Bridge) getServer() *Server {
+	b.serverMu.RLock()
+	defer b.serverMu.RUnlock()
+	return b.server
+}
+
+// getEngine returns the current engine under the read lock.
+func (b *Bridge) getEngine() Engine {
+	b.engineMu.RLock()
+	defer b.engineMu.RUnlock()
+	return b.engine
 }
 
 // SetRuntimePrefs records TUI-side preferences advertised to the overlay in
@@ -233,10 +253,11 @@ func (b *Bridge) RingChangedSinceLastAttach() bool {
 // Start subscribes to the session bus and forwards events to connected
 // overlays. It runs until ctx is cancelled.
 func (b *Bridge) Start(ctx context.Context) {
-	if b.engine == nil {
+	eng := b.getEngine()
+	if eng == nil {
 		return
 	}
-	bus := b.engine.SessionBus()
+	bus := eng.SessionBus()
 	if bus == nil {
 		return
 	}
@@ -287,9 +308,9 @@ func (b *Bridge) OnHello(c *client, h Hello) Welcome {
 		Timestamp: time.Now(),
 	}
 
-	if b.engine != nil {
-		w.Engine = b.engine.EngineType()
-		w.Model = b.engine.Model()
+	if eng := b.getEngine(); eng != nil {
+		w.Engine = eng.EngineType()
+		w.Model = eng.Model()
 	}
 	if b.ember != nil {
 		w.EmberActive = b.ember.ShouldTick()
@@ -337,14 +358,14 @@ func (b *Bridge) OnContextUpdate(_ *client, u ContextUpdate) error {
 	// budget_exceeded reason so the overlay can show a muted indicator.
 	if b.tracker != nil && b.tracker.BudgetExceeded() {
 		b.warnBudgetOncePerDay()
-		if b.server != nil {
+		if srv := b.getServer(); srv != nil {
 			ack := ContextAck{
 				Tokens: 0,
 				Reason: "budget_exceeded",
 				Mode:   mode,
 				Total:  b.tracker.Total(),
 			}
-			if err := b.server.Broadcast(TypeContextAck, ack); err != nil {
+			if err := srv.Broadcast(TypeContextAck, ack); err != nil {
 				b.logger.Debug("overlay: broadcast context_ack failed", "error", err)
 			}
 		}
@@ -381,14 +402,14 @@ func (b *Bridge) OnContextUpdate(_ *client, u ContextUpdate) error {
 	// the contextInjector.Screenshots/Transcript path. Keep the field on the
 	// struct for backward-compat config but stop firing direct sends.
 
-	if b.server != nil {
+	if srv := b.getServer(); srv != nil {
 		ack := ContextAck{
 			Tokens: tokens,
 			Reason: u.ChangeKind,
 			Mode:   mode,
 			Total:  b.tracker.Total(),
 		}
-		if err := b.server.Broadcast(TypeContextAck, ack); err != nil {
+		if err := srv.Broadcast(TypeContextAck, ack); err != nil {
 			b.logger.Debug("overlay: broadcast context_ack failed", "error", err)
 		}
 	}
@@ -419,11 +440,12 @@ func (b *Bridge) warnBudgetOncePerDay() {
 
 // OnUserQuery forwards the user's overlay query to the engine.
 func (b *Bridge) OnUserQuery(_ *client, q UserQuery) error {
-	if b.engine == nil {
+	eng := b.getEngine()
+	if eng == nil {
 		return fmt.Errorf("overlay: no engine available")
 	}
 	b.logger.Debug("overlay: user query", "source", q.Source, "text_len", len(q.Text))
-	return b.engine.Send(q.Text)
+	return eng.Send(q.Text)
 }
 
 // OnEmberRequest handles requests to change the ember autonomous mode state.
@@ -445,8 +467,8 @@ func (b *Bridge) OnEmberRequest(_ *client, r EmberRequest) error {
 	}
 
 	// Broadcast the updated state to all connected clients.
-	if b.server != nil {
-		_ = b.server.Broadcast(TypeEmberState, EmberState{
+	if srv := b.getServer(); srv != nil {
+		_ = srv.Broadcast(TypeEmberState, EmberState{
 			Active: b.ember.Active,
 			Paused: b.ember.Paused,
 		})
@@ -456,10 +478,11 @@ func (b *Bridge) OnEmberRequest(_ *client, r EmberRequest) error {
 
 // OnInterrupt forwards an interrupt signal to the engine.
 func (b *Bridge) OnInterrupt(_ *client) error {
-	if b.engine == nil {
+	eng := b.getEngine()
+	if eng == nil {
 		return fmt.Errorf("overlay: no engine available")
 	}
-	b.engine.Interrupt()
+	eng.Interrupt()
 	return nil
 }
 
@@ -479,7 +502,8 @@ func (b *Bridge) OnDisconnect(_ *client) {
 // forwardSessionEvent serialises a session.Event and broadcasts it to
 // all connected overlay clients.
 func (b *Bridge) forwardSessionEvent(ev session.Event) {
-	if b.server == nil {
+	srv := b.getServer()
+	if srv == nil {
 		return
 	}
 	rawData, err := json.Marshal(ev.Data)
@@ -491,7 +515,7 @@ func (b *Bridge) forwardSessionEvent(ev session.Event) {
 		Type: ev.Type,
 		Data: rawData,
 	}
-	if err := b.server.Broadcast(TypeSessionEvent, se); err != nil {
+	if err := srv.Broadcast(TypeSessionEvent, se); err != nil {
 		b.logger.Debug("overlay: broadcast session event failed", "error", err)
 	}
 }
@@ -508,4 +532,3 @@ func formatTranscriptReminder(transcript string) string {
 		transcript,
 	)
 }
-

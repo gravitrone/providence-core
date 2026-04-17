@@ -82,6 +82,12 @@ func isBashCommandReadOnly(cmd string) bool {
 		base = base[idx+1:]
 	}
 
+	// Compound operators and redirects can introduce writes or multiple
+	// commands, even when the base command itself is read-only.
+	if strings.ContainsAny(cmd, "|;&><") {
+		return false
+	}
+
 	readOnlyCmds := map[string]bool{
 		"cat": true, "head": true, "tail": true, "wc": true,
 		"ls": true, "ll": true, "echo": true, "printf": true,
@@ -106,11 +112,6 @@ func isBashCommandReadOnly(cmd string) bool {
 
 	if safe, ok := readOnlyCmds[base]; ok {
 		return safe
-	}
-
-	// If the command contains pipe/redirect/semicolon/&&, it's complex - not safe.
-	if strings.ContainsAny(cmd, "|;&>") {
-		return false
 	}
 
 	return false
@@ -169,6 +170,7 @@ func (q *StreamingToolQueue) Submit(ctx context.Context, call ToolCall) {
 		q.turnCtx, q.turnCancel = context.WithCancel(ctx)
 	}
 	if q.siblingCtx == nil {
+		//nolint:gosec // q.Wait/q.Cancel release this queue-owned cancel func.
 		q.siblingCtx, q.siblingCancel = context.WithCancel(q.turnCtx)
 	}
 	siblingCtx := q.siblingCtx
@@ -221,6 +223,16 @@ func (q *StreamingToolQueue) Submit(ctx context.Context, call ToolCall) {
 
 // Wait blocks until all in-flight tool executions complete.
 func (q *StreamingToolQueue) Wait() {
+	defer func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		if q.siblingCancel != nil {
+			q.siblingCancel()
+		}
+		if q.turnCancel != nil {
+			q.turnCancel()
+		}
+	}()
 	q.wg.Wait()
 }
 
@@ -237,6 +249,9 @@ func (q *StreamingToolQueue) Results() []ToolCallResult {
 func (q *StreamingToolQueue) Cancel() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.siblingCancel != nil {
+		q.siblingCancel()
+	}
 	if q.turnCancel != nil {
 		q.turnCancel()
 	}

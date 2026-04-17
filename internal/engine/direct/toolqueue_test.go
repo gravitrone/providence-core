@@ -2,11 +2,15 @@ package direct
 
 import (
 	"context"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
+	"github.com/gravitrone/providence-core/internal/engine/session"
+	"github.com/gravitrone/providence-core/internal/engine/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,10 +24,10 @@ type mockTool struct {
 	calls    atomic.Int32
 }
 
-func (m *mockTool) Name() string                                         { return m.name }
-func (m *mockTool) Description() string                                  { return "mock" }
-func (m *mockTool) InputSchema() map[string]any                          { return nil }
-func (m *mockTool) ReadOnly() bool                                       { return m.readOnly }
+func (m *mockTool) Name() string                { return m.name }
+func (m *mockTool) Description() string         { return "mock" }
+func (m *mockTool) InputSchema() map[string]any { return nil }
+func (m *mockTool) ReadOnly() bool              { return m.readOnly }
 func (m *mockTool) Execute(_ context.Context, _ map[string]any) tools.ToolResult {
 	m.calls.Add(1)
 	if m.delay > 0 {
@@ -80,24 +84,6 @@ func TestStreamingToolQueue_UnknownTool(t *testing.T) {
 	assert.Contains(t, results[0].Result.Content, "unknown tool")
 }
 
-// mockErrorTool is a tool that returns an error result.
-type mockErrorTool struct {
-	name     string
-	readOnly bool
-	delay    time.Duration
-}
-
-func (m *mockErrorTool) Name() string                { return m.name }
-func (m *mockErrorTool) Description() string          { return "mock error" }
-func (m *mockErrorTool) InputSchema() map[string]any  { return nil }
-func (m *mockErrorTool) ReadOnly() bool               { return m.readOnly }
-func (m *mockErrorTool) Execute(_ context.Context, _ map[string]any) tools.ToolResult {
-	if m.delay > 0 {
-		time.Sleep(m.delay)
-	}
-	return tools.ToolResult{Content: "error from " + m.name, IsError: true}
-}
-
 func TestStreamingToolQueue_Cancel(t *testing.T) {
 	slow := &mockTool{name: "slow", readOnly: true, delay: 500 * time.Millisecond, output: "slow"}
 	reg := tools.NewRegistry(slow)
@@ -107,6 +93,22 @@ func TestStreamingToolQueue_Cancel(t *testing.T) {
 	// Cancel should not panic even without waiting.
 	q.Cancel()
 	q.Wait()
+}
+
+func TestToolQueueWaitCancelsContexts(t *testing.T) {
+	read := &mockTool{name: "read", readOnly: true, output: "ok"}
+	reg := tools.NewRegistry(read)
+	q := NewStreamingToolQueue(reg)
+
+	q.Submit(context.Background(), ToolCall{ID: "1", Name: "read"})
+
+	require.NotNil(t, q.turnCtx)
+	require.NotNil(t, q.siblingCtx)
+
+	q.Wait()
+
+	require.ErrorIs(t, q.turnCtx.Err(), context.Canceled)
+	require.ErrorIs(t, q.siblingCtx.Err(), context.Canceled)
 }
 
 func TestIsConcurrencySafe_ReadOnlyToolAlwaysSafe(t *testing.T) {
@@ -125,9 +127,9 @@ type mockBashTool struct {
 }
 
 func (m *mockBashTool) Name() string                { return "Bash" }
-func (m *mockBashTool) Description() string          { return "bash" }
-func (m *mockBashTool) InputSchema() map[string]any  { return nil }
-func (m *mockBashTool) ReadOnly() bool               { return m.readOnly }
+func (m *mockBashTool) Description() string         { return "bash" }
+func (m *mockBashTool) InputSchema() map[string]any { return nil }
+func (m *mockBashTool) ReadOnly() bool              { return m.readOnly }
 func (m *mockBashTool) Execute(_ context.Context, _ map[string]any) tools.ToolResult {
 	return tools.ToolResult{Content: "ok"}
 }
@@ -178,18 +180,27 @@ func TestIsBashCommandReadOnly(t *testing.T) {
 		{"git commit -m 'msg'", false},
 		{"rm file.txt", false},
 		{"cp a b", false},
-		// Note: echo/cat are in readOnlyCmds so the pipe/redirect check is
-		// never reached. These return true despite containing | or &&.
-		{"echo hello | tee file.txt", true},
-		{"cat file.go && rm file.go", true},
-		// Unknown commands with pipes/redirects are caught.
-		{"python script.py | sort > out.txt", false},
 		{"VAR=val cat file.go", true},
 		{"", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.cmd, func(t *testing.T) {
 			assert.Equal(t, tt.safe, isBashCommandReadOnly(tt.cmd))
+		})
+	}
+}
+
+func TestIsBashCommandReadOnlyRejectsCompoundCommands(t *testing.T) {
+	tests := []string{
+		"cat file.go && rm file.go",
+		"ls | grep foo && rm x",
+		"echo hello; echo world",
+		"echo > /tmp/x",
+	}
+
+	for _, cmd := range tests {
+		t.Run(cmd, func(t *testing.T) {
+			assert.False(t, isBashCommandReadOnly(cmd))
 		})
 	}
 }
@@ -209,4 +220,82 @@ func TestStreamingToolQueue_ResultsOrder(t *testing.T) {
 	require.Len(t, results, 2)
 	assert.Equal(t, "first", results[0].Result.Content)
 	assert.Equal(t, "second", results[1].Result.Content)
+}
+
+func TestCloseWaitsForPendingToolSummary(t *testing.T) {
+	e := &DirectEngine{
+		history: NewConversationHistory(),
+	}
+
+	releaseSummary := make(chan struct{})
+	e.summaryWg.Add(1)
+	go func() {
+		defer e.summaryWg.Done()
+		<-releaseSummary
+	}()
+
+	closeDone := make(chan struct{})
+	go func() {
+		e.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+		t.Fatal("close returned before pending tool summary finished")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseSummary)
+
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("close did not return after pending tool summary finished")
+	}
+}
+
+func TestEnableBackgroundAgentsCancelsPriorOnReEnable(t *testing.T) {
+	e, err := NewDirectEngine(engine.EngineConfig{
+		Type:   engine.EngineTypeDirect,
+		Model:  "claude-sonnet-4-20250514",
+		APIKey: "test-key-not-real",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { e.Close() })
+
+	e.EnableBackgroundAgents(map[string]subagent.BackgroundAgentType{})
+	require.Eventually(t, func() bool {
+		return sessionSubscriberCount(e.sessionBus) == 1
+	}, time.Second, 10*time.Millisecond)
+
+	firstCancelCalled := make(chan struct{})
+	firstCancel := e.bgCancel
+	require.NotNil(t, firstCancel)
+	e.bgCancel = func() {
+		close(firstCancelCalled)
+		firstCancel()
+	}
+
+	e.EnableBackgroundAgents(map[string]subagent.BackgroundAgentType{})
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-firstCancelCalled:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		return sessionSubscriberCount(e.sessionBus) == 1
+	}, time.Second, 10*time.Millisecond)
+}
+
+func sessionSubscriberCount(bus *session.Bus) int {
+	if bus == nil {
+		return 0
+	}
+	return reflect.ValueOf(bus).Elem().FieldByName("subscribers").Len()
 }

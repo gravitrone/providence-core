@@ -3,25 +3,45 @@ package tools
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
 const (
-	defaultTimeoutMs = 120_000
-	maxTimeoutMs     = 600_000
+	defaultTimeoutMs  = 120_000
+	maxTimeoutMs      = 600_000
+	cwdSentinelPrefix = "__PVD_CWD__="
 )
 
 // BashTool executes shell commands via /bin/bash.
 type BashTool struct {
 	SandboxDisabled bool // skip sandbox-exec wrapping
+
+	mu          sync.Mutex
+	sessionID   string
+	sessionRoot string
+	cwdFile     string
 }
 
 func NewBashTool() *BashTool { return &BashTool{} }
+
+// Close removes the persisted cwd state for this bash session.
+func (b *BashTool) Close() error {
+	path := b.cwdStatePath()
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove bash cwd state: %w", err)
+	}
+	return nil
+}
 
 // sandboxProfile is a macOS sandbox-exec profile that blocks network access
 // and writes to /System while allowing everything else.
@@ -185,7 +205,12 @@ func (b *BashTool) makeCmd(ctx context.Context, command string, sandbox bool) *e
 }
 
 func (b *BashTool) runBackground(ctx context.Context, command string, sandbox bool) ToolResult {
-	cmd := b.makeCmd(ctx, command, sandbox)
+	wrappedCommand, err := b.commandWithStartDir(command, false)
+	if err != nil {
+		return ToolResult{Content: err.Error(), IsError: true}
+	}
+
+	cmd := b.makeCmd(ctx, wrappedCommand, sandbox)
 	// Detach process group so it survives parent exit.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -207,7 +232,12 @@ func (b *BashTool) runForeground(ctx context.Context, command string, timeout ti
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := b.makeCmd(ctx, command, sandbox)
+	wrappedCommand, err := b.commandWithStartDir(command, true)
+	if err != nil {
+		return ToolResult{Content: err.Error(), IsError: true}
+	}
+
+	cmd := b.makeCmd(ctx, wrappedCommand, sandbox)
 	// Kill entire process group on timeout.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -218,14 +248,15 @@ func (b *BashTool) runForeground(ctx context.Context, command string, timeout ti
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 
-	err := cmd.Run()
+	err = cmd.Run()
 
 	output := buf.String()
+	output, updatedCwd := stripCwdSentinel(output)
 
 	// Spill oversized output to disk so the model gets a head+tail
 	// preview plus a path pointer rather than a silently-truncated
 	// body. The spill threshold lives in resultstore.go.
-	shortOutput, spillPath := SpillIfLarge("", "Bash", output)
+	shortOutput, spillPath := SpillIfLarge(b.sessionKey(), "Bash", output)
 
 	if ctx.Err() == context.DeadlineExceeded {
 		msg := fmt.Sprintf("Command timed out after %s\n\n%s", timeout, shortOutput)
@@ -234,10 +265,20 @@ func (b *BashTool) runForeground(ctx context.Context, command string, timeout ti
 
 	exitCode := 0
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		} else {
 			return ToolResult{Content: fmt.Sprintf("failed to run command: %v", err), IsError: true}
+		}
+	}
+
+	if exitCode == 0 && updatedCwd != "" {
+		if saveErr := b.saveCwd(updatedCwd); saveErr != nil {
+			return ToolResult{
+				Content: fmt.Sprintf("save bash cwd state: %v", saveErr),
+				IsError: true,
+			}
 		}
 	}
 
@@ -252,6 +293,138 @@ func (b *BashTool) runForeground(ctx context.Context, command string, timeout ti
 		IsError:  exitCode != 0,
 		Metadata: meta,
 	}
+}
+
+func (b *BashTool) commandWithStartDir(command string, captureCwd bool) (string, error) {
+	startDir, err := b.resolveStartDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve bash start dir: %w", err)
+	}
+
+	wrapped := "cd " + shellQuote(startDir) + " && " + command
+	if !captureCwd {
+		return wrapped, nil
+	}
+
+	return wrapped + "\npvd_status=$?\nif [ $pvd_status -eq 0 ]; then printf '\\n" + cwdSentinelPrefix + "%s\\n' \"$PWD\"; fi\nexit $pvd_status", nil
+}
+
+func (b *BashTool) resolveStartDir() (string, error) {
+	root, err := b.resolveSessionRoot()
+	if err != nil {
+		return "", err
+	}
+
+	data, err := os.ReadFile(b.cwdStatePath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return root, nil
+		}
+		return "", fmt.Errorf("read bash cwd state: %w", err)
+	}
+
+	savedDir := strings.TrimSpace(string(data))
+	if savedDir == "" {
+		return root, nil
+	}
+	if valid, _ := isExistingDir(savedDir); valid {
+		return savedDir, nil
+	}
+
+	return root, nil
+}
+
+func (b *BashTool) resolveSessionRoot() (string, error) {
+	b.mu.Lock()
+	root := b.sessionRoot
+	if root == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			b.mu.Unlock()
+			return "", fmt.Errorf("get working directory: %w", err)
+		}
+		b.sessionRoot = cwd
+		root = cwd
+	}
+	b.mu.Unlock()
+
+	valid, err := isExistingDir(root)
+	if err != nil {
+		return "", fmt.Errorf("stat session root %q: %w", root, err)
+	}
+	if !valid {
+		return "", fmt.Errorf("session root %q is not a directory", root)
+	}
+
+	return root, nil
+}
+
+func (b *BashTool) saveCwd(dir string) error {
+	if valid, err := isExistingDir(dir); err != nil {
+		return fmt.Errorf("stat cwd %q: %w", dir, err)
+	} else if !valid {
+		return fmt.Errorf("cwd %q is not a directory", dir)
+	}
+
+	if err := os.WriteFile(b.cwdStatePath(), []byte(dir+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write bash cwd state: %w", err)
+	}
+	return nil
+}
+
+func (b *BashTool) cwdStatePath() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.sessionID == "" {
+		b.sessionID = "session-" + randTag(6)
+	}
+	if b.cwdFile == "" {
+		b.cwdFile = filepath.Join(os.TempDir(), fmt.Sprintf("providence-bash-%s-cwd", sanitiseForPath(b.sessionID)))
+	}
+
+	return b.cwdFile
+}
+
+func (b *BashTool) sessionKey() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.sessionID == "" {
+		b.sessionID = "session-" + randTag(6)
+	}
+
+	return b.sessionID
+}
+
+func isExistingDir(path string) (bool, error) {
+	//nolint:gosec
+	// Bash cwd paths come from the session root or prior successful pwd output.
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return info.IsDir(), nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+func stripCwdSentinel(output string) (string, string) {
+	idx := strings.LastIndex(output, "\n"+cwdSentinelPrefix)
+	if idx == -1 {
+		return output, ""
+	}
+
+	valueStart := idx + 1 + len(cwdSentinelPrefix)
+	valueEnd := strings.IndexByte(output[valueStart:], '\n')
+	if valueEnd == -1 {
+		return output, ""
+	}
+	valueEnd += valueStart
+
+	return output[:idx] + output[valueEnd+1:], output[valueStart:valueEnd]
 }
 
 // spillMetadata returns a Metadata map carrying the spill path when

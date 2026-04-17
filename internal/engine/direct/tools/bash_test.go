@@ -2,6 +2,9 @@ package tools
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -96,4 +99,105 @@ func TestBash_LsTemp(t *testing.T) {
 
 	assert.False(t, res.IsError, res.Content)
 	assert.Contains(t, res.Content, "Exit code: 0")
+}
+
+func TestBashCwdPersistsAcrossCalls(t *testing.T) {
+	root := t.TempDir()
+	b := newTestBashTool(t, "persist-session", root)
+
+	first := b.Execute(context.Background(), map[string]any{
+		"command": "mkdir sub && cd sub",
+	})
+
+	require.False(t, first.IsError, first.Content)
+	assert.NotContains(t, first.Content, cwdSentinelPrefix)
+	assert.Contains(t, b.cwdStatePath(), "persist-session")
+	assertSavedCwd(t, b, filepath.Join(root, "sub"))
+
+	second := b.Execute(context.Background(), map[string]any{
+		"command": "pwd",
+	})
+
+	require.False(t, second.IsError, second.Content)
+	assert.Contains(t, second.Content, filepath.Join(root, "sub"))
+	assert.NotContains(t, second.Content, cwdSentinelPrefix)
+
+	failed := b.Execute(context.Background(), map[string]any{
+		"command": "cd .. && exit 7",
+	})
+
+	require.True(t, failed.IsError)
+	assert.Contains(t, failed.Content, "Exit code: 7")
+	assertSavedCwd(t, b, filepath.Join(root, "sub"))
+
+	third := b.Execute(context.Background(), map[string]any{
+		"command": "pwd",
+	})
+
+	require.False(t, third.IsError, third.Content)
+	assert.Contains(t, third.Content, filepath.Join(root, "sub"))
+}
+
+func TestBashCwdFallsBackWhenSavedDirMissing(t *testing.T) {
+	root := t.TempDir()
+	b := newTestBashTool(t, "missing-session", root)
+
+	first := b.Execute(context.Background(), map[string]any{
+		"command": "mkdir sub && cd sub",
+	})
+
+	require.False(t, first.IsError, first.Content)
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "sub")))
+
+	second := b.Execute(context.Background(), map[string]any{
+		"command": "pwd",
+	})
+
+	require.False(t, second.IsError, second.Content)
+	assert.Contains(t, second.Content, root)
+	assert.NotContains(t, second.Content, filepath.Join(root, "sub"))
+	assertSavedCwd(t, b, root)
+}
+
+func TestBashCwdTempfileCleanedUp(t *testing.T) {
+	root := t.TempDir()
+	b := newTestBashTool(t, "cleanup-session", root)
+
+	first := b.Execute(context.Background(), map[string]any{
+		"command": "pwd",
+	})
+
+	require.False(t, first.IsError, first.Content)
+
+	path := b.cwdStatePath()
+	_, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Contains(t, path, "cleanup-session")
+
+	require.NoError(t, b.Close())
+
+	_, err = os.Stat(path)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func newTestBashTool(t *testing.T, sessionID string, sessionRoot string) *BashTool {
+	t.Helper()
+
+	b := NewBashTool()
+	b.SandboxDisabled = true
+	b.sessionID = sessionID
+	b.sessionRoot = sessionRoot
+	t.Cleanup(func() {
+		_ = b.Close()
+	})
+
+	return b
+}
+
+func assertSavedCwd(t *testing.T, b *BashTool, want string) {
+	t.Helper()
+
+	data, err := os.ReadFile(b.cwdStatePath())
+	require.NoError(t, err)
+	assert.Equal(t, want, strings.TrimSpace(string(data)))
 }

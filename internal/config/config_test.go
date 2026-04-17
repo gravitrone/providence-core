@@ -47,7 +47,7 @@ circuit_breaker = 3
 	assert.Equal(t, "high", c.Effort)
 	assert.Equal(t, 100000, c.TokenBudget)
 	assert.True(t, c.AutoTitleEnabled)
-	assert.True(t, c.DashboardVisible)
+	assert.True(t, dashboardVisibleValue(c.DashboardVisible))
 	assert.Equal(t, "both", c.Compact.Mode)
 	assert.Equal(t, "hybrid", c.Compact.Trigger)
 	assert.Equal(t, 80, c.Compact.ThresholdPct)
@@ -114,11 +114,21 @@ func TestMigrateFromJSON(t *testing.T) {
 	assert.Equal(t, "claude", c2.Engine)
 }
 
+func TestLoadFreshInstallReturnsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "config.toml")
+	jsonPath := filepath.Join(dir, "config.json")
+
+	loaded := loadWithMigration(tomlPath, jsonPath)
+
+	assert.Equal(t, Defaults(), loaded)
+}
+
 func TestDefaultValues(t *testing.T) {
 	d := Defaults()
 	assert.Equal(t, "claude", d.Engine)
 	assert.Equal(t, "flame", d.Theme)
-	assert.True(t, d.DashboardVisible)
+	assert.True(t, dashboardVisibleValue(d.DashboardVisible))
 	assert.Equal(t, "both", d.Compact.Mode)
 	assert.Equal(t, "hybrid", d.Compact.Trigger)
 	assert.Equal(t, 80, d.Compact.ThresholdPct)
@@ -180,7 +190,7 @@ circuit_breaker = 5
 	assert.Equal(t, 120000, loaded.TokenBudget)
 	assert.True(t, loaded.AutoTitleEnabled)
 	assert.True(t, loaded.ToolUseSummary)
-	assert.True(t, loaded.DashboardVisible)
+	assert.True(t, dashboardVisibleValue(loaded.DashboardVisible))
 	assert.Equal(t, "verbose", loaded.OutputStyle)
 	assert.Equal(t, "both", loaded.Compact.Mode)
 	assert.Equal(t, "pressure", loaded.Compact.Trigger)
@@ -205,6 +215,18 @@ func TestCompactConfigDefaults(t *testing.T) {
 	assert.Equal(t, 3, compact.CircuitBreaker)
 }
 
+func TestLoadExplicitFalseOverridesDefault(t *testing.T) {
+	homeDir := t.TempDir()
+	projectRoot := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	writeTestConfigFile(t, filepath.Join(projectRoot, ".providence", "config.toml"), `dashboard_visible = false`)
+
+	loaded := LoadMerged(projectRoot)
+
+	assert.False(t, dashboardVisibleValue(loaded.DashboardVisible))
+}
+
 func TestConfigSaveRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -218,7 +240,7 @@ func TestConfigSaveRoundtrip(t *testing.T) {
 		TokenBudget:      123456,
 		AutoTitleEnabled: true,
 		ToolUseSummary:   true,
-		DashboardVisible: true,
+		DashboardVisible: boolPtr(true),
 		BGAgentsEnabled:  true,
 		OutputStyle:      "compact",
 		Compact: CompactConfig{
@@ -521,8 +543,6 @@ func TestOverlayConfigDailyBudgetValidation(t *testing.T) {
 	}
 }
 
-
-
 func TestOverlayConfigTOMLRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -818,7 +838,7 @@ func TestConfig_SaveAndLoadRoundtripPreservesAllFields(t *testing.T) {
 		TokenBudget:      200000,
 		AutoTitleEnabled: true,
 		ToolUseSummary:   true,
-		DashboardVisible: true,
+		DashboardVisible: boolPtr(true),
 		BGAgentsEnabled:  true,
 		OutputStyle:      "compact",
 		SpinnerVerbs:     []string{"thinking", "working"},
@@ -871,7 +891,7 @@ func TestConfig_SaveAndLoadRoundtripPreservesAllFields(t *testing.T) {
 	assert.Equal(t, original.TokenBudget, loaded.TokenBudget)
 	assert.Equal(t, original.AutoTitleEnabled, loaded.AutoTitleEnabled)
 	assert.Equal(t, original.ToolUseSummary, loaded.ToolUseSummary)
-	assert.Equal(t, original.DashboardVisible, loaded.DashboardVisible)
+	assert.Equal(t, dashboardVisibleValue(original.DashboardVisible), dashboardVisibleValue(loaded.DashboardVisible))
 	assert.Equal(t, original.BGAgentsEnabled, loaded.BGAgentsEnabled)
 	assert.Equal(t, original.OutputStyle, loaded.OutputStyle)
 	assert.Equal(t, original.SpinnerVerbs, loaded.SpinnerVerbs)

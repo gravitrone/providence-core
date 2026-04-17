@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,16 +57,16 @@ func (c *OverlayConfig) SpawnEnabled() bool {
 
 // Config holds user preferences persisted to ~/.providence/config.toml.
 type Config struct {
-	Engine           string `toml:"engine" json:"engine,omitempty"`
-	Model            string `toml:"model" json:"model,omitempty"`
-	Theme            string `toml:"theme" json:"theme,omitempty"`
-	Effort           string `toml:"effort" json:"effort,omitempty"`
-	OpenRouterAPIKey string `toml:"openrouter_api_key" json:"openrouter_api_key,omitempty"`
-	TokenBudget      int    `toml:"token_budget" json:"token_budget,omitempty"`
-	AutoTitleEnabled bool   `toml:"auto_title_enabled" json:"auto_title_enabled,omitempty"`
-	ToolUseSummary   bool   `toml:"tool_use_summary" json:"tool_use_summary,omitempty"`
-	DashboardVisible bool   `toml:"dashboard_visible" json:"dashboard_visible,omitempty"`
-	BGAgentsEnabled  bool   `toml:"bg_agents_enabled" json:"bg_agents_enabled,omitempty"`
+	Engine           string   `toml:"engine" json:"engine,omitempty"`
+	Model            string   `toml:"model" json:"model,omitempty"`
+	Theme            string   `toml:"theme" json:"theme,omitempty"`
+	Effort           string   `toml:"effort" json:"effort,omitempty"`
+	OpenRouterAPIKey string   `toml:"openrouter_api_key" json:"openrouter_api_key,omitempty"`
+	TokenBudget      int      `toml:"token_budget" json:"token_budget,omitempty"`
+	AutoTitleEnabled bool     `toml:"auto_title_enabled" json:"auto_title_enabled,omitempty"`
+	ToolUseSummary   bool     `toml:"tool_use_summary" json:"tool_use_summary,omitempty"`
+	DashboardVisible *bool    `toml:"dashboard_visible,omitempty" json:"dashboard_visible,omitempty"`
+	BGAgentsEnabled  bool     `toml:"bg_agents_enabled" json:"bg_agents_enabled,omitempty"`
 	OutputStyle      string   `toml:"output_style" json:"output_style,omitempty"`
 	Persona          string   `toml:"persona" json:"persona,omitempty"`
 	SpinnerVerbs     []string `toml:"spinner_verbs" json:"spinner_verbs,omitempty"`
@@ -87,9 +88,9 @@ type Config struct {
 //	ask = ["Bash(git push *)"]
 type PermissionsConfig struct {
 	Mode  string   `toml:"mode" json:"mode,omitempty"`   // default, acceptEdits, bypassPermissions, plan, dontAsk
-	Allow []string `toml:"allow" json:"allow,omitempty"`  // patterns that auto-allow
-	Deny  []string `toml:"deny" json:"deny,omitempty"`    // patterns that always deny
-	Ask   []string `toml:"ask" json:"ask,omitempty"`      // patterns that always ask
+	Allow []string `toml:"allow" json:"allow,omitempty"` // patterns that auto-allow
+	Deny  []string `toml:"deny" json:"deny,omitempty"`   // patterns that always deny
+	Ask   []string `toml:"ask" json:"ask,omitempty"`     // patterns that always ask
 }
 
 // HookEntry defines a single hook - either a shell command or HTTP endpoint.
@@ -165,14 +166,14 @@ func (h *HooksConfig) ToMap() map[string][]HookEntry {
 
 // CompactConfig holds compaction-related settings.
 type CompactConfig struct {
-	Mode          string `toml:"mode" json:"mode,omitempty"`             // cc-tail-replace | dynamic-rolling | both | off
-	Trigger       string `toml:"trigger" json:"trigger,omitempty"`       // token | turn | pressure | hybrid
-	ThresholdPct  int    `toml:"threshold_pct" json:"threshold_pct,omitempty"`
-	TurnCount     int    `toml:"turn_count" json:"turn_count,omitempty"`
-	KeepRecentPct int    `toml:"keep_recent_pct" json:"keep_recent_pct,omitempty"`
-	RollingTokens int    `toml:"rolling_tokens" json:"rolling_tokens,omitempty"`
-	FastTierModel string `toml:"fast_tier_model" json:"fast_tier_model,omitempty"`
-	CircuitBreaker int   `toml:"circuit_breaker" json:"circuit_breaker,omitempty"`
+	Mode           string `toml:"mode" json:"mode,omitempty"`       // cc-tail-replace | dynamic-rolling | both | off
+	Trigger        string `toml:"trigger" json:"trigger,omitempty"` // token | turn | pressure | hybrid
+	ThresholdPct   int    `toml:"threshold_pct" json:"threshold_pct,omitempty"`
+	TurnCount      int    `toml:"turn_count" json:"turn_count,omitempty"`
+	KeepRecentPct  int    `toml:"keep_recent_pct" json:"keep_recent_pct,omitempty"`
+	RollingTokens  int    `toml:"rolling_tokens" json:"rolling_tokens,omitempty"`
+	FastTierModel  string `toml:"fast_tier_model" json:"fast_tier_model,omitempty"`
+	CircuitBreaker int    `toml:"circuit_breaker" json:"circuit_breaker,omitempty"`
 }
 
 // DefaultTOMLPath returns the default TOML config file location.
@@ -201,12 +202,27 @@ func overlayDefaults() OverlayConfig {
 	}
 }
 
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func optionalBoolValue(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func dashboardVisibleValue(value *bool) bool {
+	return optionalBoolValue(value, true)
+}
+
 // Defaults returns a Config with sensible default values.
 func Defaults() Config {
 	return Config{
 		Engine:           "claude",
 		Theme:            "flame",
-		DashboardVisible: true,
+		DashboardVisible: boolPtr(true),
 		Overlay:          overlayDefaults(),
 		Bridge: BridgeConfig{
 			Mode:              "auto",
@@ -219,13 +235,13 @@ func Defaults() Config {
 			SpawnTimeoutMS:    1500,
 		},
 		Compact: CompactConfig{
-			Mode:          "both",
-			Trigger:       "hybrid",
-			ThresholdPct:  80,
-			TurnCount:     20,
-			KeepRecentPct: 30,
-			RollingTokens: 50000,
-			FastTierModel: "haiku",
+			Mode:           "both",
+			Trigger:        "hybrid",
+			ThresholdPct:   80,
+			TurnCount:      20,
+			KeepRecentPct:  30,
+			RollingTokens:  50000,
+			FastTierModel:  "haiku",
 			CircuitBreaker: 3,
 		},
 	}
@@ -240,20 +256,28 @@ func Load() Config {
 
 // loadWithMigration tries TOML first, falls back to JSON with auto-migration.
 func loadWithMigration(tomlPath, jsonPath string) Config {
+	cfg := Defaults()
+
 	// Try TOML first.
-	if _, err := os.Stat(tomlPath); err == nil {
-		return LoadFromTOML(tomlPath)
+	if tomlCfg, err := loadTOMLFile(tomlPath); err == nil {
+		mergeConfig(&cfg, &tomlCfg)
+		return cfg
+	} else if !errors.Is(err, os.ErrNotExist) {
+		reportConfigLoadError(err)
+		return cfg
 	}
 
 	// Try JSON migration.
-	if _, err := os.Stat(jsonPath); err == nil {
-		c := loadFromJSON(jsonPath)
+	if jsonCfg, err := loadJSONFile(jsonPath); err == nil {
+		mergeConfig(&cfg, &jsonCfg)
 		// Migrate: write TOML, best-effort.
-		_ = c.SaveTo(tomlPath)
-		return c
+		_ = cfg.SaveTo(tomlPath)
+		return cfg
+	} else if !errors.Is(err, os.ErrNotExist) {
+		reportConfigLoadError(err)
 	}
 
-	return Config{}
+	return cfg
 }
 
 // LoadFrom reads config from a TOML file. Returns empty Config on any error.
@@ -298,25 +322,37 @@ func expandConfigEnvVars(c *Config) {
 // LoadFromTOML reads config from a TOML file. Returns empty Config on any error.
 // Environment variables (${VAR} or $VAR) in string fields are expanded after loading.
 func LoadFromTOML(path string) Config {
-	var c Config
-	if _, err := toml.DecodeFile(path, &c); err != nil {
-		return Config{}
-	}
-	expandConfigEnvVars(&c)
-	return c
-}
-
-// loadFromJSON reads config from a JSON file. Returns empty Config on any error.
-func loadFromJSON(path string) Config {
-	data, err := os.ReadFile(path)
+	c, err := loadTOMLFile(path)
 	if err != nil {
 		return Config{}
 	}
+	return c
+}
+
+// loadJSONFile reads config from a JSON file.
+func loadJSONFile(path string) (Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read json config %s: %w", path, err)
+	}
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
-		return Config{}
+		return Config{}, fmt.Errorf("decode json config %s: %w", path, err)
 	}
-	return c
+	return c, nil
+}
+
+func loadTOMLFile(path string) (Config, error) {
+	var c Config
+	if _, err := toml.DecodeFile(path, &c); err != nil {
+		return Config{}, fmt.Errorf("decode toml config %s: %w", path, err)
+	}
+	expandConfigEnvVars(&c)
+	return c, nil
+}
+
+func reportConfigLoadError(err error) {
+	fmt.Fprintf(os.Stderr, "%v\n", err)
 }
 
 // managedSettingsPath returns the macOS enterprise managed-settings path.
@@ -396,8 +432,8 @@ func mergeConfig(base, override *Config) {
 	if override.ToolUseSummary {
 		base.ToolUseSummary = true
 	}
-	if override.DashboardVisible {
-		base.DashboardVisible = true
+	if override.DashboardVisible != nil {
+		base.DashboardVisible = boolPtr(*override.DashboardVisible)
 	}
 	if override.OutputStyle != "" {
 		base.OutputStyle = override.OutputStyle

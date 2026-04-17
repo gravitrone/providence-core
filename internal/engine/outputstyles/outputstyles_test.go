@@ -9,6 +9,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func stylesByName(styles []OutputStyle) map[string]OutputStyle {
+	byName := make(map[string]OutputStyle, len(styles))
+	for _, style := range styles {
+		byName[style.Name] = style
+	}
+
+	return byName
+}
+
 func TestParseStyleFile_WithFrontmatter(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "concise.md")
@@ -41,6 +50,20 @@ func TestParseStyleFile_NoFrontmatter(t *testing.T) {
 	assert.Equal(t, "Just a prompt body.", style.Prompt)
 }
 
+func TestBuiltInStylesAlwaysAvailable(t *testing.T) {
+	styles, err := LoadOutputStyles(t.TempDir(), t.TempDir())
+	require.NoError(t, err)
+
+	assert.Len(t, styles, 3)
+	byName := stylesByName(styles)
+	require.Contains(t, byName, "default")
+	assert.Equal(t, builtinDefault, byName["default"].Prompt)
+	require.Contains(t, byName, "explanatory")
+	assert.Equal(t, builtinExplanatory, byName["explanatory"].Prompt)
+	require.Contains(t, byName, "learning")
+	assert.Equal(t, builtinLearning, byName["learning"].Prompt)
+}
+
 func TestLoadOutputStyles_ProjectOverridesUser(t *testing.T) {
 	projectDir := t.TempDir()
 	homeDir := t.TempDir()
@@ -61,33 +84,28 @@ func TestLoadOutputStyles_ProjectOverridesUser(t *testing.T) {
 	styles, err := LoadOutputStyles(projectDir, homeDir)
 	require.NoError(t, err)
 
-	assert.Len(t, styles, 2)
-
-	var brief, verbose *OutputStyle
-	for i := range styles {
-		switch styles[i].Name {
-		case "brief":
-			brief = &styles[i]
-		case "verbose":
-			verbose = &styles[i]
-		}
-	}
-
-	require.NotNil(t, brief)
-	assert.Equal(t, "Project brief.", brief.Prompt, "project-level should override user-level")
-
-	require.NotNil(t, verbose)
-	assert.Equal(t, "User verbose.", verbose.Prompt)
+	byName := stylesByName(styles)
+	assert.Len(t, styles, 5)
+	require.Contains(t, byName, "brief")
+	assert.Equal(t, "Project brief.", byName["brief"].Prompt, "project-level should override user-level")
+	require.Contains(t, byName, "verbose")
+	assert.Equal(t, "User verbose.", byName["verbose"].Prompt)
 }
 
-func TestLoadOutputStyles_EmptyDirs(t *testing.T) {
-	styles, err := LoadOutputStyles(t.TempDir(), t.TempDir())
-	require.NoError(t, err)
-	assert.Empty(t, styles)
-}
+func TestDiskStyleOverridesBuiltIn(t *testing.T) {
+	homeDir := t.TempDir()
+	styleDir := filepath.Join(homeDir, ".providence", "output-styles")
+	require.NoError(t, os.MkdirAll(styleDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(styleDir, "explanatory.md"), []byte("---\nname: explanatory\ndescription: Custom explanatory\n---\nExplain decisions with team-specific context."), 0o644))
 
-func TestLoadOutputStyles_NonexistentDirs(t *testing.T) {
-	styles, err := LoadOutputStyles("/nonexistent/project", "/nonexistent/home")
+	styles, err := LoadOutputStyles(t.TempDir(), homeDir)
 	require.NoError(t, err)
-	assert.Empty(t, styles)
+
+	assert.Len(t, styles, 3)
+	byName := stylesByName(styles)
+	require.Contains(t, byName, "explanatory")
+	assert.Equal(t, "Explain decisions with team-specific context.", byName["explanatory"].Prompt)
+	assert.Equal(t, filepath.Join(styleDir, "explanatory.md"), byName["explanatory"].FilePath)
+	require.Contains(t, byName, "learning")
+	assert.Equal(t, builtinLearning, byName["learning"].Prompt)
 }

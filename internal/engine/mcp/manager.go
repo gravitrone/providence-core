@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -21,9 +23,18 @@ type Manager struct {
 	clients map[string]*Client
 	configs map[string]ServerConfig
 
+	instructionCache map[string]string
+	turnAttachments  map[string]TurnAttachment
+
 	// Per-client error tracking for auto-reconnect.
-	consecutiveErrors  map[string]int
-	reconnectAttempts  map[string]int
+	consecutiveErrors map[string]int
+	reconnectAttempts map[string]int
+}
+
+// TurnAttachment is deferred MCP context that should be injected on the next turn.
+type TurnAttachment struct {
+	ServerName string
+	Content    string
 }
 
 // NewManager creates an empty MCP Manager.
@@ -31,6 +42,8 @@ func NewManager() *Manager {
 	return &Manager{
 		clients:           make(map[string]*Client),
 		configs:           make(map[string]ServerConfig),
+		instructionCache:  make(map[string]string),
+		turnAttachments:   make(map[string]TurnAttachment),
 		consecutiveErrors: make(map[string]int),
 		reconnectAttempts: make(map[string]int),
 	}
@@ -51,6 +64,7 @@ func (m *Manager) ConnectAll(configs []ServerConfig) error {
 			errs = append(errs, fmt.Sprintf("%s: spawn failed: %v", cfg.Name, err))
 			continue
 		}
+		m.bindNotificationHandler(cfg.Name, client)
 
 		if err := client.Initialize(); err != nil {
 			client.Close()
@@ -67,6 +81,7 @@ func (m *Manager) ConnectAll(configs []ServerConfig) error {
 		m.mu.Lock()
 		m.clients[cfg.Name] = client
 		m.configs[cfg.Name] = cfg
+		m.setInstructionCacheLocked(cfg.Name, client.GetInstructions())
 		m.mu.Unlock()
 	}
 
@@ -84,7 +99,7 @@ func (m *Manager) GetAllTools() map[string][]ToolDef {
 
 	result := make(map[string][]ToolDef, len(m.clients))
 	for name, client := range m.clients {
-		result[name] = client.tools
+		result[name] = client.GetTools()
 	}
 	return result
 }
@@ -168,6 +183,7 @@ func (m *Manager) Reconnect(name string) error {
 	if err != nil {
 		return fmt.Errorf("MCP server %q reconnect spawn: %w", name, err)
 	}
+	m.bindNotificationHandler(name, client)
 
 	if err := client.Initialize(); err != nil {
 		client.Close()
@@ -181,6 +197,7 @@ func (m *Manager) Reconnect(name string) error {
 
 	m.mu.Lock()
 	m.clients[name] = client
+	m.setInstructionCacheLocked(name, client.GetInstructions())
 	m.consecutiveErrors[name] = 0
 	m.mu.Unlock()
 
@@ -193,8 +210,13 @@ func (m *Manager) GetInstructions() string {
 	defer m.mu.RUnlock()
 
 	var parts []string
-	for name, client := range m.clients {
-		if inst := client.GetInstructions(); inst != "" {
+	names := make([]string, 0, len(m.instructionCache))
+	for name := range m.instructionCache {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if inst := m.instructionCache[name]; inst != "" {
 			parts = append(parts, fmt.Sprintf("## %s\n%s", name, inst))
 		}
 	}
@@ -202,6 +224,29 @@ func (m *Manager) GetInstructions() string {
 		return ""
 	}
 	return "# MCP Server Instructions\n\n" + strings.Join(parts, "\n\n")
+}
+
+// TakeTurnAttachments returns and clears the queued MCP attachments for the next turn.
+func (m *Manager) TakeTurnAttachments() []TurnAttachment {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.turnAttachments) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(m.turnAttachments))
+	for name := range m.turnAttachments {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	attachments := make([]TurnAttachment, 0, len(names))
+	for _, name := range names {
+		attachments = append(attachments, m.turnAttachments[name])
+		delete(m.turnAttachments, name)
+	}
+	return attachments
 }
 
 // ServerCount returns the number of connected servers.
@@ -216,15 +261,14 @@ func (m *Manager) ServerCount() int {
 // Errors are silently ignored - stale tool lists are better than crashes.
 func (m *Manager) RefreshTools() {
 	m.mu.RLock()
-	clients := make(map[string]*Client, len(m.clients))
-	for k, v := range m.clients {
-		clients[k] = v
+	names := make([]string, 0, len(m.clients))
+	for name := range m.clients {
+		names = append(names, name)
 	}
 	m.mu.RUnlock()
 
-	for _, client := range clients {
-		// Re-list tools from each server, updating the client's cached tool list.
-		_, _ = client.ListTools()
+	for _, name := range names {
+		m.refreshToolsForServer(name)
 	}
 }
 
@@ -237,4 +281,92 @@ func (m *Manager) CloseAll() {
 		client.Close()
 	}
 	m.clients = make(map[string]*Client)
+	m.instructionCache = make(map[string]string)
+	m.turnAttachments = make(map[string]TurnAttachment)
+}
+
+func (m *Manager) bindNotificationHandler(serverName string, client *Client) {
+	client.SetNotificationHandler(func(method string, params json.RawMessage) {
+		m.handleNotification(serverName, method, params)
+	})
+}
+
+func (m *Manager) handleNotification(serverName, method string, params json.RawMessage) {
+	switch {
+	case method == "notifications/tools/list_changed":
+		go m.refreshToolsForServer(serverName)
+	case strings.HasPrefix(method, "notifications/instructions/"):
+		text, ok := extractInstructionText(params)
+		if !ok {
+			return
+		}
+		m.mu.Lock()
+		m.instructionCache[serverName] = text
+		m.turnAttachments[serverName] = TurnAttachment{
+			ServerName: serverName,
+			Content:    buildInstructionAttachment(serverName, text),
+		}
+		m.mu.Unlock()
+	}
+}
+
+func (m *Manager) refreshToolsForServer(name string) {
+	m.mu.RLock()
+	client, ok := m.clients[name]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	_, _ = client.ListTools()
+}
+
+func (m *Manager) setInstructionCacheLocked(name, instructions string) {
+	if instructions == "" {
+		delete(m.instructionCache, name)
+		return
+	}
+	m.instructionCache[name] = instructions
+}
+
+func buildInstructionAttachment(serverName, instructions string) string {
+	return fmt.Sprintf(
+		"<system-reminder source=\"mcp\" server=%q>\nMCP server instructions updated.\n\n%s\n</system-reminder>",
+		serverName,
+		instructions,
+	)
+}
+
+func extractInstructionText(params json.RawMessage) (string, bool) {
+	var direct string
+	if err := json.Unmarshal(params, &direct); err == nil && direct != "" {
+		return direct, true
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(params, &payload); err != nil {
+		return "", false
+	}
+
+	for _, key := range []string{"instructions", "instruction", "text", "content", "value", "delta"} {
+		if value, ok := firstInstructionString(payload[key]); ok {
+			return value, true
+		}
+	}
+
+	return "", false
+}
+
+func firstInstructionString(value any) (string, bool) {
+	switch typed := value.(type) {
+	case string:
+		return typed, typed != ""
+	case map[string]any:
+		for _, key := range []string{"text", "content", "value"} {
+			if nested, ok := typed[key].(string); ok && nested != "" {
+				return nested, true
+			}
+		}
+	}
+	return "", false
 }

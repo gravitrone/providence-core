@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -222,6 +223,39 @@ func TestCallToolResultError(t *testing.T) {
 	assert.Equal(t, "file not found", result.Content[0].Text)
 }
 
+func TestClientDispatchesNotificationsAsMethods(t *testing.T) {
+	client, writer := newTestClient(strings.Join([]string{
+		`{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"server log"}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`,
+	}, "\n") + "\n")
+
+	var (
+		methods []string
+		params  []string
+	)
+	client.SetNotificationHandler(func(method string, raw json.RawMessage) {
+		methods = append(methods, method)
+		params = append(params, string(raw))
+	})
+
+	result, err := client.call("ping", map[string]any{"value": 1})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"ok":true}`, string(result))
+	assert.Equal(t, []string{"notifications/message"}, methods)
+	require.Len(t, params, 1)
+	assert.JSONEq(t, `{"level":"info","data":"server log"}`, params[0])
+	assert.Contains(t, writer.String(), `"method":"ping"`)
+}
+
+func TestClientAcceptsZeroIDResponses(t *testing.T) {
+	client, _ := newTestClient(`{"jsonrpc":"2.0","id":0,"result":{"ok":true}}` + "\n")
+	client.nextID.Store(-1)
+
+	result, err := client.call("ping", nil)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"ok":true}`, string(result))
+}
+
 // --- Invalid JSON handling ---
 
 func TestJSONRPCResponseInvalidJSON(t *testing.T) {
@@ -304,27 +338,28 @@ func TestScannerSkipsNotifications(t *testing.T) {
 	scanner := bufio.NewScanner(strings.NewReader(lines))
 
 	targetID := int64(5)
-	var found *jsonrpcResponse
+	var found *jsonrpcMessage
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
 		}
-		var resp jsonrpcResponse
+		var resp jsonrpcMessage
 		if err := json.Unmarshal(line, &resp); err != nil {
 			continue
 		}
-		if resp.ID == 0 && resp.Error == nil && resp.Result == nil {
+		if resp.Method != "" && resp.ID == nil {
 			continue // skip notification
 		}
-		if resp.ID == targetID {
+		if resp.ID != nil && *resp.ID == targetID {
 			found = &resp
 			break
 		}
 	}
 
 	require.NotNil(t, found)
-	assert.Equal(t, int64(5), found.ID)
+	require.NotNil(t, found.ID)
+	assert.Equal(t, int64(5), *found.ID)
 }
 
 // --- Notification marshaling ---
@@ -404,3 +439,34 @@ func TestRPCErrorResponseCode(t *testing.T) {
 	assert.Nil(t, resp.Result)
 }
 
+type capturingWriteCloser struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *capturingWriteCloser) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *capturingWriteCloser) Close() error {
+	return nil
+}
+
+func (w *capturingWriteCloser) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+func newTestClient(lines string) (*Client, *capturingWriteCloser) {
+	writer := &capturingWriteCloser{}
+	client := &Client{
+		name:   "test",
+		stdin:  writer,
+		stdout: bufio.NewScanner(strings.NewReader(lines)),
+	}
+	client.stdout.Buffer(make([]byte, 0, 1024), 1024*1024)
+	return client, writer
+}

@@ -27,8 +27,10 @@ type Client struct {
 	tools        []ToolDef
 	instructions string
 
-	mu    sync.Mutex
-	nextID atomic.Int64
+	mu                  sync.Mutex
+	stateMu             sync.RWMutex
+	nextID              atomic.Int64
+	notificationHandler func(method string, params json.RawMessage)
 }
 
 // jsonrpcRequest is a JSON-RPC 2.0 request.
@@ -43,6 +45,15 @@ type jsonrpcRequest struct {
 type jsonrpcResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      int64           `json:"id"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *jsonrpcError   `json:"error,omitempty"`
+}
+
+type jsonrpcMessage struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      *int64          `json:"id,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *jsonrpcError   `json:"error,omitempty"`
 }
@@ -115,7 +126,9 @@ func (c *Client) Initialize() error {
 		Instructions string `json:"instructions"`
 	}
 	if err := json.Unmarshal(resp, &initResult); err == nil && initResult.Instructions != "" {
+		c.stateMu.Lock()
 		c.instructions = initResult.Instructions
+		c.stateMu.Unlock()
 	}
 
 	// Send initialized notification (no response expected).
@@ -136,7 +149,9 @@ func (c *Client) ListTools() ([]ToolDef, error) {
 		return nil, fmt.Errorf("parse tools/list: %w", err)
 	}
 
-	c.tools = result.Tools
+	c.stateMu.Lock()
+	c.tools = append([]ToolDef(nil), result.Tools...)
+	c.stateMu.Unlock()
 	return result.Tools, nil
 }
 
@@ -185,12 +200,33 @@ func (c *Client) CallTool(name string, args map[string]any) (string, error) {
 
 // GetInstructions returns the server-provided instructions from initialization.
 func (c *Client) GetInstructions() string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
 	return c.instructions
+}
+
+// GetTools returns a snapshot of the currently cached tool definitions.
+func (c *Client) GetTools() []ToolDef {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return append([]ToolDef(nil), c.tools...)
+}
+
+// SetNotificationHandler registers a callback for server-initiated notifications.
+func (c *Client) SetNotificationHandler(handler func(method string, params json.RawMessage)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.notificationHandler = handler
 }
 
 // Close shuts down the MCP server subprocess.
 func (c *Client) Close() error {
-	c.stdin.Close()
+	if c.stdin != nil {
+		_ = c.stdin.Close()
+	}
+	if c.cmd == nil {
+		return nil
+	}
 	return c.cmd.Wait()
 }
 
@@ -218,7 +254,6 @@ func (c *Client) call(method string, params any) (json.RawMessage, error) {
 	}
 
 	// Read lines until we get a response matching our ID.
-	// Skip notifications (messages without an id field).
 	for {
 		if !c.stdout.Scan() {
 			if err := c.stdout.Err(); err != nil {
@@ -232,24 +267,30 @@ func (c *Client) call(method string, params any) (json.RawMessage, error) {
 			continue
 		}
 
-		var resp jsonrpcResponse
-		if err := json.Unmarshal(line, &resp); err != nil {
+		var msg jsonrpcMessage
+		if err := json.Unmarshal(line, &msg); err != nil {
 			continue // skip malformed lines
 		}
 
-		// Skip notifications (id == 0 means the field was absent or zero).
-		if resp.ID == 0 && resp.Error == nil && resp.Result == nil {
+		if msg.Method != "" && msg.ID == nil {
+			c.dispatchNotificationLocked(msg.Method, msg.Params)
 			continue
 		}
 
-		if resp.ID != id {
+		if msg.ID == nil || *msg.ID != id {
 			continue // not our response, skip
 		}
 
-		if resp.Error != nil {
-			return nil, fmt.Errorf("RPC error %d: %s", resp.Error.Code, resp.Error.Message)
+		if msg.Error != nil {
+			return nil, fmt.Errorf("RPC error %d: %s", msg.Error.Code, msg.Error.Message)
 		}
-		return resp.Result, nil
+		return msg.Result, nil
+	}
+}
+
+func (c *Client) dispatchNotificationLocked(method string, params json.RawMessage) {
+	if c.notificationHandler != nil {
+		c.notificationHandler(method, params)
 	}
 }
 

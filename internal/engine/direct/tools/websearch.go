@@ -5,15 +5,30 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 )
 
+// WebSearchConfig defines per-session filtering and usage limits for WebSearchTool.
+type WebSearchConfig struct {
+	AllowedDomains []string
+	BlockedDomains []string
+	MaxUses        int
+}
+
 // WebSearchTool searches the web using the Exa API.
-type WebSearchTool struct{}
+type WebSearchTool struct {
+	Config WebSearchConfig
+
+	mu       sync.Mutex
+	uses     int
+	seenURLs map[string]struct{}
+}
 
 func (t *WebSearchTool) Name() string        { return "WebSearch" }
 func (t *WebSearchTool) Description() string { return "Search the web using semantic search via Exa." }
@@ -120,6 +135,10 @@ func (t *WebSearchTool) Execute(ctx context.Context, input map[string]any) ToolR
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", apiKey)
 
+	if err := t.reserveUse(); err != nil {
+		return ToolResult{Content: err.Error(), IsError: true}
+	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return ToolResult{Content: fmt.Sprintf("search request failed: %v", err), IsError: true}
@@ -142,7 +161,12 @@ func (t *WebSearchTool) Execute(ctx context.Context, input map[string]any) ToolR
 		return ToolResult{Content: "No results found."}
 	}
 
-	return ToolResult{Content: formatExaResults(exaResp.Results)}
+	results := t.filterAndDedupeResults(exaResp.Results)
+	if len(results) == 0 {
+		return ToolResult{Content: "No results found."}
+	}
+
+	return ToolResult{Content: formatExaResults(results)}
 }
 
 // formatExaResults renders search results as numbered plain text.
@@ -159,4 +183,128 @@ func formatExaResults(results []exaResult) string {
 		}
 	}
 	return b.String()
+}
+
+func (t *WebSearchTool) reserveUse() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.Config.MaxUses > 0 && t.uses >= t.Config.MaxUses {
+		return fmt.Errorf("websearch: max_uses %d exceeded for this session", t.Config.MaxUses)
+	}
+
+	t.uses++
+	if t.seenURLs == nil {
+		t.seenURLs = make(map[string]struct{})
+	}
+
+	return nil
+}
+
+func (t *WebSearchTool) filterAndDedupeResults(results []exaResult) []exaResult {
+	allowed := normalizeConfiguredDomains(t.Config.AllowedDomains)
+	blocked := normalizeConfiguredDomains(t.Config.BlockedDomains)
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.seenURLs == nil {
+		t.seenURLs = make(map[string]struct{})
+	}
+
+	filtered := make([]exaResult, 0, len(results))
+	for _, result := range results {
+		if !shouldIncludeWebSearchResult(result.URL, allowed, blocked) {
+			continue
+		}
+
+		key := strings.TrimSpace(result.URL)
+		if _, ok := t.seenURLs[key]; ok {
+			continue
+		}
+
+		t.seenURLs[key] = struct{}{}
+		filtered = append(filtered, result)
+	}
+
+	return filtered
+}
+
+func shouldIncludeWebSearchResult(rawURL string, allowed map[string]struct{}, blocked map[string]struct{}) bool {
+	if len(allowed) == 0 && len(blocked) == 0 {
+		return true
+	}
+
+	domain := registeredDomainFromURL(rawURL)
+	if domain != "" {
+		if _, blockedMatch := blocked[domain]; blockedMatch {
+			return false
+		}
+	}
+
+	if len(allowed) == 0 {
+		return true
+	}
+
+	if domain == "" {
+		return false
+	}
+
+	_, allowedMatch := allowed[domain]
+	return allowedMatch
+}
+
+func normalizeConfiguredDomains(domains []string) map[string]struct{} {
+	if len(domains) == 0 {
+		return nil
+	}
+
+	normalized := make(map[string]struct{}, len(domains))
+	for _, domain := range domains {
+		key := normalizeConfiguredDomain(domain)
+		if key == "" {
+			continue
+		}
+		normalized[key] = struct{}{}
+	}
+
+	return normalized
+}
+
+func normalizeConfiguredDomain(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	if strings.Contains(raw, "://") {
+		return registeredDomainFromURL(raw)
+	}
+
+	return registeredDomainFromURL("https://" + raw)
+}
+
+// registeredDomainFromURL reduces hosts to their last two labels.
+// This does not handle public suffix edge cases such as co.uk.
+func registeredDomainFromURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if host == "" {
+		return ""
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		return host
+	}
+
+	labels := strings.Split(host, ".")
+	if len(labels) <= 2 {
+		return host
+	}
+
+	return strings.Join(labels[len(labels)-2:], ".")
 }

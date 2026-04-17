@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -86,6 +88,13 @@ func CheckBashSecurity(command string) SecurityCheck {
 		}
 	}
 
+	if containsInPlaceEdit(command) {
+		return SecurityCheck{
+			Allowed: false,
+			Reason:  fmt.Errorf("bash: in-place edit (sed -i) not allowed; use Edit or Write tools").Error(),
+		}
+	}
+
 	// Extract base command (first word of each pipeline segment).
 	segments := splitCommandSegments(command)
 	for _, seg := range segments {
@@ -143,6 +152,30 @@ func CheckBashSecurity(command string) SecurityCheck {
 	}
 
 	return SecurityCheck{Allowed: true, Reason: "passed all checks"}
+}
+
+// containsInPlaceEdit returns true when a command segment invokes sed, perl,
+// or awk with an in-place edit flag.
+func containsInPlaceEdit(cmd string) bool {
+	segments := splitCommandSegments(cmd)
+	for _, segment := range segments {
+		tokens := tokenizeCommand(segment)
+		commandIdx := commandTokenIndex(tokens)
+		if commandIdx == -1 {
+			continue
+		}
+
+		base := filepath.Base(tokens[commandIdx])
+		if !isInPlaceEditCommand(base) {
+			continue
+		}
+
+		if segmentContainsInPlaceEdit(base, tokens[commandIdx+1:]) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // splitCommandSegments splits a command string on shell operators (;, &&, ||, |).
@@ -253,4 +286,116 @@ func extractBaseCommand(segment string) string {
 		return ""
 	}
 	return parts[0]
+}
+
+// tokenizeCommand splits a shell command into whitespace-delimited tokens while
+// preserving empty quoted arguments, including empty string arguments.
+func tokenizeCommand(cmd string) []string {
+	var tokens []string
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+	escaped := false
+	started := false
+
+	flush := func() {
+		if !started {
+			return
+		}
+		tokens = append(tokens, current.String())
+		current.Reset()
+		started = false
+	}
+
+	for i := 0; i < len(cmd); i++ {
+		ch := cmd[i]
+
+		if escaped {
+			current.WriteByte(ch)
+			escaped = false
+			started = true
+			continue
+		}
+
+		if ch == '\\' && !inSingle {
+			escaped = true
+			started = true
+			continue
+		}
+
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			started = true
+			continue
+		}
+
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			started = true
+			continue
+		}
+
+		if !inSingle && !inDouble && (ch == ' ' || ch == '\t' || ch == '\n') {
+			flush()
+			continue
+		}
+
+		current.WriteByte(ch)
+		started = true
+	}
+
+	flush()
+	return tokens
+}
+
+// commandTokenIndex returns the first non-env-assignment token in a segment.
+func commandTokenIndex(tokens []string) int {
+	for i, token := range tokens {
+		if token == "" {
+			continue
+		}
+		if !isEnvAssignment(token) {
+			return i
+		}
+	}
+
+	return -1
+}
+
+// isEnvAssignment returns true when a token is a simple leading env assignment.
+func isEnvAssignment(token string) bool {
+	eqIdx := strings.Index(token, "=")
+	return eqIdx > 0
+}
+
+// isInPlaceEditCommand returns true for commands that support in-place edits.
+func isInPlaceEditCommand(command string) bool {
+	switch command {
+	case "sed", "perl", "awk":
+		return true
+	default:
+		return false
+	}
+}
+
+// segmentContainsInPlaceEdit returns true when the command arguments request
+// in-place editing for the given command.
+func segmentContainsInPlaceEdit(command string, args []string) bool {
+	for i, arg := range args {
+		switch command {
+		case "sed", "perl":
+			if arg == "-i" || arg == "--in-place" {
+				return true
+			}
+			if strings.HasPrefix(arg, "-i") || strings.HasPrefix(arg, "--in-place=") {
+				return true
+			}
+		case "awk":
+			if arg == "-i" && i+1 < len(args) && args[i+1] == "inplace" {
+				return true
+			}
+		}
+	}
+
+	return false
 }

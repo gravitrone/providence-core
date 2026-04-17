@@ -10,7 +10,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// OutputStyle loaded from .providence/output-styles/*.md.
+const builtinDefault = ``
+
+const builtinExplanatory = `Explain your decisions as you work so the user can follow the tradeoffs and sequence.
+Keep the task moving, but briefly call out why you picked an approach, check, or edit when that context helps someone learn the codebase.`
+
+const builtinLearning = `Treat each task as a teaching moment and leave the user with a clear path to continue the work themselves.
+When you add or reshape code, include short TODO(human) stubs where the user should fill in project-specific judgment or follow-up details.`
+
+// OutputStyle describes a built-in or disk-loaded output style.
 type OutputStyle struct {
 	Name                   string `yaml:"name"`
 	Description            string `yaml:"description"`
@@ -21,7 +29,28 @@ type OutputStyle struct {
 	FilePath string `yaml:"-"`
 }
 
-// LoadOutputStyles discovers output styles from project and user directories.
+func builtinStyles() []OutputStyle {
+	return []OutputStyle{
+		{
+			Name:        "default",
+			Description: "Providence baseline output style.",
+			Prompt:      builtinDefault,
+		},
+		{
+			Name:        "explanatory",
+			Description: "Explains decisions while working through the task.",
+			Prompt:      builtinExplanatory,
+		},
+		{
+			Name:        "learning",
+			Description: "Turns tasks into short teaching moments with TODO(human) stubs.",
+			Prompt:      builtinLearning,
+		},
+	}
+}
+
+// LoadOutputStyles discovers built-in, project, and user output styles.
+// Disk-loaded styles override built-ins with the same name.
 // Project-level styles override user-level styles with the same name.
 func LoadOutputStyles(projectRoot, homeDir string) ([]OutputStyle, error) {
 	dirs := []string{
@@ -31,8 +60,13 @@ func LoadOutputStyles(projectRoot, homeDir string) ([]OutputStyle, error) {
 		filepath.Join(homeDir, ".claude", "output-styles"),
 	}
 
-	seen := make(map[string]struct{})
-	var result []OutputStyle
+	result := builtinStyles()
+	indexByName := make(map[string]int, len(result))
+	for i := range result {
+		indexByName[result[i].Name] = i
+	}
+
+	diskSeen := make(map[string]struct{})
 
 	for _, dir := range dirs {
 		styles, err := loadStylesFromDir(dir)
@@ -40,11 +74,17 @@ func LoadOutputStyles(projectRoot, homeDir string) ([]OutputStyle, error) {
 			return nil, fmt.Errorf("failed to load output styles from %s: %w", dir, err)
 		}
 		for _, s := range styles {
-			if _, exists := seen[s.Name]; exists {
+			if _, exists := diskSeen[s.Name]; exists {
 				continue
 			}
-			seen[s.Name] = struct{}{}
-			result = append(result, s)
+
+			if idx, exists := indexByName[s.Name]; exists {
+				result[idx] = s
+			} else {
+				indexByName[s.Name] = len(result)
+				result = append(result, s)
+			}
+			diskSeen[s.Name] = struct{}{}
 		}
 	}
 

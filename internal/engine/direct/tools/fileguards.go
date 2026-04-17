@@ -16,6 +16,44 @@ import (
 // implementation, in line with Providence's narrower tool surface.
 const MaxEditableFileSize = 100 * 1024 * 1024
 
+var dangerousHomeFiles = []string{
+	".bashrc",
+	".bash_profile",
+	".bash_login",
+	".zshrc",
+	".zshenv",
+	".zprofile",
+	".zlogin",
+	".profile",
+	filepath.Join(".config", "fish", "config.fish"),
+	filepath.Join(".config", "nushell", "config.nu"),
+	filepath.Join(".docker", "config.json"),
+	".netrc",
+	".gitconfig",
+	".npmrc",
+	".pypirc",
+	filepath.Join(".kube", "config"),
+}
+
+var dangerousHomeDirs = []string{
+	".ssh",
+	".aws",
+	".gcloud",
+	filepath.Join("Library", "Application Support", "Google", "Chrome"),
+	filepath.Join("Library", "Application Support", "Firefox"),
+	filepath.Join("Library", "Keychains"),
+}
+
+var dangerousSystemFiles = []string{
+	"/etc/sudoers",
+	"/etc/passwd",
+	"/etc/shadow",
+}
+
+var dangerousSystemDirs = []string{
+	"/etc/ssh",
+}
+
 // SizeGuardError returns a non-nil ToolResult.Content string if path
 // exceeds the size cap. Empty string means the target is within
 // bounds (or does not exist yet, which is fine for Write-as-create).
@@ -32,6 +70,45 @@ func SizeGuardError(path string) string {
 		)
 	}
 	return ""
+}
+
+// IsDangerousPath returns true when path resolves to a shell-init file,
+// credential store, browser profile, or system account file that tool
+// operations should refuse unless the user explicitly confirms it.
+func IsDangerousPath(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+
+	absPath := canonicalizeDangerousPath(path)
+
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" {
+		homePath := canonicalizeDangerousPath(home)
+		for _, rel := range dangerousHomeFiles {
+			if absPath == canonicalizeDangerousPath(filepath.Join(homePath, rel)) {
+				return true
+			}
+		}
+		for _, rel := range dangerousHomeDirs {
+			if isDangerousDirMatch(absPath, canonicalizeDangerousPath(filepath.Join(homePath, rel))) {
+				return true
+			}
+		}
+	}
+
+	for _, filePath := range dangerousSystemFiles {
+		if absPath == canonicalizeDangerousPath(filePath) {
+			return true
+		}
+	}
+	for _, dirPath := range dangerousSystemDirs {
+		if isDangerousDirMatch(absPath, canonicalizeDangerousPath(dirPath)) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // IsSettingsFile returns true if the path looks like Providence or
@@ -77,4 +154,42 @@ func ValidateSettingsContent(path, content string) error {
 		}
 	}
 	return nil
+}
+
+func canonicalizeDangerousPath(path string) string {
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	absPath = filepath.Clean(absPath)
+
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		return filepath.Clean(resolved)
+	}
+
+	current := absPath
+	var unresolved []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			parts := make([]string, 0, len(unresolved)+1)
+			parts = append(parts, resolved)
+			for i := len(unresolved) - 1; i >= 0; i-- {
+				parts = append(parts, unresolved[i])
+			}
+			return filepath.Clean(filepath.Join(parts...))
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return absPath
+		}
+
+		unresolved = append(unresolved, filepath.Base(current))
+		current = parent
+	}
+}
+
+func isDangerousDirMatch(path, dangerousDir string) bool {
+	return path == dangerousDir || strings.HasPrefix(path, dangerousDir+string(os.PathSeparator))
 }

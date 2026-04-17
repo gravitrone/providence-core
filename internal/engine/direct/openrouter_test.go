@@ -249,8 +249,8 @@ func TestOpenRouterUsageParsing(t *testing.T) {
 	serverURL, err := url.Parse(server.URL)
 	require.NoError(t, err)
 
-	originalClient := http.DefaultClient
-	http.DefaultClient = &http.Client{
+	originalClient := providerHTTPClient
+	providerHTTPClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			cloned := req.Clone(req.Context())
 			cloned.URL.Scheme = serverURL.Scheme
@@ -259,7 +259,7 @@ func TestOpenRouterUsageParsing(t *testing.T) {
 		}),
 	}
 	defer func() {
-		http.DefaultClient = originalClient
+		providerHTTPClient = originalClient
 	}()
 
 	e := &DirectEngine{

@@ -113,7 +113,7 @@ func (p *codexCompactProvider) OneShot(ctx context.Context, systemPrompt, input 
 		req.Header.Set("X-OpenAI-Account-ID", tokens.AccountID)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := providerHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("codex compact request: %w", err)
 	}

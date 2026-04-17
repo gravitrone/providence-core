@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -121,9 +122,131 @@ type CustomTool struct {
 	Dir      string // directory containing the tool
 }
 
+// placeholderPattern matches a {{name}} placeholder. Used both to detect
+// pure-placeholder tokens in the command template and to reject embedded
+// placeholders inside larger shell tokens (e.g. "prefix{{x}}suffix").
+var placeholderPattern = regexp.MustCompile(`\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}`)
+
+// purePlaceholderPattern matches a token that is exactly a single
+// placeholder with no surrounding text. These are the only safe positional
+// substitutions.
+var purePlaceholderPattern = regexp.MustCompile(`^\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}$`)
+
+// buildArgv parses the command template into an argv slice, substituting
+// placeholders with input values as separate positional arguments (never
+// concatenated into a shell string). Tokens that contain a placeholder
+// embedded in larger text are rejected with a clear error because they
+// cannot be resolved safely without a shell.
+//
+// Example:
+//
+//	command: "grep {{pattern}} {{file}}"
+//	params:  {"pattern": "; rm -rf ~", "file": "a.txt"}
+//	argv:    ["grep", "; rm -rf ~", "a.txt"]
+//
+// The dangerous value survives as a single argv element passed to grep,
+// never as shell-interpreted text.
+func buildArgv(cmdTemplate string, params map[string]any) ([]string, error) {
+	tokens, err := splitShellTokens(cmdTemplate)
+	if err != nil {
+		return nil, err
+	}
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("empty command template")
+	}
+
+	argv := make([]string, 0, len(tokens))
+	for _, tok := range tokens {
+		if m := purePlaceholderPattern.FindStringSubmatch(tok); m != nil {
+			key := m[1]
+			val, ok := params[key]
+			if !ok {
+				return nil, fmt.Errorf("missing input for placeholder %q", key)
+			}
+			argv = append(argv, fmt.Sprintf("%v", val))
+			continue
+		}
+		// reject placeholders embedded inside a larger token. "{{x}}-suffix"
+		// cannot become a single safe argv element without shell semantics,
+		// so we refuse rather than silently concatenate and reintroduce the
+		// injection primitive.
+		if placeholderPattern.MatchString(tok) {
+			return nil, fmt.Errorf(
+				"placeholder embedded inside token %q is not supported; "+
+					"use a whole-token placeholder like \"{{name}}\" or pass the value via the $P_* env convention",
+				tok,
+			)
+		}
+		argv = append(argv, tok)
+	}
+	return argv, nil
+}
+
+// splitShellTokens splits a command template on whitespace while respecting
+// single and double quotes. Quotes are stripped from the resulting tokens.
+// Backslash escaping is intentionally not supported so the grammar stays
+// small and predictable; tool authors needing complex values should pass
+// them via inputs (which are safely substituted as whole-token placeholders)
+// or via the $P_* env convention.
+func splitShellTokens(s string) ([]string, error) {
+	var tokens []string
+	var cur strings.Builder
+	inSingle := false
+	inDouble := false
+	hasContent := false
+
+	flush := func() {
+		if hasContent || cur.Len() > 0 {
+			tokens = append(tokens, cur.String())
+			cur.Reset()
+			hasContent = false
+		}
+	}
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\'' && !inDouble:
+			inSingle = !inSingle
+			hasContent = true
+		case c == '"' && !inSingle:
+			inDouble = !inDouble
+			hasContent = true
+		case (c == ' ' || c == '\t') && !inSingle && !inDouble:
+			flush()
+		default:
+			cur.WriteByte(c)
+			hasContent = true
+		}
+	}
+	if inSingle || inDouble {
+		return nil, fmt.Errorf("unterminated quote in command template")
+	}
+	flush()
+	return tokens, nil
+}
+
+// envFromParams returns "P_<UPPER_KEY>=<value>" strings suitable for
+// cmd.Env, letting tool scripts reference inputs via $P_NAME without shell
+// interpolation at substitution time.
+func envFromParams(params map[string]any) []string {
+	if len(params) == 0 {
+		return nil
+	}
+	env := make([]string, 0, len(params))
+	for k, v := range params {
+		env = append(env, fmt.Sprintf("P_%s=%v", strings.ToUpper(k), v))
+	}
+	return env
+}
+
 // Call executes the custom tool by running its command.
-// If Manifest.Stdin is "json", the input JSON is piped to stdin.
-// Otherwise, {{param}} placeholders in the command are substituted with input values.
+// If Manifest.Stdin is "json", the input JSON is piped to stdin and the
+// command template is executed verbatim (still tokenized, no shell).
+// Otherwise, {{param}} placeholders are substituted as positional argv
+// elements; placeholder values are never concatenated into a shell string.
+// Input values are also exposed as $P_<UPPER_KEY> env vars for tools that
+// prefer the env convention.
 func (t *CustomTool) Call(ctx context.Context, input json.RawMessage) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, DefaultTimeout)
 	defer cancel()
@@ -135,17 +258,16 @@ func (t *CustomTool) Call(ctx context.Context, input json.RawMessage) (string, e
 		}
 	}
 
-	cmdStr := t.Manifest.Command
-	if t.Manifest.Stdin != "json" {
-		// Substitute {{param}} placeholders.
-		for key, val := range params {
-			placeholder := "{{" + key + "}}"
-			cmdStr = strings.ReplaceAll(cmdStr, placeholder, fmt.Sprintf("%v", val))
-		}
+	argv, err := buildArgv(t.Manifest.Command, params)
+	if err != nil {
+		return "", fmt.Errorf("tool %s: invalid command template: %w", t.Manifest.Name, err)
 	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = t.Dir
+	if envExtra := envFromParams(params); len(envExtra) > 0 {
+		cmd.Env = append(os.Environ(), envExtra...)
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

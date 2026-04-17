@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/gravitrone/providence-core/internal/engine"
-	"github.com/gravitrone/providence-core/internal/engine/session"
 )
 
 func init() {
@@ -281,16 +280,9 @@ func (s *Session) Status() engine.SessionStatus {
 	return s.status
 }
 
-// RestoreHistory is a no-op for the claude headless backend. The Claude Code
-// CLI manages its own conversation state internally and there is no protocol
-// hook to inject prior turns, so resumed sessions will not share memory with
-// the underlying process. The UI still repopulates its visual history.
-func (s *Session) RestoreHistory(messages []engine.RestoredMessage) error {
-	return nil
-}
-
 // TriggerCompact sends a /compact command to the claude subprocess via NDJSON
-// stdin, requesting manual context compaction.
+// stdin, requesting manual context compaction. This makes *Session satisfy
+// engine.Compactor; callers feature-detect before invoking.
 func (s *Session) TriggerCompact(_ context.Context) error {
 	return s.sendJSON(map[string]any{
 		"type": "user",
@@ -299,12 +291,6 @@ func (s *Session) TriggerCompact(_ context.Context) error {
 			"content": "/compact",
 		},
 	})
-}
-
-// SessionBus returns a no-op bus. The claude headless backend does not support
-// session event broadcasting since it manages its own subprocess state.
-func (s *Session) SessionBus() *session.Bus {
-	return session.NewBus()
 }
 
 // sendJSON marshals v as JSON and writes a newline-terminated line to stdin.

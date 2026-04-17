@@ -93,7 +93,11 @@ func TestCodexHeadlessRespondPermissionNoop(t *testing.T) {
 	assert.NoError(t, eng.RespondPermission("q1", "o1"))
 }
 
-func TestCodexHeadlessRestoreHistoryNoop(t *testing.T) {
+// TestCodexHeadlessDoesNotImplementHistoryRestorer pins the capability
+// split: codex_headless should NOT satisfy HistoryRestorer, so callers
+// skip it via the type-assertion pattern rather than calling a stubbed
+// no-op that silently drops the requested restore.
+func TestCodexHeadlessDoesNotImplementHistoryRestorer(t *testing.T) {
 	cfg := engine.EngineConfig{
 		Type: EngineTypeCodexHeadless,
 	}
@@ -101,12 +105,16 @@ func TestCodexHeadlessRestoreHistoryNoop(t *testing.T) {
 	if err != nil {
 		t.Skip("codex CLI not installed")
 	}
-	assert.NoError(t, eng.RestoreHistory([]engine.RestoredMessage{
-		{Role: "user", Content: "hello"},
-	}))
+	var e engine.Engine = eng
+	_, ok := e.(engine.HistoryRestorer)
+	assert.False(t, ok,
+		"codex_headless must not satisfy HistoryRestorer - it has no protocol hook to inject history")
 }
 
-func TestCodexHeadlessSessionBus(t *testing.T) {
+// TestCodexHeadlessDoesNotImplementCompactor pins that codex_headless
+// opts out of manual compaction. The compaction orchestrator then falls
+// back cleanly instead of invoking a stubbed no-op.
+func TestCodexHeadlessDoesNotImplementCompactor(t *testing.T) {
 	cfg := engine.EngineConfig{
 		Type: EngineTypeCodexHeadless,
 	}
@@ -114,5 +122,25 @@ func TestCodexHeadlessSessionBus(t *testing.T) {
 	if err != nil {
 		t.Skip("codex CLI not installed")
 	}
-	assert.NotNil(t, eng.SessionBus())
+	var e engine.Engine = eng
+	_, ok := e.(engine.Compactor)
+	assert.False(t, ok,
+		"codex_headless must not satisfy Compactor - the codex CLI manages its own context")
+}
+
+// TestCodexHeadlessImplementsSessionBusProvider verifies the engine keeps
+// a real event bus for background agents. This is the one capability
+// codex_headless genuinely supports.
+func TestCodexHeadlessImplementsSessionBusProvider(t *testing.T) {
+	cfg := engine.EngineConfig{
+		Type: EngineTypeCodexHeadless,
+	}
+	eng, err := NewCodexHeadlessEngine(cfg)
+	if err != nil {
+		t.Skip("codex CLI not installed")
+	}
+	var e engine.Engine = eng
+	sbp, ok := e.(engine.SessionBusProvider)
+	require.True(t, ok, "codex_headless must satisfy SessionBusProvider")
+	assert.NotNil(t, sbp.SessionBus())
 }

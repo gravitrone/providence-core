@@ -67,7 +67,11 @@ type RestoredMessage struct {
 	ToolInput  string
 }
 
-// Engine is the interface all AI backends must implement.
+// Engine is the minimal interface every AI backend must satisfy.
+// Capability-specific operations (history restore, manual compaction,
+// session bus access) live on separate interfaces below; callers
+// feature-detect with a type assertion rather than forcing every engine
+// to implement useless stubs.
 type Engine interface {
 	// Send sends a user message to the AI.
 	Send(text string) error
@@ -84,18 +88,35 @@ type Engine interface {
 	Close()
 	// Status returns the current engine status.
 	Status() SessionStatus
-	// RestoreHistory replaces the engine's conversation history with the given
-	// messages. Used when resuming a past session so the model has memory of
-	// prior turns. Engines may synthesize text for tool history when they
-	// cannot replay native tool-call blocks safely.
-	// Engines that cannot inject history (e.g. claude headless) should
-	// implement this as a no-op.
+}
+
+// HistoryRestorer is implemented by engines that can rehydrate prior
+// conversation turns into their internal history. Callers should
+// feature-detect via:
+//
+//	if hr, ok := eng.(HistoryRestorer); ok { _ = hr.RestoreHistory(msgs) }
+//
+// Engines that have no hook to inject history (e.g. claude headless,
+// codex_headless, opencode) simply do not implement this interface, and
+// callers fall back to "resumed session without model-side memory".
+type HistoryRestorer interface {
 	RestoreHistory(messages []RestoredMessage) error
-	// TriggerCompact requests manual context compaction when supported.
+}
+
+// Compactor is implemented by engines that support manual context
+// compaction. Engines without a compaction hook omit this interface; the
+// compaction orchestrator then skips them or falls back to a different
+// strategy (e.g. context collapse) rather than hanging on a stub error.
+type Compactor interface {
 	TriggerCompact(ctx context.Context) error
-	// SessionBus returns the engine's session event bus for background agents
-	// and plugin subscribers. Engines that don't support event broadcasting
-	// return a no-op bus (publishes are silently dropped).
+}
+
+// SessionBusProvider is implemented by engines that publish lifecycle
+// events onto a fan-out bus for background agents, overlays, and
+// plugin subscribers. Engines without a real bus omit this interface so
+// subscribers can detect "no bus" upfront instead of draining a
+// throwaway channel that never fires.
+type SessionBusProvider interface {
 	SessionBus() *session.Bus
 }
 

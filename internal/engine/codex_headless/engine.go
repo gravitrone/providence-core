@@ -2,7 +2,6 @@ package codex_headless
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -284,18 +283,9 @@ func (e *CodexHeadlessEngine) Status() engine.SessionStatus {
 	return e.status
 }
 
-// RestoreHistory is a no-op. The codex CLI is single-shot (codex exec) and does
-// not support injecting prior conversation history.
-func (e *CodexHeadlessEngine) RestoreHistory(_ []engine.RestoredMessage) error {
-	return nil
-}
-
-// TriggerCompact is a no-op. The codex CLI manages its own context internally.
-func (e *CodexHeadlessEngine) TriggerCompact(_ context.Context) error {
-	return nil
-}
-
-// SessionBus returns the engine's session event bus.
+// SessionBus returns the engine's session event bus. Implementing
+// engine.SessionBusProvider lets background agents subscribe to this
+// engine's lifecycle without a forced stub on engines that have no bus.
 func (e *CodexHeadlessEngine) SessionBus() *session.Bus {
 	return e.bus
 }

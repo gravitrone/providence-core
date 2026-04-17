@@ -5093,8 +5093,18 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				}
 			}
 
-			// Full compaction.
-			err := eng.TriggerCompact(context.Background())
+			// Full compaction. Only engines that implement Compactor
+			// support manual /compact; others get a clear error instead
+			// of hanging on a stubbed method.
+			compactor, ok := eng.(engine.Compactor)
+			if !ok {
+				return compactTriggerMsg{
+					AwaitEvents:  awaitEvents,
+					Err:          fmt.Errorf("this engine does not support manual compaction"),
+					TokensBefore: tokensBefore,
+				}
+			}
+			err := compactor.TriggerCompact(context.Background())
 			return compactTriggerMsg{
 				AwaitEvents:  awaitEvents,
 				Err:          err,
@@ -6973,9 +6983,15 @@ func createEngineAndRestore(restored []engine.RestoredMessage, model string, eng
 		if err != nil {
 			return engineRestoredMsg{err: fmt.Errorf("failed to create session: %w", err)}
 		}
-		if err := eng.RestoreHistory(restored); err != nil {
-			eng.Close()
-			return engineRestoredMsg{err: fmt.Errorf("failed to restore history: %w", err)}
+		// Only engines that implement HistoryRestorer can rehydrate prior
+		// turns into the model context. Others (e.g. headless claude) still
+		// succeed; the UI-side history is repopulated separately, so the
+		// user sees past messages even if the model can't remember them.
+		if hr, ok := eng.(engine.HistoryRestorer); ok {
+			if err := hr.RestoreHistory(restored); err != nil {
+				eng.Close()
+				return engineRestoredMsg{err: fmt.Errorf("failed to restore history: %w", err)}
+			}
 		}
 		return engineRestoredMsg{engine: eng}
 	}

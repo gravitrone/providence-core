@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,6 +44,10 @@ func newFakeEngine() *fakeEngine {
 	}
 }
 
+func quietLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func (e *fakeEngine) Send(text string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -59,9 +67,9 @@ func (e *fakeEngine) sendCallAt(i int) string {
 	return e.sendCalled[i]
 }
 
-func (e *fakeEngine) Interrupt() { e.interrupted = true }
-func (e *fakeEngine) Model() string { return e.model }
-func (e *fakeEngine) EngineType() string { return e.engineType }
+func (e *fakeEngine) Interrupt()               { e.interrupted = true }
+func (e *fakeEngine) Model() string            { return e.model }
+func (e *fakeEngine) EngineType() string       { return e.engineType }
 func (e *fakeEngine) SessionBus() *session.Bus { return e.bus }
 
 // --- Tests ---
@@ -265,6 +273,97 @@ func TestBridgeStartForwardsSessionEvents(t *testing.T) {
 	assert.Equal(t, session.EventNewMessage, se.Type)
 }
 
+func TestBridgeSetEngineConcurrentHandlerNoRace(t *testing.T) {
+	eng := newFakeEngine()
+	bridge := NewBridge(nil, ember.New(), nil, nil, quietLogger())
+	bridge.SetEngine(eng)
+
+	var sawUnexpected atomic.Bool
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			bridge.SetEngine(eng)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			w := bridge.OnHello(nil, Hello{PID: i + 1})
+			if w.Engine != "claude" || w.Model != "sonnet" {
+				sawUnexpected.Store(true)
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	assert.False(t, sawUnexpected.Load())
+}
+
+func TestBridgeStartForwardsSessionBusEventAfterSetEngine(t *testing.T) {
+	eng := newFakeEngine()
+	spawn := false
+	dir, err := os.MkdirTemp("/tmp", "pvd-bridge-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	manager := NewManager(Config{
+		SocketPath: filepath.Join(dir, "overlay.sock"),
+		Spawn:      &spawn,
+	}, quietLogger())
+	bridge := NewBridge(nil, ember.New(), nil, manager, quietLogger())
+
+	managerCtx, stopManager := context.WithCancel(context.Background())
+	defer stopManager()
+	require.NoError(t, manager.Start(managerCtx, bridge))
+	t.Cleanup(func() {
+		require.NoError(t, manager.Stop(context.Background()))
+	})
+
+	bridge.SetEngine(eng)
+	bridgeCtx, stopBridge := context.WithCancel(context.Background())
+	defer stopBridge()
+	go bridge.Start(bridgeCtx)
+
+	srv := manager.Server()
+	require.NotNil(t, srv)
+
+	conn := dialTestClient(t, srv)
+	t.Cleanup(func() { _ = conn.Close() })
+	sendEnvelope(t, conn, TypeHello, Hello{PID: 1})
+	readEnvelope(t, conn) // welcome
+
+	eng.bus.Publish(session.Event{Type: session.EventNewMessage, Data: "set-engine payload"})
+
+	env := readEnvelope(t, conn)
+	assert.Equal(t, TypeSessionEvent, env.Type)
+
+	var se SessionEvent
+	require.NoError(t, json.Unmarshal(env.Data, &se))
+	assert.Equal(t, session.EventNewMessage, se.Type)
+	assert.JSONEq(t, `"set-engine payload"`, string(se.Data))
+}
+
+func TestManagerStopCallsSrvCancel(t *testing.T) {
+	manager := NewManager(Config{}, nil)
+	manager.state = StateRunning
+
+	cancelCalled := false
+	manager.srvCancel = func() {
+		cancelCalled = true
+	}
+
+	require.NoError(t, manager.Stop(context.Background()))
+
+	assert.True(t, cancelCalled)
+	assert.Nil(t, manager.srvCancel)
+	assert.Equal(t, StateStopped, manager.State())
+}
+
 // TestFormatTranscriptReminder checks the formatting of the post-ambient-rewire
 // transcript-only reminder builder.
 func TestFormatTranscriptReminder(t *testing.T) {
@@ -284,9 +383,9 @@ func TestFormatTranscriptReminder(t *testing.T) {
 			},
 		},
 		{
-			name:      "empty transcript returns empty string",
+			name:       "empty transcript returns empty string",
 			transcript: "",
-			wantEmpty: true,
+			wantEmpty:  true,
 		},
 	}
 
@@ -465,7 +564,6 @@ func TestBridgeSetEngineNilSafe(t *testing.T) {
 	assert.Empty(t, w.Model)
 }
 
-
 // --- Phase G: daily budget breaker ---
 
 func TestBridgeSkipsInjectionOnBudgetExceeded(t *testing.T) {
@@ -550,10 +648,10 @@ func makeTinyPNGB64(t *testing.T) string {
 func makeColoredPNGB64(t *testing.T, seed uint8) (string, []byte) {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
-	img.Pix[0] = seed  // R
-	img.Pix[1] = 0     // G
-	img.Pix[2] = 0     // B
-	img.Pix[3] = 255   // A
+	img.Pix[0] = seed // R
+	img.Pix[1] = 0    // G
+	img.Pix[2] = 0    // B
+	img.Pix[3] = 255  // A
 	var buf bytes.Buffer
 	require.NoError(t, png.Encode(&buf, img))
 	raw := make([]byte, buf.Len())

@@ -27,15 +27,14 @@ import (
 	"github.com/gravitrone/providence-core/internal/auth"
 	"github.com/gravitrone/providence-core/internal/config"
 	"github.com/gravitrone/providence-core/internal/engine"
-	_ "github.com/gravitrone/providence-core/internal/engine/claude"    // register claude factory
+	_ "github.com/gravitrone/providence-core/internal/engine/claude"         // register claude factory
 	_ "github.com/gravitrone/providence-core/internal/engine/codex_headless" // register codex_headless factory
-	_ "github.com/gravitrone/providence-core/internal/engine/codex_headless"       // register codex_headless factory
 	"github.com/gravitrone/providence-core/internal/engine/customtools"
 	"github.com/gravitrone/providence-core/internal/engine/direct"       // register direct factory + image types
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools" // tool prompts
 	"github.com/gravitrone/providence-core/internal/engine/ember"
-	"github.com/gravitrone/providence-core/internal/engine/outputstyles"
 	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
+	"github.com/gravitrone/providence-core/internal/engine/outputstyles"
 	"github.com/gravitrone/providence-core/internal/engine/skills"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
 	"github.com/gravitrone/providence-core/internal/engine/teams"
@@ -157,7 +156,7 @@ type overlayStopResultMsg struct{ err error }
 
 // ChatMessage represents a single message in the agent chat history.
 type ChatMessage struct {
-	Role        string    // "user", "assistant", "system", "permission", "tool", "thinking"
+	Role        string // "user", "assistant", "system", "permission", "tool", "thinking"
 	Content     string
 	Done        bool      // false while streaming
 	Timestamp   time.Time // when the message was created (used for elapsed time on agent tools)
@@ -314,11 +313,11 @@ type AgentTab struct {
 	// Slash command table state (harmonica-driven).
 	// slashCursor is the highlighted row in the filtered match list.
 	// -1 means no explicit selection (user is still typing).
-	slashCursor    int
-	slashOpen      float64 // 0.0 = closed, 1.0 = fully open
-	slashOpenVel   float64
-	slashPulse     float64 // 0.0..1.0 breathing on the selected row
-	slashPulseVel  float64
+	slashCursor   int
+	slashOpen     float64 // 0.0 = closed, 1.0 = fully open
+	slashOpenVel  float64
+	slashPulse    float64 // 0.0..1.0 breathing on the selected row
+	slashPulseVel float64
 	// slashMatchCount is the number of rows rendered on the last frame,
 	// used to clamp slashCursor when the user edits the input.
 	slashMatchCount int
@@ -453,8 +452,9 @@ type AgentTab struct {
 	errorExpanded map[int]bool
 
 	// Overlay process manager and bridge (may be nil if not configured).
-	overlayMgr    overlayManager
-	overlayBridge overlayBridge
+	overlayMgr          overlayManager
+	overlayBridge       overlayBridge
+	overlayBridgeCancel context.CancelFunc
 }
 
 // TurnDiff records a file modification that happened during a conversation turn.
@@ -736,6 +736,7 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 		at.engine = msg.engine
 		at.currentTokens = 0
 		at.compacting = false
+		at.wireOverlayEngine()
 		at.transferImagesToEngine()
 		// No Send here - engine waits for the next user turn. Start the event
 		// pump anyway so system init / later events are drained.
@@ -2972,10 +2973,10 @@ func (at AgentTab) messagesToRestored() []engine.RestoredMessage {
 					output = m.ToolBody
 				}
 				restored = append(restored, engine.RestoredMessage{
-					Role:       "tool",
-					Content:    output,
-					ToolName:   m.ToolName,
-					ToolInput:  m.ToolArgs,
+					Role:      "tool",
+					Content:   output,
+					ToolName:  m.ToolName,
+					ToolInput: m.ToolArgs,
 				})
 			}
 		}
@@ -7002,21 +7003,7 @@ func (at *AgentTab) handleEngineCreated(msg engineCreatedMsg) tea.Cmd {
 	at.engine = msg.engine
 	at.currentTokens = 0
 	at.compacting = false
-	// Wire overlay context injector so screen-context reminders are prepended
-	// to the next engine turn.
-	if at.overlayBridge != nil {
-		if de, ok := at.engine.(*direct.DirectEngine); ok {
-			de.SetContextInjector(at.overlayBridge)
-		}
-		if setter, ok := at.overlayBridge.(interface{ SetEngine(overlay.Engine) }); ok {
-			if oe, ok2 := at.engine.(overlay.Engine); ok2 {
-				setter.SetEngine(oe)
-			}
-		}
-		if sid, ok := at.overlayBridge.(interface{ SetSessionID(string) }); ok {
-			sid.SetSessionID(at.sessionID)
-		}
-	}
+	at.wireOverlayEngine()
 	// Transfer any pending images to the newly created engine.
 	at.transferImagesToEngine()
 	// Restore portable state from a prior engine switch if available.
@@ -7033,4 +7020,31 @@ func (at *AgentTab) handleEngineCreated(msg engineCreatedMsg) tea.Cmd {
 		return nil
 	}
 	return at.safeWaitForEvent()
+}
+
+// wireOverlayEngine attaches the current engine to the overlay bridge and
+// starts forwarding session-bus events once the bridge is wired.
+func (at *AgentTab) wireOverlayEngine() {
+	if at.overlayBridge == nil {
+		return
+	}
+	if de, ok := at.engine.(*direct.DirectEngine); ok {
+		de.SetContextInjector(at.overlayBridge)
+	}
+	if sid, ok := at.overlayBridge.(interface{ SetSessionID(string) }); ok {
+		sid.SetSessionID(at.sessionID)
+	}
+	if setter, ok := at.overlayBridge.(interface{ SetEngine(overlay.Engine) }); ok {
+		if oe, ok := at.engine.(overlay.Engine); ok {
+			setter.SetEngine(oe)
+			if starter, ok := at.overlayBridge.(interface{ Start(context.Context) }); ok {
+				if at.overlayBridgeCancel != nil {
+					at.overlayBridgeCancel()
+				}
+				bridgeCtx, cancel := context.WithCancel(context.Background())
+				at.overlayBridgeCancel = cancel
+				go starter.Start(bridgeCtx)
+			}
+		}
+	}
 }

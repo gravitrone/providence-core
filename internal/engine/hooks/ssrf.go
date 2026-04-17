@@ -4,8 +4,15 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"strings"
 )
+
+// allowLoopbackEnv is an operator escape hatch for the SSRF guard. When set,
+// loopback targets (127.0.0.0/8, ::1) are permitted. Tests that run hooks
+// against httptest servers flip this; operators who run local webhook
+// receivers can set PROVIDENCE_HOOKS_ALLOW_LOOPBACK=1 in their environment.
+const allowLoopbackEnv = "PROVIDENCE_HOOKS_ALLOW_LOOPBACK"
 
 type ssrfRule struct {
 	prefix netip.Prefix
@@ -71,8 +78,12 @@ func blockedSSRFIP(ip net.IP) (bool, string) {
 	}
 	addr = addr.Unmap()
 
+	loopbackAllowed := os.Getenv(allowLoopbackEnv) != ""
 	for _, rule := range blockedSSRFRules {
 		if rule.prefix.Contains(addr) {
+			if loopbackAllowed && rule.label == "loopback" {
+				continue
+			}
 			return true, fmt.Sprintf("resolved to %s address %s", rule.label, addr.String())
 		}
 	}

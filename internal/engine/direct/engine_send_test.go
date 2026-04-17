@@ -311,6 +311,7 @@ func TestSend_UserPromptSubmitHookFires(t *testing.T) {
 	defer apiSrv.Close()
 
 	t.Setenv("PROVIDENCE_MAX_RETRIES", "1")
+	t.Setenv("PROVIDENCE_HOOKS_ALLOW_LOOPBACK", "1")
 	e, err := NewDirectEngine(engine.EngineConfig{
 		Type:   engine.EngineTypeDirect,
 		Model:  "claude-sonnet-4-20250514",

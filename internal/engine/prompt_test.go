@@ -258,6 +258,38 @@ func TestFlattenBlocksEmpty(t *testing.T) {
 	assert.Equal(t, "", FlattenBlocks(nil))
 }
 
+func TestReminderIncludesTodosWhenTodoWriteInUse(t *testing.T) {
+	t.Parallel()
+
+	reminder := BuildTurnReminder(ReminderState{
+		TodoItems: []string{"Wire helper", "Add tests"},
+	})
+
+	assert.Contains(t, reminder, "TodoWrite is active. Keep it updated as you work.")
+	assert.Contains(t, reminder, "Unchecked items: Wire helper; Add tests.")
+}
+
+func TestReminderIncludesCompactionWhenNearBudget(t *testing.T) {
+	t.Parallel()
+
+	reminder := BuildTurnReminder(ReminderState{
+		CurrentTokens:  800,
+		HardTokenLimit: 1000,
+	})
+
+	assert.Contains(t, reminder, "Context usage is near the limit (800/1000).")
+}
+
+func TestReminderIncludesOutputTokenCount(t *testing.T) {
+	t.Parallel()
+
+	reminder := BuildTurnReminder(ReminderState{
+		LastTurnOutputTokens: 42,
+	})
+
+	assert.True(t, strings.HasSuffix(reminder, "Output tokens this turn: 42"))
+}
+
 func TestEnvInfoFormat(t *testing.T) {
 	env := &EnvInfo{
 		CWD:       "/home/user/project",

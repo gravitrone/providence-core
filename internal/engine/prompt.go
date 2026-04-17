@@ -807,12 +807,26 @@ func FormatInstructionInjection(files []InstructionFile) string {
 	return sb.String()
 }
 
-// ReminderState holds context for building mid-conversation system reminders.
+// ReminderState holds the dynamic state used to build reminder blocks.
 type ReminderState struct {
-	// TodoItems can be populated with active todo items if applicable.
+	// TodoItems carries unchecked todo content strings when TodoWrite is active.
 	TodoItems []string
 	// PlanMode indicates whether the agent is in plan mode.
 	PlanMode bool
+	// SessionUptime is the elapsed session duration for per-turn reminders.
+	SessionUptime time.Duration
+	// RecentFileChanges lists recently changed files for per-turn reminders.
+	RecentFileChanges []string
+	// TeammateMessages carries preformatted teammate reminder lines.
+	TeammateMessages []string
+	// CurrentTokens is the current prompt token estimate.
+	CurrentTokens int
+	// HardTokenLimit is the prompt hard limit used for compaction reminders.
+	HardTokenLimit int
+	// VerifyPlanTurnsRemaining tracks the next turns that should verify plan fidelity.
+	VerifyPlanTurnsRemaining int
+	// LastTurnOutputTokens is the prior completed turn's output token count.
+	LastTurnOutputTokens int
 }
 
 // BuildSystemReminders returns system reminder text based on current state.
@@ -836,4 +850,45 @@ func BuildSystemReminders(state ReminderState) string {
 	}
 
 	return strings.Join(reminders, "\n\n")
+}
+
+// BuildTurnReminder returns the per-turn reminder text for direct-engine calls.
+func BuildTurnReminder(state ReminderState) string {
+	var parts []string
+
+	if state.SessionUptime > time.Minute {
+		parts = append(parts, fmt.Sprintf("Session uptime: %s", state.SessionUptime.Truncate(time.Second)))
+	}
+
+	if len(state.TodoItems) > 0 {
+		parts = append(parts, fmt.Sprintf("Active todos: %d", len(state.TodoItems)))
+		parts = append(parts, fmt.Sprintf(
+			"TodoWrite is active. Keep it updated as you work. Unchecked items: %s.",
+			strings.Join(state.TodoItems, "; "),
+		))
+	}
+
+	if len(state.RecentFileChanges) > 0 {
+		parts = append(parts, fmt.Sprintf("Recent file changes: %s", strings.Join(state.RecentFileChanges, ", ")))
+	}
+
+	parts = append(parts, state.TeammateMessages...)
+
+	if state.HardTokenLimit > 0 && state.CurrentTokens*100 >= state.HardTokenLimit*80 {
+		parts = append(parts, fmt.Sprintf(
+			"Context usage is near the limit (%d/%d). Be succinct and avoid unnecessary output.",
+			state.CurrentTokens,
+			state.HardTokenLimit,
+		))
+	}
+
+	if state.VerifyPlanTurnsRemaining > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"Plan mode recently exited. Verify the implementation still matches the approved plan. (%d turns remaining)",
+			state.VerifyPlanTurnsRemaining,
+		))
+	}
+
+	parts = append(parts, fmt.Sprintf("Output tokens this turn: %d", state.LastTurnOutputTokens))
+	return strings.Join(parts, "\n")
 }

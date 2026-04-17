@@ -311,6 +311,114 @@ func TestRunnerAsync(t *testing.T) {
 	}, 30*time.Second, 50*time.Millisecond, "async hook should have created marker file")
 }
 
+func TestAsyncHookDispatchesWithoutBlocking(t *testing.T) {
+	t.Parallel()
+
+	r := NewRunner(map[string][]HookConfig{
+		PreToolUse: {{
+			Command: "lint",
+			Async:   true,
+			TTL:     time.Second,
+		}},
+	})
+
+	r.exec = func(ctx context.Context, cfg HookConfig, input HookInput) (*HookOutput, error) {
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return &HookOutput{SystemMessage: "lint clean"}, nil
+	}
+
+	start := time.Now()
+	out, err := r.Run(context.Background(), PreToolUse, HookInput{ToolName: "Write"})
+	require.NoError(t, err)
+	assert.Nil(t, out)
+	assert.Less(t, time.Since(start), 100*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		return r.CompletedCount() == 1
+	}, time.Second, 10*time.Millisecond)
+
+	results := r.DrainCompleted()
+	require.Len(t, results, 1)
+	assert.Equal(t, HookStatusOK, results[0].Status)
+	assert.Equal(t, "lint", results[0].Name)
+	assert.Contains(t, results[0].Output, "lint clean")
+}
+
+func TestAsyncHookTTLExpires(t *testing.T) {
+	r := NewRunner(map[string][]HookConfig{
+		PostToolUse: {{
+			Command: "lint",
+			Async:   true,
+			TTL:     40 * time.Millisecond,
+		}},
+	})
+
+	started := make(chan struct{})
+	exited := make(chan struct{})
+	r.exec = func(ctx context.Context, cfg HookConfig, input HookInput) (*HookOutput, error) {
+		close(started)
+		<-ctx.Done()
+		close(exited)
+		return nil, ctx.Err()
+	}
+
+	baseGoroutines := runtime.NumGoroutine()
+	out, err := r.Run(context.Background(), PostToolUse, HookInput{})
+	require.NoError(t, err)
+	assert.Nil(t, out)
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("async hook did not start")
+	}
+
+	require.Eventually(t, func() bool {
+		return r.PendingCount() == 0
+	}, time.Second, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-exited:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	assert.Zero(t, r.CompletedCount())
+	assert.Empty(t, r.DrainCompleted())
+
+	require.Eventually(t, func() bool {
+		return runtime.NumGoroutine() <= baseGoroutines+2
+	}, time.Second, 20*time.Millisecond)
+}
+
+func TestResolveHookConfigsReadsAsyncFromClaudeSettings(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, ".claude")
+	require.NoError(t, os.MkdirAll(settingsDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(settingsDir, "settings.json"),
+		[]byte(`{"hooks":{"PostToolUse":[{"url":"https://hooks.example/lint","async":true,"ttl":2500}]}}`),
+		0o644,
+	))
+
+	resolved := ResolveHookConfigs(dir, map[string][]HookConfig{
+		PostToolUse: {{
+			URL: "https://hooks.example/lint",
+		}},
+	})
+
+	require.Len(t, resolved[PostToolUse], 1)
+	assert.True(t, resolved[PostToolUse][0].Async)
+	assert.Equal(t, 2500*time.Millisecond, resolved[PostToolUse][0].TTL)
+}
+
 func TestHookInputSerialization(t *testing.T) {
 	input := HookInput{
 		Event:     PreToolUse,

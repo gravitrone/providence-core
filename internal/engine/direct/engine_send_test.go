@@ -694,6 +694,62 @@ func TestSend_TurnCompletedHookFires(t *testing.T) {
 	}
 }
 
+func TestAsyncHookResultAppearsInNextTurnAttachment(t *testing.T) {
+	t.Setenv("PROVIDENCE_HOOKS_ALLOW_LOOPBACK", "1")
+
+	hookDone := make(chan struct{}, 1)
+	hookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"system_message":"lint clean"}`))
+		select {
+		case hookDone <- struct{}{}:
+		default:
+		}
+	}))
+	defer hookSrv.Close()
+
+	e := &DirectEngine{
+		history:   NewConversationHistory(),
+		sessionID: "session-async-hooks",
+		hooksRunner: hooks.NewRunner(map[string][]hooks.HookConfig{
+			hooks.PostToolUse: {{
+				URL:   hookSrv.URL + "/lint",
+				Async: true,
+				TTL:   time.Second,
+			}},
+		}),
+	}
+
+	out, err := e.fireHook(hooks.PostToolUse, hooks.HookInput{
+		ToolName:  "Write",
+		ToolInput: "ok",
+	})
+	require.NoError(t, err)
+	assert.Nil(t, out)
+
+	select {
+	case <-hookDone:
+	case <-time.After(time.Second):
+		t.Fatal("async hook did not complete")
+	}
+
+	require.Eventually(t, func() bool {
+		return e.hooksRunner.CompletedCount() == 1
+	}, time.Second, 10*time.Millisecond)
+
+	e.injectPendingAttachments()
+
+	msgs := e.history.Messages()
+	require.Len(t, msgs, 1)
+	require.NotEmpty(t, msgs[0].Content)
+
+	text := msgs[0].Content[0].OfText
+	require.NotNil(t, text)
+	assert.Contains(t, text.Text, `<hook-result event="PostToolUse" name="lint" status="ok">`)
+	assert.Contains(t, text.Text, "lint clean")
+	assert.Zero(t, e.hooksRunner.CompletedCount())
+}
+
 // --- Helper / state-focused tests ---
 //
 // The remaining targets are exercised against helpers directly rather than a

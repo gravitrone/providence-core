@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -333,6 +334,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 			hooksMap[event] = append(hooksMap[event], hc)
 		}
 	}
+	hooksMap = hooks.ResolveHookConfigs(cfg.WorkDir, hooksMap)
 	hooksRunner := hooks.NewRunner(hooksMap)
 	cacheTTL := compactCacheTTL5m
 	if cfg.WorkDir != "" {
@@ -774,18 +776,22 @@ func (e *DirectEngine) SetContextInjector(inj contextInjector) {
 // prepareUserText prepends any pending overlay system-reminder to text.
 // Returns the (possibly modified) text. Safe to call with nil injector.
 func (e *DirectEngine) prepareUserText(text string) string {
-	if e.contextInjector == nil {
-		return text
+	var parts []string
+
+	if attachments := e.drainPendingHookAttachments(); attachments != "" {
+		parts = append(parts, attachments)
 	}
-	if reminder := e.contextInjector.PendingSystemReminder(); reminder != "" {
-		return reminder + "\n\n" + text
+	if e.contextInjector != nil {
+		if reminder := e.contextInjector.PendingSystemReminder(); reminder != "" {
+			parts = append(parts, reminder)
+		}
 	}
-	return text
+	parts = append(parts, text)
+	return strings.Join(parts, "\n\n")
 }
 
 // Send sends a user message to the AI and starts the agent loop.
 func (e *DirectEngine) Send(text string) error {
-	text = e.prepareUserText(text)
 	e.mu.Lock()
 	if e.status == engine.StatusRunning {
 		e.mu.Unlock()
@@ -809,6 +815,8 @@ func (e *DirectEngine) Send(text string) error {
 			return err
 		}
 	}
+
+	text = e.prepareUserText(text)
 
 	e.mu.Lock()
 	images := e.pendingImages
@@ -969,6 +977,12 @@ func (e *DirectEngine) Close() {
 				SessionID: e.sessionID,
 				ToolInput: "close",
 			})
+		}
+	})
+
+	runWithDeadline(failsafe, 500*time.Millisecond, func() {
+		if e.hooksRunner != nil {
+			e.hooksRunner.Close()
 		}
 	})
 
@@ -2910,8 +2924,46 @@ func (e *DirectEngine) injectPerTurnContext() {
 // between tool results and the next API call. This includes file change
 // notifications and steered messages that arrived during tool execution.
 func (e *DirectEngine) injectPendingAttachments() {
+	if attachments := e.drainPendingHookAttachments(); attachments != "" {
+		e.history.AddUser(attachments)
+	}
+
 	// Drain any steered messages that arrived during tool execution.
 	e.drainSteeredMessages()
+}
+
+func (e *DirectEngine) drainPendingHookAttachments() string {
+	if e.hooksRunner == nil {
+		return ""
+	}
+
+	completed := e.hooksRunner.DrainCompleted()
+	if len(completed) == 0 {
+		return ""
+	}
+
+	attachments := make([]string, 0, len(completed))
+	for _, result := range completed {
+		attachments = append(attachments, formatPendingHookAttachment(result))
+	}
+	return strings.Join(attachments, "\n\n")
+}
+
+func formatPendingHookAttachment(result hooks.CompletedHook) string {
+	attrs := fmt.Sprintf(
+		`event="%s" name="%s" status="%s"`,
+		html.EscapeString(result.Event),
+		html.EscapeString(result.Name),
+		html.EscapeString(result.Status),
+	)
+	if result.Output == "" {
+		return fmt.Sprintf("<hook-result %s></hook-result>", attrs)
+	}
+	return fmt.Sprintf(
+		"<hook-result %s>\n%s\n</hook-result>",
+		attrs,
+		html.EscapeString(result.Output),
+	)
 }
 
 // --- Content replacement tracking ---

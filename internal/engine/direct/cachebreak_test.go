@@ -1,6 +1,7 @@
 package direct
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +12,30 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gravitrone/providence-core/internal/engine"
+	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
 )
+
+type cachebreakTestTool struct {
+	name        string
+	description string
+	schema      map[string]any
+}
+
+func (t cachebreakTestTool) Name() string { return t.name }
+
+func (t cachebreakTestTool) Description() string { return t.description }
+
+func (t cachebreakTestTool) InputSchema() map[string]any { return t.schema }
+
+func (t cachebreakTestTool) ReadOnly() bool { return true }
+
+func (t cachebreakTestTool) Execute(context.Context, map[string]any) tools.ToolResult {
+	return tools.ToolResult{}
+}
+
+func testRegistry(toolsList ...tools.Tool) *tools.Registry {
+	return tools.NewRegistry(toolsList...)
+}
 
 // redirectCacheBreakDir points the cache-break writer at a fresh temp
 // directory for the life of the calling test. Returns the directory.
@@ -40,14 +64,28 @@ func TestFingerprintFromInputsHashesPerBlockAndTool(t *testing.T) {
 		{Text: "identity block"},
 		{Text: "coding guidelines"},
 	}
-	fp := fingerprintFromInputs("claude-sonnet-4-6", blocks, nil)
+	registry := testRegistry(cachebreakTestTool{
+		name:        "Bash",
+		description: "execute shell commands",
+		schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"command": map[string]any{"type": "string"},
+			},
+			"required": []string{"command"},
+		},
+	})
+	fp := fingerprintFromInputs("claude-sonnet-4-6", blocks, registry)
 
 	assert.Equal(t, "claude-sonnet-4-6", fp.Model)
 	require.Len(t, fp.SystemHashes, 2)
 	assert.NotEmpty(t, fp.SystemHashes[0])
 	assert.NotEqual(t, fp.SystemHashes[0], fp.SystemHashes[1],
 		"distinct block texts must produce distinct hashes")
-	assert.Empty(t, fp.ToolHashes, "nil registry yields empty tool hash map")
+	require.Len(t, fp.ToolHashes, 1)
+	require.Len(t, fp.ToolSchemaHashes, 1)
+	assert.NotEmpty(t, fp.ToolHashes["Bash"])
+	assert.Len(t, fp.ToolSchemaHashes["Bash"], 64)
 }
 
 // TestDiffFingerprintsFirstCallReturnsNilDiff verifies the empty-prev
@@ -67,9 +105,149 @@ func TestDiffFingerprintsFirstCallReturnsNilDiff(t *testing.T) {
 func TestDiffFingerprintsIdenticalReturnsEmpty(t *testing.T) {
 	t.Parallel()
 
-	fp := fingerprintFromInputs("m", []engine.SystemBlock{{Text: "a"}, {Text: "b"}}, nil)
+	fp := fingerprintFromInputs("m", []engine.SystemBlock{{Text: "a"}, {Text: "b"}}, testRegistry(
+		cachebreakTestTool{
+			name:        "Bash",
+			description: "execute shell commands",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": map[string]any{"type": "string"},
+				},
+				"required": []string{"command"},
+			},
+		},
+	))
 	diff := DiffCacheFingerprints(fp, fp)
 	assert.Empty(t, diff, "identical fingerprints must produce no diff lines")
+}
+
+func TestCachebreakNamesAddedTool(t *testing.T) {
+	t.Parallel()
+
+	prev := fingerprintFromInputs("m", nil, testRegistry(
+		cachebreakTestTool{
+			name:        "Bash",
+			description: "execute shell commands",
+			schema: map[string]any{
+				"type": "object",
+			},
+		},
+	))
+	next := fingerprintFromInputs("m", nil, testRegistry(
+		cachebreakTestTool{
+			name:        "Bash",
+			description: "execute shell commands",
+			schema: map[string]any{
+				"type": "object",
+			},
+		},
+		cachebreakTestTool{
+			name:        "MCP-notion",
+			description: "query notion",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string"},
+				},
+			},
+		},
+	))
+
+	diff := DiffCacheFingerprints(prev, next)
+	require.Len(t, diff, 1)
+	assert.Equal(t, "cachebreak: tool 'MCP-notion' added", diff[0])
+}
+
+func TestCachebreakNamesRemovedTool(t *testing.T) {
+	t.Parallel()
+
+	prev := fingerprintFromInputs("m", nil, testRegistry(
+		cachebreakTestTool{
+			name:        "Bash",
+			description: "execute shell commands",
+			schema: map[string]any{
+				"type": "object",
+			},
+		},
+		cachebreakTestTool{
+			name:        "MCP-notion",
+			description: "query notion",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string"},
+				},
+			},
+		},
+	))
+	next := fingerprintFromInputs("m", nil, testRegistry(
+		cachebreakTestTool{
+			name:        "Bash",
+			description: "execute shell commands",
+			schema: map[string]any{
+				"type": "object",
+			},
+		},
+	))
+
+	diff := DiffCacheFingerprints(prev, next)
+	require.Len(t, diff, 1)
+	assert.Equal(t, "cachebreak: tool 'MCP-notion' removed", diff[0])
+}
+
+func TestCachebreakNamesSchemaChange(t *testing.T) {
+	t.Parallel()
+
+	prev := fingerprintFromInputs("m", nil, testRegistry(
+		cachebreakTestTool{
+			name:        "Bash",
+			description: "execute shell commands",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": map[string]any{"type": "string"},
+				},
+			},
+		},
+	))
+	next := fingerprintFromInputs("m", nil, testRegistry(
+		cachebreakTestTool{
+			name:        "Bash",
+			description: "execute shell commands",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": map[string]any{"type": "string"},
+					"timeout": map[string]any{"type": "integer"},
+				},
+			},
+		},
+	))
+
+	diff := DiffCacheFingerprints(prev, next)
+	require.Len(t, diff, 1)
+	assert.Equal(t, "cachebreak: tool 'Bash' schema changed", diff[0])
+}
+
+func TestCachebreakNoChangeNoDiagnostic(t *testing.T) {
+	t.Parallel()
+
+	fp := fingerprintFromInputs("m", nil, testRegistry(
+		cachebreakTestTool{
+			name:        "Bash",
+			description: "execute shell commands",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": map[string]any{"type": "string"},
+				},
+			},
+		},
+	))
+
+	diff := DiffCacheFingerprints(fp, fp)
+	assert.Empty(t, diff)
 }
 
 // TestDiffFingerprintsBlockTextChangeNamesIndex verifies that a single

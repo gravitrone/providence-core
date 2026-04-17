@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -172,6 +173,7 @@ keep_recent_pct = 35
 
 	writeTestConfigFile(t, filepath.Join(projectRoot, ".providence", "config.local.toml"), `theme = "local-theme"
 effort = "high"
+api_key_helper = "helper-command"
 openrouter_api_key = "local-key"
 
 [compact]
@@ -186,6 +188,7 @@ circuit_breaker = 5
 	assert.Equal(t, "project-model", loaded.Model)
 	assert.Equal(t, "local-theme", loaded.Theme)
 	assert.Equal(t, "high", loaded.Effort)
+	assert.Equal(t, "helper-command", loaded.APIKeyHelper)
 	assert.Equal(t, "local-key", loaded.OpenRouterAPIKey)
 	assert.Equal(t, 120000, loaded.TokenBudget)
 	assert.True(t, loaded.AutoTitleEnabled)
@@ -200,6 +203,36 @@ circuit_breaker = 5
 	assert.Equal(t, 60000, loaded.Compact.RollingTokens)
 	assert.Equal(t, "haiku", loaded.Compact.FastTierModel)
 	assert.Equal(t, 5, loaded.Compact.CircuitBreaker)
+}
+
+func TestLoadMerged_APIKeyHelperSetsAnthropicEnv(t *testing.T) {
+	homeDir := t.TempDir()
+	projectRoot := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("ANTHROPIC_API_KEY", "env-key")
+
+	script := writeConfigHelperScript(t, "printf 'helper-key\\n'\n")
+	writeTestConfigFile(t, filepath.Join(projectRoot, ".providence", "config.local.toml"), fmt.Sprintf("api_key_helper = %q\n", script))
+
+	loaded := LoadMerged(projectRoot)
+
+	assert.Equal(t, script, loaded.APIKeyHelper)
+	assert.Equal(t, "helper-key", os.Getenv("ANTHROPIC_API_KEY"))
+}
+
+func TestLoadMerged_APIKeyHelperFailureFallsBackToEnv(t *testing.T) {
+	homeDir := t.TempDir()
+	projectRoot := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("ANTHROPIC_API_KEY", "env-key")
+
+	script := writeConfigHelperScript(t, "exit 9\n")
+	writeTestConfigFile(t, filepath.Join(projectRoot, ".providence", "config.local.toml"), fmt.Sprintf("api_key_helper = %q\n", script))
+
+	loaded := LoadMerged(projectRoot)
+
+	assert.Equal(t, script, loaded.APIKeyHelper)
+	assert.Equal(t, "env-key", os.Getenv("ANTHROPIC_API_KEY"))
 }
 
 func TestCompactConfigDefaults(t *testing.T) {
@@ -236,6 +269,7 @@ func TestConfigSaveRoundtrip(t *testing.T) {
 		Model:            "gpt-5.4",
 		Theme:            "flame",
 		Effort:           "high",
+		APIKeyHelper:     "helper-command",
 		OpenRouterAPIKey: "openrouter-secret",
 		TokenBudget:      123456,
 		AutoTitleEnabled: true,
@@ -834,6 +868,7 @@ func TestConfig_SaveAndLoadRoundtripPreservesAllFields(t *testing.T) {
 		Model:            "opus",
 		Theme:            "flame",
 		Effort:           "high",
+		APIKeyHelper:     "helper-command",
 		OpenRouterAPIKey: "sk-or-test-key",
 		TokenBudget:      200000,
 		AutoTitleEnabled: true,
@@ -887,6 +922,7 @@ func TestConfig_SaveAndLoadRoundtripPreservesAllFields(t *testing.T) {
 	assert.Equal(t, original.Model, loaded.Model)
 	assert.Equal(t, original.Theme, loaded.Theme)
 	assert.Equal(t, original.Effort, loaded.Effort)
+	assert.Equal(t, original.APIKeyHelper, loaded.APIKeyHelper)
 	assert.Equal(t, original.OpenRouterAPIKey, loaded.OpenRouterAPIKey)
 	assert.Equal(t, original.TokenBudget, loaded.TokenBudget)
 	assert.Equal(t, original.AutoTitleEnabled, loaded.AutoTitleEnabled)
@@ -928,6 +964,17 @@ func TestConfig_PermissionsModeValidation(t *testing.T) {
 			assert.NoError(t, cfg.Validate(), "permissions.mode %q should pass Validate()", mode)
 		})
 	}
+}
+
+func writeConfigHelperScript(t *testing.T, body string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "helper.sh")
+	content := "#!/bin/sh\nset -eu\n" + body
+
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o755))
+	return path
 }
 
 func TestOverlayConfigJSONRoundtrip(t *testing.T) {

@@ -1,14 +1,17 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gravitrone/providence-core/internal/auth"
 )
 
 // BridgeConfig configures the macOS native bridge (providence-mac-bridge) and
@@ -61,6 +64,7 @@ type Config struct {
 	Model            string   `toml:"model" json:"model,omitempty"`
 	Theme            string   `toml:"theme" json:"theme,omitempty"`
 	Effort           string   `toml:"effort" json:"effort,omitempty"`
+	APIKeyHelper     string   `toml:"api_key_helper" json:"api_key_helper,omitempty"`
 	OpenRouterAPIKey string   `toml:"openrouter_api_key" json:"openrouter_api_key,omitempty"`
 	TokenBudget      int      `toml:"token_budget" json:"token_budget,omitempty"`
 	AutoTitleEnabled bool     `toml:"auto_title_enabled" json:"auto_title_enabled,omitempty"`
@@ -251,7 +255,9 @@ func Defaults() Config {
 func Load() Config {
 	tomlPath := DefaultTOMLPath()
 	jsonPath := defaultJSONPath()
-	return loadWithMigration(tomlPath, jsonPath)
+	cfg := loadWithMigration(tomlPath, jsonPath)
+	applyAPIKeyHelper(&cfg)
+	return cfg
 }
 
 // loadWithMigration tries TOML first, falls back to JSON with auto-migration.
@@ -296,6 +302,7 @@ func expandConfigEnvVars(c *Config) {
 	c.Model = expandEnvVars(c.Model)
 	c.Theme = expandEnvVars(c.Theme)
 	c.Effort = expandEnvVars(c.Effort)
+	c.APIKeyHelper = expandEnvVars(c.APIKeyHelper)
 	c.OpenRouterAPIKey = expandEnvVars(c.OpenRouterAPIKey)
 	c.OutputStyle = expandEnvVars(c.OutputStyle)
 	c.Persona = expandEnvVars(c.Persona)
@@ -339,6 +346,7 @@ func loadJSONFile(path string) (Config, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return Config{}, fmt.Errorf("decode json config %s: %w", path, err)
 	}
+	expandConfigEnvVars(&c)
 	return c, nil
 }
 
@@ -403,7 +411,26 @@ func LoadMerged(projectRoot string) Config {
 
 	// CLI flags handled at runtime by caller.
 	_ = home
+	applyAPIKeyHelper(&cfg)
 	return cfg
+}
+
+func applyAPIKeyHelper(c *Config) {
+	helperCmd := strings.TrimSpace(c.APIKeyHelper)
+	if helperCmd == "" {
+		return
+	}
+
+	key, err := auth.ResolveAPIKeyViaHelper(context.Background(), helperCmd)
+	if err != nil {
+		log.Printf("api key helper failed: %q", helperCmd)
+		return
+	}
+	if key == "" {
+		return
+	}
+
+	_ = os.Setenv("ANTHROPIC_API_KEY", key)
 }
 
 // mergeConfig overlays non-zero fields from override onto base.
@@ -419,6 +446,9 @@ func mergeConfig(base, override *Config) {
 	}
 	if override.Effort != "" {
 		base.Effort = override.Effort
+	}
+	if override.APIKeyHelper != "" {
+		base.APIKeyHelper = override.APIKeyHelper
 	}
 	if override.OpenRouterAPIKey != "" {
 		base.OpenRouterAPIKey = override.OpenRouterAPIKey

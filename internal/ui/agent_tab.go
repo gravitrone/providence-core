@@ -1393,11 +1393,7 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			if at.store != nil && at.sessionID != "" {
 				at.store.DeleteSession(at.sessionID)
 			}
-			at.sessionID = ""
-			at.messages = nil
-			at.streamBuffer = ""
-			at.pendingPerm = nil
-			at.messagesDirty = true
+			at.clearSessionState()
 			at.refreshViewport()
 		}
 		return at, nil
@@ -2951,6 +2947,40 @@ func (at *AgentTab) persistLastMessage() {
 
 func (at *AgentTab) addSystemMessage(content string) {
 	at.addMessage("system", content, true)
+}
+
+// clearSessionState tears down the current model session so /clear (and ctrl+l)
+// produce a genuinely fresh start. Without this the next user prompt continues
+// the previous engine session with all the hidden conversation history,
+// defeating the purpose of clearing the chat.
+//
+// The engine is closed if non-nil and the pointer is nilled out so a stale
+// reference cannot be reused. Engine.Close is idempotent (sync.Once internally),
+// but nilling the pointer also guards against stale reads from other call sites.
+// The next Send goes through createEngineAndSend, which lazy-creates a new
+// engine with the current model and provider config.
+//
+// UI and session-correlated state is reset alongside the engine: messages,
+// session ID, stream/tool buffers, pending permission and portable state,
+// streaming flag, token counters, and thinking-block state. Anything tied to
+// the old engine's identity must die with it.
+func (at *AgentTab) clearSessionState() {
+	if at.engine != nil {
+		at.engine.Close()
+		at.engine = nil
+	}
+	at.sessionID = ""
+	at.messages = nil
+	at.streamBuffer = ""
+	at.toolInputBuffer = ""
+	at.pendingPerm = nil
+	at.pendingPortableState = nil
+	at.streaming = false
+	at.compacting = false
+	at.currentTokens = 0
+	at.thinkingActive = false
+	at.thinkingBuffer = ""
+	at.messagesDirty = true
 }
 
 // messagesToRestored converts the current chat messages to RestoredMessage
@@ -5178,11 +5208,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		if at.store != nil && at.sessionID != "" {
 			at.store.DeleteSession(at.sessionID)
 		}
-		at.sessionID = ""
-		at.messages = nil
-		at.streamBuffer = ""
-		at.pendingPerm = nil
-		at.messagesDirty = true
+		at.clearSessionState()
 		at.refreshViewport()
 		return true, nil
 	case "/ember":
@@ -6978,6 +7004,16 @@ func createEngineAndRestore(restored []engine.RestoredMessage, model string, eng
 				cfg.OpenAIAccessToken = tokens.AccessToken
 				cfg.OpenAIAccountID = tokens.AccountID
 			}
+		}
+
+		// Detect OpenRouter models ("provider/model" slugs) and configure
+		// the openrouter provider. Mirrors createEngineAndSend so /resume
+		// preserves the original provider instead of silently downgrading
+		// the conversation to direct Anthropic Claude.
+		if isOpenRouterModel(model) {
+			cfg.Type = engine.EngineTypeDirect
+			cfg.Provider = engine.ProviderOpenRouter
+			cfg.OpenRouterAPIKey = os.Getenv("OPENROUTER_API_KEY")
 		}
 
 		eng, err := engine.NewEngine(cfg)

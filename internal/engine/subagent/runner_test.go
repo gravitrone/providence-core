@@ -3,6 +3,9 @@ package subagent
 import (
 	"context"
 	"fmt"
+	"os"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -367,4 +370,149 @@ func TestRunnerWaitForCompleted(t *testing.T) {
 	assert.Equal(t, "completed", result.Status)
 	assert.Equal(t, "instant", result.Result)
 	assert.Less(t, elapsed, 50*time.Millisecond, "WaitFor on completed agent should return near-instantly")
+}
+
+func TestRunAgentDrainsInbox(t *testing.T) {
+	r := NewRunner()
+
+	var (
+		mu      sync.Mutex
+		prompts []string
+	)
+	started := make(chan struct{})
+
+	executor := func(ctx context.Context, prompt string, _ AgentType) (string, error) {
+		mu.Lock()
+		prompts = append(prompts, prompt)
+		call := len(prompts)
+		mu.Unlock()
+
+		if call == 1 {
+			close(started)
+			select {
+			case <-time.After(75 * time.Millisecond):
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+			return "initial turn complete", nil
+		}
+
+		return fmt.Sprintf("follow-up-%d", call), nil
+	}
+
+	input := TaskInput{
+		Description: "drain inbox",
+		Prompt:      "start the task",
+		RunInBG:     true,
+	}
+
+	agentID, err := r.Spawn(context.Background(), input, DefaultAgentType(), executor)
+	require.NoError(t, err)
+
+	<-started
+
+	require.NoError(t, r.SendTo(agentID, "first inbox message"))
+	require.NoError(t, r.SendTo(agentID, "second inbox message"))
+	require.NoError(t, r.SendTo(agentID, "third inbox message"))
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(prompts) >= 2
+	}, 500*time.Millisecond, 10*time.Millisecond)
+
+	mu.Lock()
+	followUpPrompt := prompts[1]
+	mu.Unlock()
+
+	assert.Contains(t, followUpPrompt, "first inbox message")
+	assert.Contains(t, followUpPrompt, "second inbox message")
+	assert.Contains(t, followUpPrompt, "third inbox message")
+
+	result := r.WaitFor(agentID)
+	require.NotNil(t, result)
+	assert.Equal(t, "completed", result.Status)
+	assert.Equal(t, "follow-up-2", result.Result)
+}
+
+func TestRunAgentDrainsInboxAfterCtxCancelledIsSafe(t *testing.T) {
+	r := NewRunner()
+	before := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+
+	executor := func(turnCtx context.Context, _ string, _ AgentType) (string, error) {
+		close(started)
+		<-turnCtx.Done()
+		return "", turnCtx.Err()
+	}
+
+	input := TaskInput{
+		Description: "cancel safely",
+		Prompt:      "wait for cancellation",
+		RunInBG:     true,
+	}
+
+	agentID, err := r.Spawn(ctx, input, DefaultAgentType(), executor)
+	require.NoError(t, err)
+
+	<-started
+	cancel()
+
+	sendErr := r.SendTo(agentID, "late inbox message")
+	if sendErr != nil {
+		assert.Contains(t, sendErr.Error(), "not running")
+	}
+
+	result := r.WaitFor(agentID)
+	require.NotNil(t, result)
+	assert.Equal(t, "failed", result.Status)
+	assert.Contains(t, result.Result, "context canceled")
+
+	require.Eventually(t, func() bool {
+		return runtime.NumGoroutine() <= before+2
+	}, time.Second, 20*time.Millisecond)
+}
+
+func TestSpawnWithContextReapsCompletedAndCleansWorktree(t *testing.T) {
+	repo := initTestRepo(t)
+	r := NewRunnerWithWorkDir(repo)
+
+	staleAgent := &RunningAgent{
+		ID:          "agent-stale",
+		Status:      "completed",
+		CompletedAt: time.Now().Add(-6 * time.Minute),
+		Done:        make(chan struct{}),
+		Inbox:       make(chan string, 1),
+	}
+	r.agents[staleAgent.ID] = staleAgent
+
+	var prompt string
+	executor := func(_ context.Context, nextPrompt string, _ AgentType, _ *ConversationState) (string, error) {
+		prompt = nextPrompt
+		return "fork complete", nil
+	}
+
+	input := TaskInput{
+		Description: "fork with parity",
+		Prompt:      "continue the task",
+		Name:        "fork worker",
+		Isolation:   "worktree",
+	}
+
+	agentID, err := r.SpawnWithContext(context.Background(), input, DefaultAgentType(), executor, &ConversationState{})
+	require.NoError(t, err)
+
+	_, staleExists := r.Get(staleAgent.ID)
+	assert.False(t, staleExists)
+
+	agent, ok := r.Get(agentID)
+	require.True(t, ok)
+	assert.Equal(t, "completed", agent.Status)
+	assert.NotEmpty(t, agent.WorktreePath)
+	assert.Contains(t, prompt, "isolated git worktree")
+
+	_, statErr := os.Stat(agent.WorktreePath)
+	assert.True(t, os.IsNotExist(statErr))
 }

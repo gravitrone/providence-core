@@ -3,6 +3,7 @@ package subagent
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -16,10 +17,9 @@ type Executor func(ctx context.Context, prompt string, agentType AgentType) (str
 // before sending the prompt. Used by /fork for full context inheritance.
 type ContextExecutor func(ctx context.Context, prompt string, agentType AgentType, state *ConversationState) (string, error)
 
-// ConversationState is a lightweight wrapper re-exported from the engine
-// portability layer so the subagent package can reference it without importing
-// engine (which would create a cycle). The actual serialization lives in
-// engine.ConversationState; callers pass a pointer through this alias.
+// ConversationState is a lightweight wrapper around portable engine state.
+// The actual serialization lives in the engine portability layer; callers pass
+// a pointer through this alias so the subagent API stays cycle-free.
 type ConversationState struct {
 	Messages     []PortableMessage `json:"messages"`
 	SystemPrompt string            `json:"system_prompt"`
@@ -67,10 +67,11 @@ type RunningAgent struct {
 	Cancel         context.CancelFunc
 	Result         *TaskResult
 	Done           chan struct{}
-	Inbox          chan string // messages from SendMessage tool
-	WorktreePath   string     // set when isolation=worktree
-	WorktreeBranch string     // set when isolation=worktree
-	RepoRoot       string     // original repo root for worktree cleanup
+	Inbox          chan string // compatibility mirror for SendMessage observers/tests
+	delivery       chan string
+	WorktreePath   string // set when isolation=worktree
+	WorktreeBranch string // set when isolation=worktree
+	RepoRoot       string // original repo root for worktree cleanup
 }
 
 // --- Constructors ---
@@ -94,146 +95,46 @@ func NewRunnerWithWorkDir(workDir string) *Runner {
 // For async agents (RunInBG=true) it returns immediately with the agent ID.
 func (r *Runner) Spawn(ctx context.Context, input TaskInput, agentType AgentType, executor Executor) (string, error) {
 	r.reapCompleted()
-
-	agentID := "agent-" + uuid.New().String()[:8]
-	ctx, cancel := context.WithCancel(ctx) //nolint:gosec // cancel stored in agent.Cancel, called by Kill()
-
-	agent := &RunningAgent{
-		ID:        agentID,
-		Name:      input.Name,
-		Type:      input.SubagentType,
-		Status:    "running",
-		StartedAt: time.Now(),
-		Cancel:    cancel,
-		Done:      make(chan struct{}),
-		Inbox:     make(chan string, 16),
+	ctx, agent, input, agentType, err := r.prepareAgent(ctx, input, agentType)
+	if err != nil {
+		return "", err
 	}
-
-	// Worktree isolation: create a git worktree for the agent.
-	isolation := input.Isolation
-	if isolation == "" {
-		isolation = agentType.Isolation
-	}
-	if isolation == "worktree" && r.WorkDir != "" {
-		slug := Slugify(input.Name)
-		if slug == "agent" && input.SubagentType != "" {
-			slug = Slugify(input.SubagentType)
-		}
-		wtPath, wtBranch, err := CreateWorktree(r.WorkDir, slug)
-		if err != nil {
-			cancel()
-			return "", fmt.Errorf("create worktree: %w", err)
-		}
-		agent.WorktreePath = wtPath
-		agent.WorktreeBranch = wtBranch
-		agent.RepoRoot = r.WorkDir
-
-		// Override agent's working directory to the worktree.
-		agentType.WorkDir = wtPath
-
-		// Prepend worktree notice to agent prompt.
-		notice := BuildWorktreeNotice(r.WorkDir, wtPath)
-		input.Prompt = notice + "\n\n" + input.Prompt
-
-		// Fire worktree create callback.
-		for _, cb := range r.WorktreeCallbacks {
-			cb("create", wtPath, wtBranch)
-		}
-	}
-
-	r.mu.Lock()
-	r.agents[agentID] = agent
-	r.mu.Unlock()
+	r.addAgent(agent)
 
 	if input.RunInBG {
 		go r.runAgent(ctx, agent, input, agentType, executor)
-		return agentID, nil
+		return agent.ID, nil
 	}
 
 	r.runAgent(ctx, agent, input, agentType, executor)
-	return agentID, nil
+	return agent.ID, nil
 }
 
 // SpawnWithContext creates a new subagent with full conversation context inherited
 // from the parent. The ContextExecutor restores history before running the prompt.
 func (r *Runner) SpawnWithContext(ctx context.Context, input TaskInput, agentType AgentType, executor ContextExecutor, state *ConversationState) (string, error) {
-	agentID := "agent-" + uuid.New().String()[:8]
-	ctx, cancel := context.WithCancel(ctx) //nolint:gosec // cancel stored in agent.Cancel, called by Kill()
-
-	agent := &RunningAgent{
-		ID:        agentID,
-		Name:      input.Name,
-		Type:      input.SubagentType,
-		Status:    "running",
-		StartedAt: time.Now(),
-		Cancel:    cancel,
-		Done:      make(chan struct{}),
-		Inbox:     make(chan string, 16),
+	r.reapCompleted()
+	ctx, agent, input, agentType, err := r.prepareAgent(ctx, input, agentType)
+	if err != nil {
+		return "", err
 	}
-
-	r.mu.Lock()
-	r.agents[agentID] = agent
-	r.mu.Unlock()
-
-	run := func() {
-		defer close(agent.Done)
-		start := time.Now()
-
-		result, err := executor(ctx, input.Prompt, agentType, state)
-
-		r.mu.Lock()
-		defer r.mu.Unlock()
-
-		now := time.Now()
-
-		if ctx.Err() != nil && agent.Status == "killed" {
-			if agent.Result == nil {
-				agent.Result = &TaskResult{
-					AgentID:    agent.ID,
-					Status:     "killed",
-					Result:     "agent was killed",
-					DurationMS: time.Since(start).Milliseconds(),
-				}
-			}
-			agent.CompletedAt = now
-			return
-		}
-
-		if err != nil {
-			agent.Status = "failed"
-			agent.Result = &TaskResult{
-				AgentID:    agent.ID,
-				Status:     "failed",
-				Result:     err.Error(),
-				DurationMS: time.Since(start).Milliseconds(),
-			}
-		} else {
-			agent.Status = "completed"
-			agent.Result = &TaskResult{
-				AgentID:    agent.ID,
-				Status:     "completed",
-				Result:     result,
-				DurationMS: time.Since(start).Milliseconds(),
-			}
-		}
-		agent.CompletedAt = now
-	}
+	r.addAgent(agent)
 
 	if input.RunInBG {
-		go run()
-		return agentID, nil
+		go r.runAgentWithContext(ctx, agent, input, agentType, executor, state)
+		return agent.ID, nil
 	}
 
-	run()
-	return agentID, nil
+	r.runAgentWithContext(ctx, agent, input, agentType, executor, state)
+	return agent.ID, nil
 }
 
 // SendTo delivers a message to a running agent's inbox.
 func (r *Runner) SendTo(agentID, message string) error {
 	r.mu.RLock()
-	agent, ok := r.agents[agentID]
-	r.mu.RUnlock()
+	defer r.mu.RUnlock()
 
+	agent, ok := r.agents[agentID]
 	if !ok {
 		return fmt.Errorf("agent %s not found", agentID)
 	}
@@ -242,7 +143,11 @@ func (r *Runner) SendTo(agentID, message string) error {
 	}
 
 	select {
-	case agent.Inbox <- message:
+	case agent.delivery <- message:
+		select {
+		case agent.Inbox <- message:
+		default:
+		}
 		return nil
 	default:
 		return fmt.Errorf("agent %s inbox is full", agentID)
@@ -263,14 +168,150 @@ func (r *Runner) FindByName(name string) *RunningAgent {
 
 // --- Internal ---
 
+func (r *Runner) prepareAgent(ctx context.Context, input TaskInput, agentType AgentType) (context.Context, *RunningAgent, TaskInput, AgentType, error) {
+	agentID := "agent-" + uuid.New().String()[:8]
+	ctx, cancel := context.WithCancel(ctx) //nolint:gosec // cancel stored in agent.Cancel, called by Kill()
+
+	agent := &RunningAgent{
+		ID:        agentID,
+		Name:      input.Name,
+		Type:      input.SubagentType,
+		Status:    "running",
+		StartedAt: time.Now(),
+		Cancel:    cancel,
+		Done:      make(chan struct{}),
+		Inbox:     make(chan string, 16),
+		delivery:  make(chan string, 16),
+	}
+
+	if err := r.prepareWorktree(agent, &input, &agentType); err != nil {
+		cancel()
+		return nil, nil, input, agentType, err
+	}
+
+	return ctx, agent, input, agentType, nil
+}
+
+func (r *Runner) prepareWorktree(agent *RunningAgent, input *TaskInput, agentType *AgentType) error {
+	isolation := input.Isolation
+	if isolation == "" {
+		isolation = agentType.Isolation
+	}
+	if isolation != "worktree" || r.WorkDir == "" {
+		return nil
+	}
+
+	slug := Slugify(input.Name)
+	if slug == "agent" && input.SubagentType != "" {
+		slug = Slugify(input.SubagentType)
+	}
+
+	wtPath, wtBranch, err := CreateWorktree(r.WorkDir, slug)
+	if err != nil {
+		return fmt.Errorf("create worktree: %w", err)
+	}
+
+	agent.WorktreePath = wtPath
+	agent.WorktreeBranch = wtBranch
+	agent.RepoRoot = r.WorkDir
+
+	agentType.WorkDir = wtPath
+
+	notice := BuildWorktreeNotice(r.WorkDir, wtPath)
+	input.Prompt = notice + "\n\n" + input.Prompt
+
+	for _, cb := range r.WorktreeCallbacks {
+		cb("create", wtPath, wtBranch)
+	}
+
+	return nil
+}
+
+func (r *Runner) addAgent(agent *RunningAgent) {
+	r.mu.Lock()
+	r.agents[agent.ID] = agent
+	r.mu.Unlock()
+}
+
 func (r *Runner) runAgent(ctx context.Context, agent *RunningAgent, input TaskInput, agentType AgentType, executor Executor) {
 	defer close(agent.Done)
 	start := time.Now()
 
-	result, err := executor(ctx, input.Prompt, agentType)
+	result, err := r.runTurns(ctx, agent, input.Prompt, func(turnCtx context.Context, prompt string) (string, error) {
+		return executor(turnCtx, prompt, agentType)
+	})
 
+	r.finishAgent(ctx, agent, start, result, err)
+}
+
+func (r *Runner) runAgentWithContext(ctx context.Context, agent *RunningAgent, input TaskInput, agentType AgentType, executor ContextExecutor, state *ConversationState) {
+	defer close(agent.Done)
+	start := time.Now()
+
+	turnState := state
+	result, err := r.runTurns(ctx, agent, input.Prompt, func(turnCtx context.Context, prompt string) (string, error) {
+		return executor(turnCtx, prompt, agentType, turnState)
+	})
+
+	r.finishAgent(ctx, agent, start, result, err)
+}
+
+func (r *Runner) runTurns(ctx context.Context, agent *RunningAgent, prompt string, runTurn func(context.Context, string) (string, error)) (string, error) {
+	pending := newInboxBuffer()
+	drainerCtx, stopDrainer := context.WithCancel(ctx)
+	waitForDrainer := r.startInboxDrainer(drainerCtx, agent, pending.add)
+	defer func() {
+		stopDrainer()
+		waitForDrainer()
+	}()
+
+	nextPrompt := prompt
+	lastResult := ""
+
+	for {
+		result, err := runTurn(ctx, nextPrompt)
+		if err != nil {
+			return "", err
+		}
+
+		lastResult = result
+		messages := pending.takeAll()
+		if len(messages) == 0 {
+			return lastResult, nil
+		}
+
+		nextPrompt = buildInboxTurnPrompt(lastResult, messages)
+	}
+}
+
+func (r *Runner) startInboxDrainer(ctx context.Context, agent *RunningAgent, onMessage func(string)) func() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg := <-agent.delivery:
+				if onMessage == nil {
+					log.Printf("subagent: dropped inbox message for %s", agent.ID)
+					continue
+				}
+				onMessage(msg)
+			}
+		}
+	}()
+
+	return wg.Wait
+}
+
+func (r *Runner) finishAgent(ctx context.Context, agent *RunningAgent, start time.Time, result string, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	now := time.Now()
 
 	if ctx.Err() != nil && agent.Status == "killed" {
 		if agent.Result == nil {
@@ -281,8 +322,9 @@ func (r *Runner) runAgent(ctx context.Context, agent *RunningAgent, input TaskIn
 				DurationMS: time.Since(start).Milliseconds(),
 			}
 		}
-		agent.CompletedAt = time.Now()
+		agent.CompletedAt = now
 		r.cleanupWorktree(agent)
+		r.drainInboxMirror(agent)
 		return
 	}
 
@@ -303,10 +345,63 @@ func (r *Runner) runAgent(ctx context.Context, agent *RunningAgent, input TaskIn
 			DurationMS: time.Since(start).Milliseconds(),
 		}
 	}
-	agent.CompletedAt = time.Now()
-
-	// Handle worktree cleanup on completion.
+	agent.CompletedAt = now
 	r.cleanupWorktree(agent)
+	r.drainInboxMirror(agent)
+}
+
+func buildInboxTurnPrompt(previousResult string, messages []string) string {
+	prompt := "Continue your task. New inbox messages arrived while you were working.\n\n"
+	if previousResult != "" {
+		prompt += "<previous-turn-result>\n" + previousResult + "\n</previous-turn-result>\n\n"
+	}
+
+	prompt += "<inbox>\n"
+	for _, msg := range messages {
+		prompt += "- " + msg + "\n"
+	}
+	prompt += "</inbox>\n\n"
+	prompt += "Address the inbox messages and keep going."
+
+	return prompt
+}
+
+type inboxBuffer struct {
+	mu       sync.Mutex
+	messages []string
+}
+
+func newInboxBuffer() *inboxBuffer {
+	return &inboxBuffer{}
+}
+
+func (b *inboxBuffer) add(message string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.messages = append(b.messages, message)
+}
+
+func (b *inboxBuffer) takeAll() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.messages) == 0 {
+		return nil
+	}
+
+	out := make([]string, len(b.messages))
+	copy(out, b.messages)
+	b.messages = nil
+	return out
+}
+
+func (r *Runner) drainInboxMirror(agent *RunningAgent) {
+	for {
+		select {
+		case <-agent.Inbox:
+		default:
+			return
+		}
+	}
 }
 
 // cleanupWorktree checks for changes in the agent's worktree and handles cleanup.

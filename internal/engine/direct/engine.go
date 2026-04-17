@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -2081,6 +2082,11 @@ const unattendedHeartbeat = 30 * time.Second
 // unattendedTotalCap is the maximum total wall time for unattended retry loops.
 const unattendedTotalCap = 6 * time.Hour
 
+// idleTriggeredFlag stores idle watchdog state across goroutines.
+type idleTriggeredFlag struct {
+	atomic.Bool
+}
+
 // streamWithRetry calls the Messages API with streaming, retrying on 429 rate
 // limit errors. Uses Retry-After header delay when available, falling back to
 // exponential backoff. Max retries configurable via PROVIDENCE_MAX_RETRIES (default 10).
@@ -2119,11 +2125,11 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 		// the timeout. On fire, it cancels the attempt context so the stream
 		// read returns an error and streamWithRetry can retry.
 		idleTimer := time.NewTimer(idleTimeout)
-		idleTriggered := false
+		var idleTriggered idleTriggeredFlag
 		go func() {
 			select {
 			case <-idleTimer.C:
-				idleTriggered = true
+				idleTriggered.Store(true)
 				attemptCancel()
 			case <-attemptCtx.Done():
 			}
@@ -2168,7 +2174,7 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 
 		if err := stream.Err(); err != nil {
 			// Idle watchdog fired - treat as a transient error and retry.
-			if idleTriggered {
+			if idleTriggered.Load() {
 				if !unattended && attempt >= maxRetries-1 {
 					return accumulated, err
 				}

@@ -68,12 +68,14 @@ type AssistantMsg struct {
 	Content []ContentPart `json:"content"`
 }
 
-// ResultEvent is emitted at turn completion with outcome and cost metrics.
+// ResultEvent is emitted at turn completion with outcome, token, and cost metrics.
 type ResultEvent struct {
 	Type         string  `json:"type"`
 	Subtype      string  `json:"subtype"`
 	Result       string  `json:"result"`
 	SessionID    string  `json:"session_id"`
+	InputTokens  int     `json:"input_tokens,omitempty"`
+	OutputTokens int     `json:"output_tokens,omitempty"`
 	TotalCostUSD float64 `json:"total_cost_usd"`
 	IsError      bool    `json:"is_error"`
 }

@@ -142,9 +142,11 @@ func parseTurnCompleted(line []byte) (engine.ParsedEvent, error) {
 	return engine.ParsedEvent{
 		Type: "result",
 		Data: &engine.ResultEvent{
-			Type:    "result",
-			Subtype: "success",
-			Result:  "Turn completed",
+			Type:         "result",
+			Subtype:      "success",
+			Result:       "Turn completed",
+			InputTokens:  ev.Usage.InputTokens,
+			OutputTokens: ev.Usage.OutputTokens,
 		},
 		Raw: string(line),
 	}, nil

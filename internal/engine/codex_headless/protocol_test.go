@@ -73,6 +73,8 @@ func TestParseTurnCompleted(t *testing.T) {
 	re, ok := pe.Data.(*engine.ResultEvent)
 	require.True(t, ok)
 	assert.Equal(t, "success", re.Subtype)
+	assert.Equal(t, 100, re.InputTokens)
+	assert.Equal(t, 50, re.OutputTokens)
 	assert.False(t, re.IsError)
 }
 
@@ -174,9 +176,9 @@ func TestParseItemCompletedCommandExecutionExitCodeDrivesIsError(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name   string
-		line   string
-		isErr  bool
+		name  string
+		line  string
+		isErr bool
 	}{
 		{"exit 0 success", `{"type":"item.completed","item":{"type":"command_execution","command":"true","exit_code":0,"aggregated_output":""}}`, false},
 		{"exit 1 error", `{"type":"item.completed","item":{"type":"command_execution","command":"false","exit_code":1,"aggregated_output":""}}`, true},

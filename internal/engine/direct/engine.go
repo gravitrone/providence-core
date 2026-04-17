@@ -1617,7 +1617,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 			if e.loopFillCount >= 3 {
 				consecutive := 0
 				for i := 1; i <= e.loopFillCount; i++ {
-					idx := ((e.loopIdx - i) % 5 + 5) % 5
+					idx := ((e.loopIdx-i)%5 + 5) % 5
 					if e.loopHistory[idx] == key {
 						consecutive++
 					} else {
@@ -1698,8 +1698,11 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 				queue.mu.Unlock()
 				continue
 			}
-			if e.permissions.NeedsPermission(tool) {
-				approved := e.permissions.RequestPermission(tc.ID, e.events, tc.Name, tc.Input)
+			if e.permissions.NeedsPermission(tool, tc.Input) {
+				approved, err := e.permissions.RequestPermission(ctx, tc.ID, e.events, tc.Name, tc.Input)
+				if err != nil {
+					return
+				}
 				if !approved {
 					// Fire PermissionDenied hook.
 					e.fireHookAsync(hooks.PermissionRequest, hooks.HookInput{

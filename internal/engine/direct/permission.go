@@ -1,6 +1,7 @@
 package direct
 
 import (
+	"context"
 	"sync"
 
 	"github.com/google/uuid"
@@ -80,7 +81,7 @@ func (p *PermissionHandler) SetMode(mode string) {
 
 // NeedsPermission returns true if the tool requires explicit user approval
 // according to the 7-step permission chain.
-func (p *PermissionHandler) NeedsPermission(t tools.Tool) bool {
+func (p *PermissionHandler) NeedsPermission(t tools.Tool, input map[string]any) bool {
 	p.mu.Lock()
 	mode := p.mode
 	p.mu.Unlock()
@@ -104,14 +105,14 @@ func (p *PermissionHandler) NeedsPermission(t tools.Tool) bool {
 		AlwaysDenyRules:  p.denyRules,
 		AlwaysAskRules:   p.askRules,
 	}
-	result := permissions.CheckPermission(ctx, t.Name(), nil)
+	result := permissions.CheckPermission(ctx, t.Name(), input)
 	return result.Decision == permissions.Ask
 }
 
 // RequestPermission emits a permission_request ParsedEvent on the events channel
 // and blocks until Respond is called with the matching questionID.
-// Returns true if approved, false if denied.
-func (p *PermissionHandler) RequestPermission(toolCallID string, events chan<- engine.ParsedEvent, toolName string, toolInput any) bool {
+// Returns true if approved, false if denied. Returns an error if ctx is canceled.
+func (p *PermissionHandler) RequestPermission(ctx context.Context, toolCallID string, events chan<- engine.ParsedEvent, toolName string, toolInput any) (bool, error) {
 	questionID := uuid.New().String()
 
 	ch := make(chan bool, 1)
@@ -119,7 +120,13 @@ func (p *PermissionHandler) RequestPermission(toolCallID string, events chan<- e
 	p.pending[questionID] = ch
 	p.mu.Unlock()
 
-	events <- engine.ParsedEvent{
+	defer func() {
+		p.mu.Lock()
+		delete(p.pending, questionID)
+		p.mu.Unlock()
+	}()
+
+	event := engine.ParsedEvent{
 		Type: "permission_request",
 		Data: &engine.PermissionRequestEvent{
 			Type: "permission_request",
@@ -135,13 +142,18 @@ func (p *PermissionHandler) RequestPermission(toolCallID string, events chan<- e
 		},
 	}
 
-	approved := <-ch
+	select {
+	case events <- event:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 
-	p.mu.Lock()
-	delete(p.pending, questionID)
-	p.mu.Unlock()
-
-	return approved
+	select {
+	case approved := <-ch:
+		return approved, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 }
 
 // Respond resolves a pending permission request.
@@ -152,6 +164,9 @@ func (p *PermissionHandler) Respond(questionID string, approved bool) {
 	p.mu.Unlock()
 
 	if ok {
-		ch <- approved
+		select {
+		case ch <- approved:
+		default:
+		}
 	}
 }

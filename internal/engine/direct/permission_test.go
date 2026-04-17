@@ -7,6 +7,7 @@ import (
 
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
+	"github.com/gravitrone/providence-core/internal/engine/permissions"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,9 +23,9 @@ func (t *permMockTool) Name() string {
 	}
 	return "test"
 }
-func (t *permMockTool) Description() string                                        { return "" }
-func (t *permMockTool) InputSchema() map[string]any                                { return nil }
-func (t *permMockTool) ReadOnly() bool                                             { return t.readOnly }
+func (t *permMockTool) Description() string         { return "" }
+func (t *permMockTool) InputSchema() map[string]any { return nil }
+func (t *permMockTool) ReadOnly() bool              { return t.readOnly }
 func (t *permMockTool) Execute(_ context.Context, _ map[string]any) tools.ToolResult {
 	return tools.ToolResult{}
 }
@@ -32,13 +33,13 @@ func (t *permMockTool) Execute(_ context.Context, _ map[string]any) tools.ToolRe
 func TestPermissionHandler_NeedsPermission(t *testing.T) {
 	ph := NewPermissionHandler()
 	// Read-only builtins (Read, Glob, Grep) are auto-allowed.
-	assert.False(t, ph.NeedsPermission(&permMockTool{name: "Read", readOnly: true}))
-	assert.False(t, ph.NeedsPermission(&permMockTool{name: "Glob", readOnly: true}))
-	assert.False(t, ph.NeedsPermission(&permMockTool{name: "Grep", readOnly: true}))
+	assert.False(t, ph.NeedsPermission(&permMockTool{name: "Read", readOnly: true}, nil))
+	assert.False(t, ph.NeedsPermission(&permMockTool{name: "Glob", readOnly: true}, nil))
+	assert.False(t, ph.NeedsPermission(&permMockTool{name: "Grep", readOnly: true}, nil))
 	// Unknown/write tools require permission (Ask -> true).
-	assert.True(t, ph.NeedsPermission(&permMockTool{name: "Bash", readOnly: false}))
-	assert.True(t, ph.NeedsPermission(&permMockTool{name: "Write", readOnly: false}))
-	assert.True(t, ph.NeedsPermission(&permMockTool{name: "test", readOnly: false}))
+	assert.True(t, ph.NeedsPermission(&permMockTool{name: "Bash", readOnly: false}, nil))
+	assert.True(t, ph.NeedsPermission(&permMockTool{name: "Write", readOnly: false}, nil))
+	assert.True(t, ph.NeedsPermission(&permMockTool{name: "test", readOnly: false}, nil))
 }
 
 func TestPermissionHandler_RequestAndApprove(t *testing.T) {
@@ -46,9 +47,10 @@ func TestPermissionHandler_RequestAndApprove(t *testing.T) {
 	events := make(chan engine.ParsedEvent, 10)
 
 	var approved bool
+	var err error
 	done := make(chan struct{})
 	go func() {
-		approved = ph.RequestPermission("tc_1", events, "write_file", map[string]any{"path": "/tmp"})
+		approved, err = ph.RequestPermission(context.Background(), "tc_1", events, "write_file", map[string]any{"path": "/tmp"})
 		close(done)
 	}()
 
@@ -68,6 +70,7 @@ func TestPermissionHandler_RequestAndApprove(t *testing.T) {
 
 	select {
 	case <-done:
+		require.NoError(t, err)
 		assert.True(t, approved)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for RequestPermission to return")
@@ -79,9 +82,10 @@ func TestPermissionHandler_RequestAndDeny(t *testing.T) {
 	events := make(chan engine.ParsedEvent, 10)
 
 	var approved bool
+	var err error
 	done := make(chan struct{})
 	go func() {
-		approved = ph.RequestPermission("tc_2", events, "delete_file", nil)
+		approved, err = ph.RequestPermission(context.Background(), "tc_2", events, "delete_file", nil)
 		close(done)
 	}()
 
@@ -95,8 +99,94 @@ func TestPermissionHandler_RequestAndDeny(t *testing.T) {
 
 	select {
 	case <-done:
+		require.NoError(t, err)
 		assert.False(t, approved)
 	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
+}
+
+func TestNeedsPermissionArgumentPatternMatches(t *testing.T) {
+	ph := NewPermissionHandlerWithConfig(
+		nil,
+		nil,
+		nil,
+		[]permissions.Rule{
+			{Pattern: "Bash(git push *)", Behavior: permissions.Deny, Source: "userSettings"},
+		},
+		nil,
+	)
+
+	input := map[string]any{"command": "git push --force"}
+
+	assert.False(t, ph.NeedsPermission(&tools.BashTool{}, input))
+}
+
+func TestNeedsPermissionArgumentPatternNoMatch(t *testing.T) {
+	ph := NewPermissionHandlerWithConfig(
+		nil,
+		nil,
+		nil,
+		[]permissions.Rule{
+			{Pattern: "Bash(git push *)", Behavior: permissions.Deny, Source: "userSettings"},
+		},
+		nil,
+	)
+
+	input := map[string]any{"command": "ls"}
+
+	assert.True(t, ph.NeedsPermission(&tools.BashTool{}, input))
+}
+
+func TestNeedsPermissionSafetyPathFires(t *testing.T) {
+	ph := NewPermissionHandler()
+
+	input := map[string]any{"command": "cat .git/hooks/pre-commit"}
+
+	assert.True(t, ph.NeedsPermission(&tools.BashTool{}, input))
+}
+
+func TestNeedsPermissionInterruptedRequestReturnsCancelled(t *testing.T) {
+	ph := NewPermissionHandler()
+	events := make(chan engine.ParsedEvent, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type permissionRequestResult struct {
+		approved bool
+		err      error
+	}
+
+	resultCh := make(chan permissionRequestResult, 1)
+	go func() {
+		approved, err := ph.RequestPermission(ctx, "tc_3", events, "write_file", map[string]any{"path": "/tmp"})
+		resultCh <- permissionRequestResult{approved: approved, err: err}
+	}()
+
+	var questionID string
+	select {
+	case pe := <-events:
+		require.Equal(t, "permission_request", pe.Type)
+		pre, ok := pe.Data.(*engine.PermissionRequestEvent)
+		require.True(t, ok)
+		questionID = pre.QuestionID
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for permission event")
+	}
+
+	cancel()
+
+	select {
+	case result := <-resultCh:
+		assert.False(t, result.approved)
+		require.ErrorIs(t, result.err, context.Canceled)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timed out waiting for RequestPermission to return after cancellation")
+	}
+
+	ph.mu.Lock()
+	_, ok := ph.pending[questionID]
+	ph.mu.Unlock()
+	assert.False(t, ok)
 }

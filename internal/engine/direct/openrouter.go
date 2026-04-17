@@ -376,8 +376,11 @@ func (e *DirectEngine) openrouterAgentLoop(ctx context.Context) {
 				continue
 			}
 
-			if e.permissions.NeedsPermission(tool) {
-				approved := e.permissions.RequestPermission(tc.ID, e.events, tc.Name, input)
+			if e.permissions.NeedsPermission(tool, input) {
+				approved, err := e.permissions.RequestPermission(ctx, tc.ID, e.events, tc.Name, input)
+				if err != nil {
+					return
+				}
 				if !approved {
 					e.openrouterHistory = append(e.openrouterHistory, openrouterHistoryEntry{
 						Role:    "tool",

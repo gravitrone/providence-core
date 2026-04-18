@@ -1,6 +1,7 @@
 package direct
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,9 +21,10 @@ import (
 // would invalidate the Anthropic prompt cache. A per-turn diff lets
 // users see which field flipped when their cache read drops to zero.
 type CacheFingerprint struct {
-	Model        string
-	SystemHashes []string          // one hash per SystemBlock, in order
-	ToolHashes   map[string]string // toolName -> hash of its schema + description
+	Model            string
+	SystemHashes     []string          // one hash per SystemBlock, in order
+	ToolHashes       map[string]string // toolName -> hash of its name + description + schema
+	ToolSchemaHashes map[string]string // toolName -> sha256 of its marshaled input schema
 }
 
 // fingerprintFromInputs builds a CacheFingerprint from the structured
@@ -31,20 +33,28 @@ type CacheFingerprint struct {
 // here correlates with a real cache key change.
 func fingerprintFromInputs(model string, blocks []engine.SystemBlock, registry *tools.Registry) CacheFingerprint {
 	fp := CacheFingerprint{
-		Model:        model,
-		SystemHashes: make([]string, len(blocks)),
-		ToolHashes:   map[string]string{},
+		Model:            model,
+		SystemHashes:     make([]string, len(blocks)),
+		ToolHashes:       map[string]string{},
+		ToolSchemaHashes: map[string]string{},
 	}
 	for i, b := range blocks {
 		fp.SystemHashes[i] = hash64(b.Text)
 	}
 	if registry != nil {
 		for _, t := range registry.All() {
-			schemaBytes, _ := json.Marshal(t.InputSchema())
-			fp.ToolHashes[t.Name()] = hash64(t.Name() + "\x00" + t.Description() + "\x00" + string(schemaBytes))
+			schemaHash := hashSchema(t.InputSchema())
+			fp.ToolHashes[t.Name()] = hash64(t.Name() + "\x00" + t.Description() + "\x00" + schemaHash)
+			fp.ToolSchemaHashes[t.Name()] = schemaHash
 		}
 	}
 	return fp
+}
+
+func hashSchema(schema map[string]any) string {
+	schemaBytes, _ := json.Marshal(schema)
+	sum := sha256.Sum256(schemaBytes)
+	return fmt.Sprintf("%x", sum)
 }
 
 // hash64 returns a stable 16-hex-char fnv64a hash of the input. fnv is
@@ -95,7 +105,13 @@ func DiffCacheFingerprints(prev, next CacheFingerprint) []string {
 	for name := range prev.ToolHashes {
 		toolNames[name] = true
 	}
+	for name := range prev.ToolSchemaHashes {
+		toolNames[name] = true
+	}
 	for name := range next.ToolHashes {
+		toolNames[name] = true
+	}
+	for name := range next.ToolSchemaHashes {
 		toolNames[name] = true
 	}
 	sortedNames := make([]string, 0, len(toolNames))
@@ -106,13 +122,19 @@ func DiffCacheFingerprints(prev, next CacheFingerprint) []string {
 	for _, name := range sortedNames {
 		prevHash, prevOK := prev.ToolHashes[name]
 		nextHash, nextOK := next.ToolHashes[name]
+		prevSchemaHash, prevSchemaOK := prev.ToolSchemaHashes[name]
+		nextSchemaHash, nextSchemaOK := next.ToolSchemaHashes[name]
+		prevSeen := prevOK || prevSchemaOK
+		nextSeen := nextOK || nextSchemaOK
 		switch {
-		case !prevOK:
-			lines = append(lines, fmt.Sprintf("tool[%s]: added (%s)", name, nextHash))
-		case !nextOK:
-			lines = append(lines, fmt.Sprintf("tool[%s]: removed (was %s)", name, prevHash))
-		case prevHash != nextHash:
-			lines = append(lines, fmt.Sprintf("tool[%s]: %s -> %s", name, prevHash, nextHash))
+		case !prevSeen:
+			lines = append(lines, fmt.Sprintf("cachebreak: tool '%s' added", name))
+		case !nextSeen:
+			lines = append(lines, fmt.Sprintf("cachebreak: tool '%s' removed", name))
+		case prevSchemaOK && nextSchemaOK && prevSchemaHash != nextSchemaHash:
+			lines = append(lines, fmt.Sprintf("cachebreak: tool '%s' schema changed", name))
+		case prevOK && nextOK && prevHash != nextHash:
+			lines = append(lines, fmt.Sprintf("cachebreak: tool '%s' description changed", name))
 		}
 	}
 	return lines
@@ -122,7 +144,7 @@ func DiffCacheFingerprints(prev, next CacheFingerprint) []string {
 // least once. Used to suppress the "first call diff" from being written
 // as a spurious everything-changed event.
 func hasAnyField(fp CacheFingerprint) bool {
-	return fp.Model != "" || len(fp.SystemHashes) > 0 || len(fp.ToolHashes) > 0
+	return fp.Model != "" || len(fp.SystemHashes) > 0 || len(fp.ToolHashes) > 0 || len(fp.ToolSchemaHashes) > 0
 }
 
 // cacheBreakDir holds the directory where diff files are written.

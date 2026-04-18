@@ -1811,7 +1811,8 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 				ToolName:  tc.Name,
 				ToolInput: tc.Input,
 			}); hookErr != nil {
-				if _, ok := hookErr.(*hooks.BlockingError); ok {
+				var blockingErr *hooks.BlockingError
+				if errors.As(hookErr, &blockingErr) {
 					queue.mu.Lock()
 					queue.results = append(queue.results, ToolCallResult{
 						ToolCall: tc,
@@ -1879,30 +1880,10 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 
 		var resultBlocks []anthropic.ContentBlockParamUnion
 		for _, r := range queue.Results() {
-			// Normalize tool result before adding to history.
-			r.Result.Content = normalizeToolResult(r.Result.Content, maxToolResultSize)
-
-			e.sessionBus.Publish(session.Event{Type: session.EventToolCallResult, Data: r.Result.Content})
-
-			// Fire PostToolUse or PostToolUseFailure hook.
-			if r.Result.IsError {
-				e.fireHookAsync(hooks.PostToolUseFailure, hooks.HookInput{
-					ToolName:  r.Name,
-					ToolInput: r.Result.Content,
-				})
-			} else {
-				e.fireHookAsync(hooks.PostToolUse, hooks.HookInput{
-					ToolName:  r.Name,
-					ToolInput: r.Result.Content,
-				})
-			}
-
-			// Apply context modifier if the tool returned one.
-			// Called after hooks but before appending to history so that
-			// state changes (e.g. file cache invalidation) are visible
-			// to the next turn.
-			if r.Result.ContextModifier != nil {
-				r.Result.ContextModifier()
+			result, err := e.postToolPipeline(ctx, r.ToolCall, r.Result)
+			if err != nil {
+				e.emitError(err)
+				return
 			}
 
 			if r.Name == "ExitPlanMode" && !r.Result.IsError {
@@ -1915,12 +1896,12 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 					Type:       "tool_result",
 					ToolCallID: r.ID,
 					ToolName:   r.Name,
-					Output:     r.Result.Content,
-					IsError:    r.Result.IsError,
+					Output:     result.Content,
+					IsError:    result.IsError,
 				},
 			}
 			resultBlocks = append(resultBlocks, anthropic.NewToolResultBlock(
-				r.ID, r.Result.Content, r.Result.IsError,
+				r.ID, result.Content, result.IsError,
 			))
 		}
 		e.history.AddToolResults(resultBlocks)
@@ -2711,6 +2692,74 @@ func (e *DirectEngine) fireHookAsync(event string, input hooks.HookInput) {
 	}
 	input.SessionID = e.sessionID
 	e.hooksRunner.RunAsync(e.ctx, event, input)
+}
+
+// executeProviderToolCall runs the shared pre-execution flow for providers
+// that execute tool calls inline instead of through the streaming tool queue.
+func (e *DirectEngine) executeProviderToolCall(ctx context.Context, call ToolCall) (tools.ToolResult, error) {
+	if e.sessionBus != nil {
+		e.sessionBus.Publish(session.Event{Type: session.EventToolCallStart, Data: call.Name})
+	}
+
+	if hookOut, hookErr := e.fireHook(hooks.PreToolUse, hooks.HookInput{
+		ToolName:  call.Name,
+		ToolInput: call.Input,
+	}); hookErr != nil {
+		var blockingErr *hooks.BlockingError
+		if errors.As(hookErr, &blockingErr) {
+			return tools.ToolResult{Content: "blocked by PreToolUse hook: " + hookErr.Error(), IsError: true}, nil
+		}
+	} else if hookOut != nil && hookOut.SuppressOutput {
+		return tools.ToolResult{Content: "suppressed by PreToolUse hook"}, nil
+	}
+
+	tool, ok := e.registry.Get(call.Name)
+	if !ok {
+		return tools.ToolResult{Content: "unknown tool: " + call.Name, IsError: true}, nil
+	}
+	if e.permissions.NeedsPermission(tool, call.Input) {
+		approved, err := e.permissions.RequestPermission(ctx, call.ID, e.events, call.Name, call.Input)
+		if err != nil {
+			return tools.ToolResult{}, err
+		}
+		if !approved {
+			e.fireHookAsync(hooks.PermissionRequest, hooks.HookInput{
+				ToolName:  call.Name,
+				ToolInput: "permission denied by user",
+			})
+			return tools.ToolResult{Content: "permission denied", IsError: true}, nil
+		}
+	}
+
+	return tool.Execute(ctx, call.Input), nil
+}
+
+// postToolPipeline normalizes a tool result and runs the shared side effects
+// that must happen before provider-specific history persistence.
+func (e *DirectEngine) postToolPipeline(_ context.Context, toolCall ToolCall, toolResult tools.ToolResult) (tools.ToolResult, error) {
+	toolResult.Content = normalizeToolResult(toolResult.Content, maxToolResultSize)
+
+	if e.sessionBus != nil {
+		e.sessionBus.Publish(session.Event{Type: session.EventToolCallResult, Data: toolResult.Content})
+	}
+
+	if toolResult.IsError {
+		e.fireHookAsync(hooks.PostToolUseFailure, hooks.HookInput{
+			ToolName:  toolCall.Name,
+			ToolInput: toolResult.Content,
+		})
+	} else {
+		e.fireHookAsync(hooks.PostToolUse, hooks.HookInput{
+			ToolName:  toolCall.Name,
+			ToolInput: toolResult.Content,
+		})
+	}
+
+	if toolResult.ContextModifier != nil {
+		toolResult.ContextModifier()
+	}
+
+	return toolResult, nil
 }
 
 // generateToolSummary uses the fast-tier model to produce a short summary of

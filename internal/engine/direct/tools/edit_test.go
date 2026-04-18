@@ -71,6 +71,29 @@ func TestEdit_ReplaceAll(t *testing.T) {
 	assert.Equal(t, "ccc bbb ccc", string(data))
 }
 
+func TestEditRoundtripsCRLFFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "windows.txt")
+	require.NoError(t, os.WriteFile(path, []byte("hello\r\nworld\r\n"), 0o644))
+
+	fs := NewFileState()
+	readTool := NewReadTool(fs)
+	readResult := readTool.Execute(context.Background(), map[string]any{"file_path": path})
+	require.False(t, readResult.IsError, readResult.Content)
+
+	editTool := NewEditTool(fs)
+	editResult := editTool.Execute(context.Background(), map[string]any{
+		"file_path":  path,
+		"old_string": "world",
+		"new_string": "flame",
+	})
+	require.False(t, editResult.IsError, editResult.Content)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "hello\r\nflame\r\n", string(data))
+}
+
 func TestEdit_NotFound(t *testing.T) {
 	path, fs := setupEditFile(t, "hello world")
 	e := NewEditTool(fs)

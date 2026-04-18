@@ -130,7 +130,14 @@ func (w *WriteTool) Execute(_ context.Context, input map[string]any) ToolResult 
 	}
 	tmpName := tmp.Name()
 
-	if _, err := tmp.WriteString(content); err != nil {
+	data, encoding, err := encodeTextForFile(path, content, fileExists)
+	if err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return ToolResult{Content: fmt.Sprintf("failed to encode file: %v", err), IsError: true}
+	}
+
+	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
 		return ToolResult{Content: fmt.Sprintf("failed to write temp file: %v", err), IsError: true}
@@ -147,6 +154,7 @@ func (w *WriteTool) Execute(_ context.Context, input map[string]any) ToolResult 
 
 	// Update file state so subsequent edits see this write.
 	w.fs.MarkRead(path)
+	rememberFileEncoding(path, encoding)
 	w.emitFileChanged(path)
 
 	verb := "Created"

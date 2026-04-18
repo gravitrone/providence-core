@@ -31,6 +31,57 @@ func TestReadBasicFile(t *testing.T) {
 	assert.True(t, fs.HasBeenRead(p))
 }
 
+func TestReadStripsBOMAndRemembersIt(t *testing.T) {
+	rt, _ := newReadTool()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bom.txt")
+	require.NoError(t, os.WriteFile(path, append([]byte{0xEF, 0xBB, 0xBF}, []byte("flame\n")...), 0o644))
+
+	res := rt.Execute(context.Background(), map[string]any{"file_path": path})
+	require.False(t, res.IsError, res.Content)
+	assert.Contains(t, res.Content, "1\tflame")
+	assert.NotContains(t, res.Content, "\uFEFF")
+
+	encoding, ok := lookupFileEncoding(path)
+	require.True(t, ok)
+	assert.True(t, encoding.BOM)
+	assert.Equal(t, LineEndingLF, encoding.LineEnding)
+	assert.Equal(t, CharsetUTF8, encoding.Charset)
+}
+
+func TestReadDetectsCRLFAndRemembers(t *testing.T) {
+	rt, _ := newReadTool()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "windows.txt")
+	require.NoError(t, os.WriteFile(path, []byte("ember\r\nash\r\n"), 0o644))
+
+	res := rt.Execute(context.Background(), map[string]any{"file_path": path})
+	require.False(t, res.IsError, res.Content)
+	assert.Contains(t, res.Content, "1\tember")
+	assert.Contains(t, res.Content, "2\tash")
+
+	encoding, ok := lookupFileEncoding(path)
+	require.True(t, ok)
+	assert.False(t, encoding.BOM)
+	assert.Equal(t, LineEndingCRLF, encoding.LineEnding)
+	assert.Equal(t, CharsetUTF8, encoding.Charset)
+}
+
+func TestReadHandlesLatin1File(t *testing.T) {
+	rt, _ := newReadTool()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "latin1.txt")
+	require.NoError(t, os.WriteFile(path, []byte{'c', 'a', 'f', 0xE9, '\n'}, 0o644))
+
+	res := rt.Execute(context.Background(), map[string]any{"file_path": path})
+	require.False(t, res.IsError, res.Content)
+	assert.Contains(t, res.Content, "café")
+
+	encoding, ok := lookupFileEncoding(path)
+	require.True(t, ok)
+	assert.Equal(t, CharsetLatin1, encoding.Charset)
+}
+
 func TestReadWithOffset(t *testing.T) {
 	rt, _ := newReadTool()
 	tmp := t.TempDir()

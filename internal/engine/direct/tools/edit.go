@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gravitrone/providence-core/internal/engine/hooks"
@@ -123,7 +124,11 @@ func (e *EditTool) Execute(_ context.Context, input map[string]any) ToolResult {
 	if err != nil {
 		return ToolResult{Content: fmt.Sprintf("failed to read file: %v", err), IsError: true}
 	}
-	content := string(data)
+	content, encoding, err := detectAndDecodeText(data)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("failed to decode file: %v", err), IsError: true}
+	}
+	rememberFileEncoding(path, encoding)
 
 	// Count occurrences.
 	count := strings.Count(content, oldStr)
@@ -167,12 +172,36 @@ func (e *EditTool) Execute(_ context.Context, input map[string]any) ToolResult {
 	}
 
 	// Write back.
-	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
-		return ToolResult{Content: fmt.Sprintf("failed to write file: %v", err), IsError: true}
+	data, writtenEncoding, err := encodeTextForFile(path, updated, true)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("failed to encode file: %v", err), IsError: true}
+	}
+
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".edit-tmp-*")
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("failed to create temp file: %v", err), IsError: true}
+	}
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return ToolResult{Content: fmt.Sprintf("failed to write temp file: %v", err), IsError: true}
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return ToolResult{Content: fmt.Sprintf("failed to close temp file: %v", err), IsError: true}
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return ToolResult{Content: fmt.Sprintf("failed to rename temp file: %v", err), IsError: true}
 	}
 
 	// Update file state so subsequent edits see this write.
 	e.fs.MarkRead(path)
+	rememberFileEncoding(path, writtenEncoding)
 	e.emitFileChanged(path)
 
 	result := ToolResult{

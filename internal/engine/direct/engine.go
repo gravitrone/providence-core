@@ -187,6 +187,8 @@ type DirectEngine struct {
 
 	// Context injector for overlay screen-context reminders.
 	contextInjector contextInjector
+
+	lastCompactedAt time.Time
 }
 
 // contextInjector is a local interface matching overlay.Injector to avoid an
@@ -418,41 +420,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	}
 
 	e.compactor = compact.New(provider, func(phase compact.Phase, err error) {
-		if phase == compact.PhaseRunning {
-			e.sessionBus.Publish(session.Event{Type: session.EventCompaction, Data: nil})
-			// Fire PreCompact hook.
-			e.fireHookAsync(hooks.PreCompact, hooks.HookInput{
-				ToolInput: provider.CurrentTokens(),
-			})
-		}
-		event := engine.ParsedEvent{
-			Type: "compaction",
-			Data: &engine.CompactionEvent{
-				Type:  "compaction",
-				Phase: string(phase),
-				Err:   err,
-			},
-		}
-
-		compactionEvent := event.Data.(*engine.CompactionEvent)
-		switch phase {
-		case compact.PhaseRunning:
-			compactionEvent.TokensBefore = provider.CurrentTokens()
-		default:
-			compactionEvent.TokensAfter = provider.CurrentTokens()
-			// Fire PostCompact hook.
-			e.fireHookAsync(hooks.PostCompact, hooks.HookInput{
-				ToolInput: map[string]int{
-					"original_count": compactionEvent.TokensBefore,
-					"new_count":      provider.CurrentTokens(),
-				},
-			})
-		}
-
-		select {
-		case e.events <- event:
-		default:
-		}
+		e.handleCompactionPhase(provider, phase, err)
 	})
 
 	// Start file watcher for config change detection.
@@ -514,6 +482,94 @@ func (e *DirectEngine) CacheSafeSystemBlocks() []subagent.SystemBlock {
 		}
 	}
 	return out
+}
+
+func (e *DirectEngine) handleCompactionPhase(provider compact.Provider, phase compact.Phase, err error) {
+	if phase == compact.PhaseRunning {
+		e.sessionBus.Publish(session.Event{Type: session.EventCompaction, Data: nil})
+		// Fire PreCompact hook.
+		e.fireHookAsync(hooks.PreCompact, hooks.HookInput{
+			ToolInput: provider.CurrentTokens(),
+		})
+	}
+
+	event := engine.ParsedEvent{
+		Type: "compaction",
+		Data: &engine.CompactionEvent{
+			Type:  "compaction",
+			Phase: string(phase),
+			Err:   err,
+		},
+	}
+
+	compactionEvent := event.Data.(*engine.CompactionEvent)
+	switch phase {
+	case compact.PhaseRunning:
+		compactionEvent.TokensBefore = provider.CurrentTokens()
+	default:
+		compactionEvent.TokensAfter = provider.CurrentTokens()
+		// Fire PostCompact hook.
+		e.fireHookAsync(hooks.PostCompact, hooks.HookInput{
+			ToolInput: map[string]int{
+				"original_count": compactionEvent.TokensBefore,
+				"new_count":      provider.CurrentTokens(),
+			},
+		})
+	}
+
+	select {
+	case e.events <- event:
+	default:
+	}
+
+	if phase == compact.PhaseIdle && err == nil {
+		e.runPostCompactCleanup()
+	}
+}
+
+func (e *DirectEngine) runPostCompactCleanup() {
+	compact.RunPostCompactCleanup(e.postCompactCleanupState())
+}
+
+func (e *DirectEngine) postCompactCleanupState() compact.PostCleanupState {
+	return compact.PostCleanupState{
+		ResetReportedTokens: func() {
+			if e.history == nil {
+				return
+			}
+			e.history.SetReportedTokens(0, 0)
+		},
+		ResetToolResultCache: func() {
+			e.preExecMu.Lock()
+			e.preExecResults = make(map[string]tools.ToolResult)
+			e.preExecMu.Unlock()
+		},
+		CancelTurnContext: func() {
+			e.mu.Lock()
+			cancel := e.cancel
+			shouldCancel := e.status != engine.StatusRunning
+			e.mu.Unlock()
+			if shouldCancel && cancel != nil {
+				cancel()
+			}
+		},
+		MarkCompactedAt: func(now time.Time) {
+			e.mu.Lock()
+			e.lastCompactedAt = now
+			e.mu.Unlock()
+		},
+		ResetInMemoryState: func() {
+			e.contentReplacementsMu.Lock()
+			e.contentReplacements = make(map[string]string)
+			e.contentReplacementsMu.Unlock()
+
+			e.mu.Lock()
+			e.loopHistory = [5]string{}
+			e.loopIdx = 0
+			e.loopFillCount = 0
+			e.mu.Unlock()
+		},
+	}
 }
 
 // SessionBus returns the engine's session event bus.
@@ -1433,6 +1489,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 					},
 				}
 				if compactErr := e.compactor.TriggerReactive(ctx); compactErr == nil {
+					e.runPostCompactCleanup()
 					continue
 				}
 				e.emitError(fmt.Errorf("prompt exceeds context window and compaction failed"))
@@ -1475,6 +1532,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 					},
 				}
 				if compactErr := e.compactor.TriggerReactive(ctx); compactErr == nil {
+					e.runPostCompactCleanup()
 					// Compaction succeeded, retry the turn.
 					continue
 				}

@@ -189,7 +189,21 @@ func (r *Runner) prepareAgent(ctx context.Context, input TaskInput, agentType Ag
 		return nil, nil, input, agentType, err
 	}
 
+	r.injectAgentMemory(&input, &agentType)
+
 	return ctx, agent, input, agentType, nil
+}
+
+// injectAgentMemory loads the three per-type memory scopes and appends them to
+// the agent's system prompt as <agent-memory> blocks. The project root used for
+// project and local scopes is the agent's effective working directory (worktree
+// path when isolation=worktree, otherwise the runner's WorkDir).
+func (r *Runner) injectAgentMemory(input *TaskInput, agentType *AgentType) {
+	projectRoot := agentType.WorkDir
+	if projectRoot == "" {
+		projectRoot = r.WorkDir
+	}
+	agentType.SystemPrompt = InjectAgentMemory(agentType.SystemPrompt, input.SubagentType, projectRoot)
 }
 
 func (r *Runner) prepareWorktree(agent *RunningAgent, input *TaskInput, agentType *AgentType) error {

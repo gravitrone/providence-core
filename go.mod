@@ -8,8 +8,10 @@ require (
 	charm.land/glamour/v2 v2.0.0
 	charm.land/lipgloss/v2 v2.0.2
 	github.com/charmbracelet/harmonica v0.2.0
+	github.com/disintegration/imaging v1.6.2
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/image v0.0.0-20191009234506-e7c1f5e7dbb8
 )
 
 require (

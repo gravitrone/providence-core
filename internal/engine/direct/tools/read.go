@@ -2,24 +2,34 @@ package tools
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/disintegration/imaging"
 	"github.com/gravitrone/providence-core/internal/engine/hooks"
 	"github.com/gravitrone/providence-core/internal/engine/skills"
+	_ "golang.org/x/image/webp"
 )
 
 const (
 	defaultReadLimit = 2000
 	maxReadChars     = 100_000
+	imageMaxPixels   = 1_150_000
 )
 
 var imageExts = map[string]string{
@@ -232,17 +242,121 @@ func (r *ReadTool) readImage(path, mime string) ToolResult {
 		}
 		return ToolResult{Content: fmt.Sprintf("cannot read image: %v", err), IsError: true}
 	}
-	encoded := base64.StdEncoding.EncodeToString(data)
+
+	resized := resizeImageToBudget(data, mime)
+	if resized.resized {
+		log.Printf(
+			"debug: resized read image %s from %dx%d to %dx%d",
+			path,
+			resized.originalWidth,
+			resized.originalHeight,
+			resized.width,
+			resized.height,
+		)
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(resized.data)
 	r.fileState.MarkRead(path)
 	r.emitFileRead(path)
 	return ToolResult{
-		Content: fmt.Sprintf("[image: %s (%d bytes)]", filepath.Base(path), len(data)),
+		Content: fmt.Sprintf("[image: %s (%d bytes)]", filepath.Base(path), len(resized.data)),
 		Metadata: map[string]any{
 			"base64":    encoded,
 			"mime_type": mime,
 		},
 		ContextModifier: r.skillActivationModifier(path),
 	}
+}
+
+type imageResizeResult struct {
+	data           []byte
+	originalWidth  int
+	originalHeight int
+	width          int
+	height         int
+	resized        bool
+}
+
+func resizeImageToBudget(data []byte, mime string) imageResizeResult {
+	result := imageResizeResult{data: data}
+
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return result
+	}
+
+	pixels := int64(cfg.Width) * int64(cfg.Height)
+	if pixels <= imageMaxPixels {
+		return result
+	}
+
+	img, err := imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
+	if err != nil {
+		return result
+	}
+
+	sourceWidth := img.Bounds().Dx()
+	sourceHeight := img.Bounds().Dy()
+	if sourceWidth <= 0 || sourceHeight <= 0 {
+		return result
+	}
+
+	targetWidth, targetHeight := scaleImageDimensions(sourceWidth, sourceHeight, imageMaxPixels)
+	if targetWidth == sourceWidth && targetHeight == sourceHeight {
+		return result
+	}
+
+	resizedImage := imaging.Resize(img, targetWidth, targetHeight, imaging.Lanczos)
+
+	var encoded bytes.Buffer
+	switch mime {
+	case "image/jpeg":
+		err = imaging.Encode(&encoded, resizedImage, imaging.JPEG, imaging.JPEGQuality(85))
+	case "image/png":
+		err = imaging.Encode(&encoded, resizedImage, imaging.PNG)
+	case "image/gif":
+		err = imaging.Encode(&encoded, resizedImage, imaging.GIF)
+	default:
+		return result
+	}
+	if err != nil {
+		return result
+	}
+
+	result.data = encoded.Bytes()
+	result.originalWidth = sourceWidth
+	result.originalHeight = sourceHeight
+	result.width = targetWidth
+	result.height = targetHeight
+	result.resized = true
+	return result
+}
+
+func scaleImageDimensions(width, height int, maxPixels int64) (int, int) {
+	scale := math.Sqrt(float64(maxPixels) / float64(int64(width)*int64(height)))
+
+	scaledWidth := int(math.Floor(float64(width) * scale))
+	scaledHeight := int(math.Floor(float64(height) * scale))
+	if scaledWidth < 1 {
+		scaledWidth = 1
+	}
+	if scaledHeight < 1 {
+		scaledHeight = 1
+	}
+
+	for int64(scaledWidth)*int64(scaledHeight) > maxPixels {
+		if scaledWidth >= scaledHeight && scaledWidth > 1 {
+			scaledWidth--
+			continue
+		}
+		if scaledHeight > 1 {
+			scaledHeight--
+			continue
+		}
+		break
+	}
+
+	return scaledWidth, scaledHeight
 }
 
 // readPDF extracts text from a PDF using pdftotext (poppler).

@@ -1,7 +1,11 @@
 package tools
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,8 +138,7 @@ func TestReadImage(t *testing.T) {
 	rt, fs := newReadTool()
 	tmp := t.TempDir()
 	p := filepath.Join(tmp, "icon.png")
-	// minimal fake PNG data (not valid, but extension-based detection)
-	require.NoError(t, os.WriteFile(p, []byte("fakepng"), 0644))
+	original := writePNGImage(t, p, 64, 64)
 
 	res := rt.Execute(context.Background(), map[string]any{"file_path": p})
 	assert.False(t, res.IsError)
@@ -143,7 +146,48 @@ func TestReadImage(t *testing.T) {
 	assert.NotNil(t, res.Metadata)
 	assert.Equal(t, "image/png", res.Metadata["mime_type"])
 	assert.NotEmpty(t, res.Metadata["base64"])
+	assert.Equal(t, original, decodeImageResultBytes(t, res))
 	assert.True(t, fs.HasBeenRead(p))
+}
+
+func TestReadImageResizesWhenOverBudget(t *testing.T) {
+	rt, _ := newReadTool()
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "large.png")
+	writePNGImage(t, p, 2000, 2000)
+
+	res := rt.Execute(context.Background(), map[string]any{"file_path": p})
+	require.False(t, res.IsError, res.Content)
+
+	width, height := decodeImageDimensions(t, decodeImageResultBytes(t, res))
+	assert.LessOrEqual(t, width*height, imageMaxPixels)
+	assert.Equal(t, width, height)
+}
+
+func TestReadImagePassesThroughWhenUnderBudget(t *testing.T) {
+	rt, _ := newReadTool()
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "small.png")
+	original := writePNGImage(t, p, 500, 500)
+
+	res := rt.Execute(context.Background(), map[string]any{"file_path": p})
+	require.False(t, res.IsError, res.Content)
+
+	assert.Equal(t, original, decodeImageResultBytes(t, res))
+}
+
+func TestReadImageUnsupportedFormatPassesThrough(t *testing.T) {
+	rt, _ := newReadTool()
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "vector.svg")
+	original := []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"></svg>`)
+	require.NoError(t, os.WriteFile(p, original, 0o644))
+
+	res := rt.Execute(context.Background(), map[string]any{"file_path": p})
+	require.False(t, res.IsError, res.Content)
+
+	assert.Equal(t, "image/svg+xml", res.Metadata["mime_type"])
+	assert.Equal(t, original, decodeImageResultBytes(t, res))
 }
 
 func TestReadEmptyFile(t *testing.T) {
@@ -197,4 +241,33 @@ func TestReadToolHasLargerCap(t *testing.T) {
 	provider, ok := any(rt).(ResultCapProvider)
 	require.True(t, ok)
 	assert.Equal(t, readToolResultSizeCap, provider.ResultSizeCap())
+}
+
+func writePNGImage(t *testing.T, path string, width, height int) []byte {
+	t.Helper()
+
+	img := image.NewNRGBA(image.Rect(0, 0, width, height))
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o644))
+	return buf.Bytes()
+}
+
+func decodeImageResultBytes(t *testing.T, res ToolResult) []byte {
+	t.Helper()
+
+	encoded, ok := res.Metadata["base64"].(string)
+	require.True(t, ok)
+
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	require.NoError(t, err)
+	return data
+}
+
+func decodeImageDimensions(t *testing.T, data []byte) (int, int) {
+	t.Helper()
+
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	require.NoError(t, err)
+	return cfg.Width, cfg.Height
 }

@@ -32,6 +32,7 @@ type BashTool struct {
 	sessionID   string
 	sessionRoot string
 	cwdFile     string
+	sandboxFile string
 	emitter     HookEmitter
 }
 
@@ -42,11 +43,15 @@ func (b *BashTool) SetHookEmitter(emitter HookEmitter) {
 	b.emitter = emitter
 }
 
-// Close removes the persisted cwd state for this bash session.
+// Close removes persisted bash session state.
 func (b *BashTool) Close() error {
-	path := b.cwdStatePath()
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(b.cwdStatePath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove bash cwd state: %w", err)
+	}
+	if path := b.sandboxProfileFile(); path != "" {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove bash sandbox profile: %w", err)
+		}
 	}
 	return nil
 }
@@ -205,11 +210,15 @@ func (b *BashTool) Execute(ctx context.Context, input map[string]any) ToolResult
 	return b.runForeground(ctx, command, time.Duration(timeoutMs)*time.Millisecond, useSandbox)
 }
 
-func (b *BashTool) makeCmd(ctx context.Context, command string, sandbox bool) *exec.Cmd {
+func (b *BashTool) makeCmd(ctx context.Context, command string, sandbox bool) (*exec.Cmd, error) {
 	if sandbox {
-		return exec.CommandContext(ctx, "sandbox-exec", "-p", sandboxProfile, "/bin/bash", "-c", command)
+		profilePath, err := b.ensureSandboxProfile()
+		if err != nil {
+			return nil, err
+		}
+		return exec.CommandContext(ctx, "sandbox-exec", "-f", profilePath, "/bin/bash", "-c", command), nil
 	}
-	return exec.CommandContext(ctx, "/bin/bash", "-c", command)
+	return exec.CommandContext(ctx, "/bin/bash", "-c", command), nil
 }
 
 func (b *BashTool) runBackground(ctx context.Context, command string, sandbox bool) ToolResult {
@@ -218,7 +227,10 @@ func (b *BashTool) runBackground(ctx context.Context, command string, sandbox bo
 		return ToolResult{Content: err.Error(), IsError: true}
 	}
 
-	cmd := b.makeCmd(ctx, wrappedCommand, sandbox)
+	cmd, err := b.makeCmd(ctx, wrappedCommand, sandbox)
+	if err != nil {
+		return ToolResult{Content: err.Error(), IsError: true}
+	}
 	// Detach process group so it survives parent exit.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -245,7 +257,10 @@ func (b *BashTool) runForeground(ctx context.Context, command string, timeout ti
 		return ToolResult{Content: err.Error(), IsError: true}
 	}
 
-	cmd := b.makeCmd(ctx, wrappedCommand, sandbox)
+	cmd, err := b.makeCmd(ctx, wrappedCommand, sandbox)
+	if err != nil {
+		return ToolResult{Content: err.Error(), IsError: true}
+	}
 	// Kill entire process group on timeout.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

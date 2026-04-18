@@ -199,6 +199,93 @@ func TestBash_FiresCwdChangedHook(t *testing.T) {
 	assert.Equal(t, map[string]string{"cwd": filepath.Join(root, "sub")}, inputs[0].ToolInput)
 }
 
+func TestSandboxProfileIncludesAllowedNetwork(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	writeSandboxConfig(t, root, `[sandbox]
+allow_network = ["localhost:3000", "api.myco.internal"]
+`)
+
+	b := newTestBashTool(t, "sandbox-network-session", root)
+	path, err := b.ensureSandboxProfile()
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	profile := string(data)
+	assert.Contains(t, profile, `(remote tcp "localhost:3000")`)
+	assert.Contains(t, profile, `(remote udp "localhost:3000")`)
+	assert.Contains(t, profile, `(remote tcp "api.myco.internal:*")`)
+	assert.Contains(t, profile, sandboxResolverSocket)
+}
+
+func TestSandboxProfileIncludesAllowedWrite(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	writeSandboxConfig(t, root, `[sandbox]
+allow_write = ["/tmp/cache", "~/.myapp/data"]
+`)
+
+	b := newTestBashTool(t, "sandbox-write-session", root)
+	path, err := b.ensureSandboxProfile()
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	profile := string(data)
+	assert.Contains(t, profile, `(allow file-write* (subpath "/tmp/cache"))`)
+	assert.Contains(t, profile, `(allow file-write* (subpath "`+filepath.Join(home, ".myapp", "data")+`"))`)
+}
+
+func TestSandboxProfileRejectsWildcardNetwork(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	writeSandboxConfig(t, root, `[sandbox]
+allow_network = ["*:*"]
+`)
+
+	b := newTestBashTool(t, "sandbox-reject-network", root)
+	_, err := b.ensureSandboxProfile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `sandbox.allow_network "*:*" is too broad`)
+}
+
+func TestSandboxProfileRejectsBareHomePath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	writeSandboxConfig(t, root, `[sandbox]
+allow_write = ["~"]
+`)
+
+	b := newTestBashTool(t, "sandbox-reject-home", root)
+	_, err := b.ensureSandboxProfile()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must target a subdirectory")
+}
+
+func TestSandboxProfileTempfileCleanedUp(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	writeSandboxConfig(t, root, `[sandbox]
+allow_network = ["localhost:3000"]
+`)
+
+	b := newTestBashTool(t, "sandbox-cleanup", root)
+	path, err := b.ensureSandboxProfile()
+	require.NoError(t, err)
+
+	_, err = os.Stat(path)
+	require.NoError(t, err)
+
+	require.NoError(t, b.Close())
+
+	_, err = os.Stat(path)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func newTestBashTool(t *testing.T, sessionID string, sessionRoot string) *BashTool {
 	t.Helper()
 
@@ -219,4 +306,12 @@ func assertSavedCwd(t *testing.T, b *BashTool, want string) {
 	data, err := os.ReadFile(b.cwdStatePath())
 	require.NoError(t, err)
 	assert.Equal(t, want, strings.TrimSpace(string(data)))
+}
+
+func writeSandboxConfig(t *testing.T, root, content string) {
+	t.Helper()
+
+	path := filepath.Join(root, ".providence", "config.toml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 }

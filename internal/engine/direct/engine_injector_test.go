@@ -3,6 +3,7 @@ package direct
 import (
 	"testing"
 
+	"github.com/gravitrone/providence-core/internal/engine/skills"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -155,6 +156,23 @@ func TestPrepareUserText_WithReminder(t *testing.T) {
 	if inj.called != 1 {
 		t.Errorf("PendingSystemReminder called %d times, want 1", inj.called)
 	}
+}
+
+func TestPrepareUserText_WithActivatedSkillReminder(t *testing.T) {
+	e := &DirectEngine{
+		pendingSkills: []skills.ActivatedSkill{
+			{
+				Name:         "go-rules",
+				MatchedGlob:  "internal/*.go",
+				Instructions: "Follow the Go rules skill.",
+			},
+		},
+	}
+
+	got := e.prepareUserText("hello")
+	want := "<activated-skill name=\"go-rules\" matched=\"internal/*.go\">\nFollow the Go rules skill.\n</activated-skill>\n\nhello"
+	assert.Equal(t, want, got)
+	assert.Equal(t, "hello", e.prepareUserText("hello"))
 }
 
 // TestPrepareUserText_ClearedOnSecondCall verifies that the reminder is only

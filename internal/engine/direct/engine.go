@@ -28,6 +28,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/mcp"
 	"github.com/gravitrone/providence-core/internal/engine/permissions"
 	"github.com/gravitrone/providence-core/internal/engine/session"
+	"github.com/gravitrone/providence-core/internal/engine/skills"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
 	"github.com/gravitrone/providence-core/internal/engine/teams"
 )
@@ -78,6 +79,9 @@ type DirectEngine struct {
 
 	// Pending images to include with the next user message.
 	pendingImages []ImageData
+
+	// Pending conditional skill reminders to prepend to the next user message.
+	pendingSkills []skills.ActivatedSkill
 
 	// Provider identifier ("anthropic", "openai", "openrouter").
 	provider string
@@ -382,6 +386,9 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	readTool.SetHookEmitter(hookEmitter)
 	writeTool.SetHookEmitter(hookEmitter)
 	editTool.SetHookEmitter(hookEmitter)
+	readTool.SetSkillActivationHandler(e.enqueueActivatedSkills)
+	writeTool.SetSkillActivationHandler(e.enqueueActivatedSkills)
+	editTool.SetSkillActivationHandler(e.enqueueActivatedSkills)
 	bashTool.SetHookEmitter(hookEmitter)
 	permHandler.SetHookEmitter(hookEmitter)
 
@@ -778,6 +785,9 @@ func (e *DirectEngine) SetContextInjector(inj contextInjector) {
 func (e *DirectEngine) prepareUserText(text string) string {
 	var parts []string
 
+	if attachments := e.drainPendingSkillAttachments(); attachments != "" {
+		parts = append(parts, attachments)
+	}
 	if attachments := e.drainPendingHookAttachments(); attachments != "" {
 		parts = append(parts, attachments)
 	}
@@ -2981,6 +2991,45 @@ func (e *DirectEngine) injectPendingAttachments() {
 	e.drainSteeredMessages()
 }
 
+func (e *DirectEngine) enqueueActivatedSkills(activatedSkills []skills.ActivatedSkill) {
+	if len(activatedSkills) == 0 {
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	seen := make(map[string]struct{}, len(e.pendingSkills))
+	for _, pendingSkill := range e.pendingSkills {
+		seen[pendingSkill.Name] = struct{}{}
+	}
+
+	for _, activatedSkill := range activatedSkills {
+		if _, exists := seen[activatedSkill.Name]; exists {
+			continue
+		}
+		e.pendingSkills = append(e.pendingSkills, activatedSkill)
+		seen[activatedSkill.Name] = struct{}{}
+	}
+}
+
+func (e *DirectEngine) drainPendingSkillAttachments() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if len(e.pendingSkills) == 0 {
+		return ""
+	}
+
+	attachments := make([]string, 0, len(e.pendingSkills))
+	for _, activatedSkill := range e.pendingSkills {
+		attachments = append(attachments, formatActivatedSkillAttachment(activatedSkill))
+	}
+
+	e.pendingSkills = nil
+	return strings.Join(attachments, "\n\n")
+}
+
 func (e *DirectEngine) drainPendingHookAttachments() string {
 	if e.hooksRunner == nil {
 		return ""
@@ -3012,6 +3061,22 @@ func formatPendingHookAttachment(result hooks.CompletedHook) string {
 		"<hook-result %s>\n%s\n</hook-result>",
 		attrs,
 		html.EscapeString(result.Output),
+	)
+}
+
+func formatActivatedSkillAttachment(activatedSkill skills.ActivatedSkill) string {
+	attrs := fmt.Sprintf(
+		`name="%s" matched="%s"`,
+		html.EscapeString(activatedSkill.Name),
+		html.EscapeString(activatedSkill.MatchedGlob),
+	)
+	if activatedSkill.Instructions == "" {
+		return fmt.Sprintf("<activated-skill %s></activated-skill>", attrs)
+	}
+	return fmt.Sprintf(
+		"<activated-skill %s>\n%s\n</activated-skill>",
+		attrs,
+		activatedSkill.Instructions,
 	)
 }
 

@@ -59,6 +59,8 @@ type HookConfig struct {
 	Command string        `toml:"command" json:"command,omitempty"`
 	URL     string        `toml:"url" json:"url,omitempty"`
 	Timeout time.Duration `toml:"timeout" json:"timeout,omitempty"`
+	Async   bool          `toml:"async" json:"async,omitempty"`
+	TTL     time.Duration `toml:"ttl" json:"ttl,omitempty"`
 }
 
 // HookInput is the JSON payload sent to hook executors via stdin or POST body.
@@ -95,7 +97,9 @@ func (e *BlockingError) Error() string {
 
 // Runner executes hooks for lifecycle events.
 type Runner struct {
-	hooks map[string][]HookConfig
+	hooks   map[string][]HookConfig
+	pending *PendingHooks
+	exec    HookExecutor
 }
 
 // NewRunner creates a Runner with the given event-to-hooks mapping.
@@ -103,13 +107,49 @@ func NewRunner(hooks map[string][]HookConfig) *Runner {
 	if hooks == nil {
 		hooks = make(map[string][]HookConfig)
 	}
-	return &Runner{hooks: hooks}
+	return &Runner{
+		hooks:   hooks,
+		pending: NewPendingHooks(),
+		exec:    defaultHookExecutor,
+	}
 }
 
 // HasHooks returns true if any hooks are registered for the given event.
 func (r *Runner) HasHooks(event string) bool {
 	configs, ok := r.hooks[event]
 	return ok && len(configs) > 0
+}
+
+// DrainCompleted returns async hook results that are ready for injection.
+func (r *Runner) DrainCompleted() []CompletedHook {
+	if r == nil || r.pending == nil {
+		return nil
+	}
+	return r.pending.DrainCompleted()
+}
+
+// PendingCount returns the number of tracked async hooks.
+func (r *Runner) PendingCount() int {
+	if r == nil || r.pending == nil {
+		return 0
+	}
+	return r.pending.PendingCount()
+}
+
+// CompletedCount returns the number of completed async hooks waiting to be drained.
+func (r *Runner) CompletedCount() int {
+	if r == nil || r.pending == nil {
+		return 0
+	}
+	return r.pending.CompletedCount()
+}
+
+// Close cancels all tracked async hooks.
+func (r *Runner) Close() {
+	if r == nil || r.pending == nil {
+		return
+	}
+	r.pending.Close()
 }
 
 // Run executes all hooks for an event sequentially, returning the first
@@ -132,7 +172,12 @@ func (r *Runner) run(ctx context.Context, event string, input HookInput) (*HookO
 	}
 
 	for _, cfg := range configs {
-		out, err := r.execOne(ctx, cfg, input)
+		if cfg.Async {
+			r.pending.Dispatch(ctx, event, cfg, input, r.exec)
+			continue
+		}
+
+		out, err := r.exec(ctx, cfg, input)
 		if err != nil {
 			return out, err
 		}
@@ -158,10 +203,14 @@ func (r *Runner) RunAsync(ctx context.Context, event string, input HookInput) {
 	go func() {
 		var wg sync.WaitGroup
 		for _, cfg := range configs {
+			if cfg.Async {
+				r.pending.Dispatch(ctx, event, cfg, input, r.exec)
+				continue
+			}
 			wg.Add(1)
 			go func(c HookConfig) {
 				defer wg.Done()
-				_, _ = r.execOne(ctx, c, input)
+				_, _ = r.exec(ctx, c, input)
 			}(cfg)
 		}
 		wg.Wait()
@@ -169,8 +218,7 @@ func (r *Runner) RunAsync(ctx context.Context, event string, input HookInput) {
 	}()
 }
 
-// execOne dispatches to the appropriate executor based on config.
-func (r *Runner) execOne(ctx context.Context, cfg HookConfig, input HookInput) (*HookOutput, error) {
+func defaultHookExecutor(ctx context.Context, cfg HookConfig, input HookInput) (*HookOutput, error) {
 	if cfg.Command != "" {
 		return execShellHook(ctx, cfg, input)
 	}

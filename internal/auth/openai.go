@@ -85,11 +85,11 @@ func LoginOpenAI() (*OpenAITokens, error) {
 	// Build authorize URL.
 	params := url.Values{
 		"client_id":             {OpenAIClientID},
-		"redirect_uri":         {OpenAIRedirectURI},
-		"response_type":        {"code"},
-		"scope":                {OpenAIScope},
-		"state":                {state},
-		"code_challenge":       {challenge},
+		"redirect_uri":          {OpenAIRedirectURI},
+		"response_type":         {"code"},
+		"scope":                 {OpenAIScope},
+		"state":                 {state},
+		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
 	}
 	authorizeURL := OpenAIAuthorizeURL + "?" + params.Encode()
@@ -123,16 +123,23 @@ func LoginOpenAI() (*OpenAITokens, error) {
 		}
 		resultCh <- callbackResult{code: code}
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, `<html><body><h2>Login successful!</h2><p>You can close this tab.</p><script>window.close()</script></body></html>`)
+		_, _ = fmt.Fprint(w, `<html><body><h2>Login successful!</h2><p>You can close this tab.</p><script>window.close()</script></body></html>`)
 	})
 
 	listener, err := net.Listen("tcp", "127.0.0.1:1455")
 	if err != nil {
 		return nil, fmt.Errorf("start callback server: %w", err)
 	}
-	server := &http.Server{Handler: mux}
-	go server.Serve(listener)
-	defer server.Shutdown(context.Background())
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	defer func() {
+		_ = server.Shutdown(context.Background())
+	}()
 
 	// Open browser.
 	if err := exec.Command("open", authorizeURL).Start(); err != nil {

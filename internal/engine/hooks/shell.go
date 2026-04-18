@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"time"
@@ -40,7 +41,8 @@ func execShellHook(ctx context.Context, cfg HookConfig, input HookInput) (*HookO
 	}
 
 	if err != nil {
-		exitErr, ok := err.(*exec.ExitError)
+		var exitErr *exec.ExitError
+		ok := errors.As(err, &exitErr)
 		if !ok {
 			return nil, fmt.Errorf("failed to run hook command: %w", err)
 		}

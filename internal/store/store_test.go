@@ -13,7 +13,9 @@ func testStore(t *testing.T) *Store {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	s, err := Open(dbPath)
 	require.NoError(t, err)
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() {
+		require.NoError(t, s.Close())
+	})
 	return s
 }
 
@@ -37,8 +39,8 @@ func TestCreateAndGetSession(t *testing.T) {
 
 func TestUpdateSessionTitle(t *testing.T) {
 	s := testStore(t)
-	s.CreateSession("s1", "/tmp", "claude", "haiku")
-	s.UpdateSessionTitle("s1", "my cool session")
+	require.NoError(t, s.CreateSession("s1", "/tmp", "claude", "haiku"))
+	require.NoError(t, s.UpdateSessionTitle("s1", "my cool session"))
 
 	session, _ := s.GetSession("s1")
 	assert.Equal(t, "my cool session", session.Title)
@@ -46,11 +48,13 @@ func TestUpdateSessionTitle(t *testing.T) {
 
 func TestDeleteSession(t *testing.T) {
 	s := testStore(t)
-	s.CreateSession("s1", "/tmp", "claude", "haiku")
-	s.AddMessage("s1", "user", "hello", "", "", "", "", "", 0, true)
-	s.AddMessage("s1", "assistant", "hi", "", "", "", "", "", 0, true)
+	require.NoError(t, s.CreateSession("s1", "/tmp", "claude", "haiku"))
+	_, err := s.AddMessage("s1", "user", "hello", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
+	_, err = s.AddMessage("s1", "assistant", "hi", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
 
-	err := s.DeleteSession("s1")
+	err = s.DeleteSession("s1")
 	require.NoError(t, err)
 
 	// Session gone
@@ -65,9 +69,9 @@ func TestDeleteSession(t *testing.T) {
 
 func TestListSessions(t *testing.T) {
 	s := testStore(t)
-	s.CreateSession("s1", "/project-a", "claude", "sonnet")
-	s.CreateSession("s2", "/project-a", "direct", "opus")
-	s.CreateSession("s3", "/project-b", "claude", "haiku")
+	require.NoError(t, s.CreateSession("s1", "/project-a", "claude", "sonnet"))
+	require.NoError(t, s.CreateSession("s2", "/project-a", "direct", "opus"))
+	require.NoError(t, s.CreateSession("s3", "/project-b", "claude", "haiku"))
 
 	// List all
 	all, err := s.ListSessions("", 10)
@@ -86,10 +90,13 @@ func TestListSessions(t *testing.T) {
 
 func TestListSessionsWithMessageCount(t *testing.T) {
 	s := testStore(t)
-	s.CreateSession("s1", "/tmp", "claude", "sonnet")
-	s.AddMessage("s1", "user", "hello", "", "", "", "", "", 0, true)
-	s.AddMessage("s1", "assistant", "hi", "", "", "", "", "", 0, true)
-	s.AddMessage("s1", "user", "bye", "", "", "", "", "", 0, true)
+	require.NoError(t, s.CreateSession("s1", "/tmp", "claude", "sonnet"))
+	_, err := s.AddMessage("s1", "user", "hello", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
+	_, err = s.AddMessage("s1", "assistant", "hi", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
+	_, err = s.AddMessage("s1", "user", "bye", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
 
 	sessions, _ := s.ListSessions("", 10)
 	require.Len(t, sessions, 1)
@@ -98,7 +105,7 @@ func TestListSessionsWithMessageCount(t *testing.T) {
 
 func TestAddAndGetMessages(t *testing.T) {
 	s := testStore(t)
-	s.CreateSession("s1", "/tmp", "claude", "sonnet")
+	require.NoError(t, s.CreateSession("s1", "/tmp", "claude", "sonnet"))
 
 	id1, err := s.AddMessage("s1", "user", "find bugs", "", "", "", "", "", 0, true)
 	require.NoError(t, err)
@@ -123,7 +130,7 @@ func TestAddAndGetMessages(t *testing.T) {
 
 func TestUpdateMessageContent(t *testing.T) {
 	s := testStore(t)
-	s.CreateSession("s1", "/tmp", "direct", "sonnet")
+	require.NoError(t, s.CreateSession("s1", "/tmp", "direct", "sonnet"))
 
 	id, _ := s.AddMessage("s1", "assistant", "partial...", "", "", "", "", "", 0, false)
 
@@ -138,7 +145,7 @@ func TestUpdateMessageContent(t *testing.T) {
 
 func TestUpdateToolOutput(t *testing.T) {
 	s := testStore(t)
-	s.CreateSession("s1", "/tmp", "direct", "sonnet")
+	require.NoError(t, s.CreateSession("s1", "/tmp", "direct", "sonnet"))
 
 	id, _ := s.AddMessage("s1", "tool", "", "Read", "main.go", "pending", "", "", 0, true)
 

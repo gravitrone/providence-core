@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gravitrone/providence-core/internal/config"
+	"github.com/stretchr/testify/require"
 )
 
 // bridgeInstalled returns true if the Swift bridge binary is findable.
@@ -25,7 +26,9 @@ func BenchmarkScreenshot(b *testing.B) {
 	}
 
 	bridge := New(WithConfig(config.BridgeConfig{Mode: "auto"}))
-	defer bridge.Close()
+	b.Cleanup(func() {
+		require.NoError(b, bridge.Close())
+	})
 
 	ctx := context.Background()
 	b.ResetTimer()
@@ -44,7 +47,9 @@ func BenchmarkAXTree(b *testing.B) {
 	}
 
 	bridge := New(WithConfig(config.BridgeConfig{Mode: "auto"}))
-	defer bridge.Close()
+	b.Cleanup(func() {
+		require.NoError(b, bridge.Close())
+	})
 
 	ctx := context.Background()
 	p := AXTreeParams{App: "Finder", MaxDepth: 4, MaxNodes: 200}
@@ -64,7 +69,9 @@ func BenchmarkScreenDiff(b *testing.B) {
 	}
 
 	bridge := New(WithConfig(config.BridgeConfig{Mode: "auto"}))
-	defer bridge.Close()
+	b.Cleanup(func() {
+		require.NoError(b, bridge.Close())
+	})
 
 	ctx := context.Background()
 	p := ScreenDiffParams{}

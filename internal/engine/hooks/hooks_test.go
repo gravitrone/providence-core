@@ -196,7 +196,8 @@ func TestRunnerHTTPHook(t *testing.T) {
 		assert.Equal(t, "Write", input.ToolName)
 
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"decision":"approve","system_message":"proceed with caution"}`)
+		_, err = fmt.Fprint(w, `{"decision":"approve","system_message":"proceed with caution"}`)
+		require.NoError(t, err)
 	}))
 	defer srv.Close()
 
@@ -229,7 +230,8 @@ func TestRunnerHTTPHookEmptyBody(t *testing.T) {
 func TestRunnerHTTPHookError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "internal error")
+		_, err := fmt.Fprint(w, "internal error")
+		require.NoError(t, err)
 	}))
 	defer srv.Close()
 

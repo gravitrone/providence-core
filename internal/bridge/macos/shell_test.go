@@ -30,8 +30,7 @@ func makeFakeBin(t *testing.T, dir, name, body string) string {
 func withFakePATH(t *testing.T, dir string) {
 	t.Helper()
 	orig := os.Getenv("PATH")
-	t.Cleanup(func() { os.Setenv("PATH", orig) })
-	os.Setenv("PATH", dir+":"+orig)
+	t.Setenv("PATH", dir+":"+orig)
 }
 
 // newShell returns a shellClient ready for use.
@@ -204,9 +203,7 @@ func TestShell_MissingBinaryReturnsError(t *testing.T) {
 	emptyDir := t.TempDir()
 	withFakePATH(t, emptyDir)
 	// Also remove the real PATH so the real screencapture is not found.
-	orig := os.Getenv("PATH")
-	os.Setenv("PATH", emptyDir)
-	t.Cleanup(func() { os.Setenv("PATH", orig) })
+	t.Setenv("PATH", emptyDir)
 
 	sc := newShell()
 	_, err := sc.Screenshot(context.Background())

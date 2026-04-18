@@ -33,6 +33,9 @@ func (g *GlobTool) Description() string {
 	return "Find files matching a glob pattern, sorted by modification time."
 }
 func (g *GlobTool) ReadOnly() bool { return true }
+func (g *GlobTool) ResultSizeCap() int {
+	return globToolResultSizeCap
+}
 
 // Prompt implements ToolPrompter with parity guidance for glob matching.
 func (g *GlobTool) Prompt() string {

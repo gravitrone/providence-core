@@ -315,3 +315,11 @@ func writeSandboxConfig(t *testing.T, root, content string) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 }
+
+func TestBashToolHasTightCap(t *testing.T) {
+	b := NewBashTool()
+
+	provider, ok := any(b).(ResultCapProvider)
+	require.True(t, ok)
+	assert.Equal(t, bashToolResultSizeCap, provider.ResultSizeCap())
+}

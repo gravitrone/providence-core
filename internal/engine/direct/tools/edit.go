@@ -28,6 +28,7 @@ func (e *EditTool) SetHookEmitter(emitter HookEmitter) {
 func (e *EditTool) Name() string        { return "Edit" }
 func (e *EditTool) Description() string { return "Replace exact strings in an existing file." }
 func (e *EditTool) ReadOnly() bool      { return false }
+func (e *EditTool) ResultSizeCap() int  { return editToolResultSizeCap }
 
 // Prompt implements ToolPrompter with CC-parity guidance for file editing.
 func (e *EditTool) Prompt() string {

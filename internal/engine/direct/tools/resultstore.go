@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -9,6 +10,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	defaultToolResultSizeCap = 512_000
+	readToolResultSizeCap    = 500_000
+	grepToolResultSizeCap    = 500_000
+	globToolResultSizeCap    = 200_000
+	webFetchResultSizeCap    = 1_000_000
+	bashToolResultSizeCap    = 50_000
+	writeToolResultSizeCap   = 20_000
+	editToolResultSizeCap    = 20_000
 )
 
 // SpillThreshold is the size in bytes above which tool output is
@@ -96,6 +108,70 @@ func SpillIfLarge(sessionID, toolName, content string) (short string, path strin
 	b.WriteString("\n\n")
 	b.WriteString(tail)
 	return b.String(), path
+}
+
+type resultCapTool struct {
+	tool Tool
+}
+
+func wrapToolWithResultCap(tool Tool) Tool {
+	if _, ok := tool.(*resultCapTool); ok {
+		return tool
+	}
+	return &resultCapTool{tool: tool}
+}
+
+func unwrapTool(tool Tool) Tool {
+	for {
+		wrapped, ok := tool.(*resultCapTool)
+		if !ok {
+			return tool
+		}
+		tool = wrapped.tool
+	}
+}
+
+func (t *resultCapTool) Name() string {
+	return t.tool.Name()
+}
+
+func (t *resultCapTool) Description() string {
+	return t.tool.Description()
+}
+
+func (t *resultCapTool) InputSchema() map[string]any {
+	return t.tool.InputSchema()
+}
+
+func (t *resultCapTool) ReadOnly() bool {
+	return t.tool.ReadOnly()
+}
+
+func (t *resultCapTool) Execute(ctx context.Context, input map[string]any) ToolResult {
+	result := t.tool.Execute(ctx, input)
+	result.Content = normalizeToolResultContent(result.Content, resultSizeCapForTool(t.tool))
+	return result
+}
+
+func resultSizeCapForTool(tool Tool) int {
+	provider, ok := tool.(ResultCapProvider)
+	if ok {
+		if cap := provider.ResultSizeCap(); cap > 0 {
+			return cap
+		}
+	}
+	return defaultToolResultSizeCap
+}
+
+func normalizeToolResultContent(content string, maxResultSize int) string {
+	content = strings.TrimRight(content, " \t\n\r")
+	content = strings.ToValidUTF8(content, "\uFFFD")
+
+	if maxResultSize > 0 && len(content) > maxResultSize {
+		content = content[:maxResultSize] + "\n[truncated: exceeded " + fmt.Sprintf("%d", maxResultSize) + " bytes]"
+	}
+
+	return content
 }
 
 // sanitiseForPath drops characters that would confuse a filesystem

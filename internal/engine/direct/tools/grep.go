@@ -30,6 +30,9 @@ func (g *GrepTool) Description() string {
 	return "Search file contents using regex patterns."
 }
 func (g *GrepTool) ReadOnly() bool { return true }
+func (g *GrepTool) ResultSizeCap() int {
+	return grepToolResultSizeCap
+}
 
 // Prompt implements ToolPrompter with CC-parity guidance for content search.
 func (g *GrepTool) Prompt() string {

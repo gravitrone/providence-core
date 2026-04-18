@@ -63,6 +63,7 @@ const sandboxProfile = `(version 1)(allow default)(deny network*)(deny file-writ
 func (b *BashTool) Name() string        { return "Bash" }
 func (b *BashTool) Description() string { return "Execute a bash command and return its output." }
 func (b *BashTool) ReadOnly() bool      { return false }
+func (b *BashTool) ResultSizeCap() int  { return bashToolResultSizeCap }
 
 // Prompt implements ToolPrompter with CC-parity guidance for bash execution.
 func (b *BashTool) Prompt() string {

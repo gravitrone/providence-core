@@ -139,6 +139,56 @@ func TestNeedsPermissionArgumentPatternNoMatch(t *testing.T) {
 	assert.True(t, ph.NeedsPermission(&tools.BashTool{}, input))
 }
 
+func TestPermissionHandlerCheckArgumentPatternDecisions(t *testing.T) {
+	tests := []struct {
+		name        string
+		allowRules  []permissions.Rule
+		denyRules   []permissions.Rule
+		input       map[string]any
+		want        permissions.Decision
+		needsPrompt bool
+	}{
+		{
+			name: "allow rule matches bash command",
+			allowRules: []permissions.Rule{
+				{Pattern: "Bash(git status *)", Behavior: permissions.Allow, Source: "userSettings"},
+			},
+			input:       map[string]any{"command": "git status --short"},
+			want:        permissions.Allow,
+			needsPrompt: false,
+		},
+		{
+			name: "deny rule matches bash command",
+			denyRules: []permissions.Rule{
+				{Pattern: "Bash(git push *)", Behavior: permissions.Deny, Source: "userSettings"},
+			},
+			input:       map[string]any{"command": "git push origin main"},
+			want:        permissions.Deny,
+			needsPrompt: false,
+		},
+		{
+			name: "non matching rule falls through to ask",
+			allowRules: []permissions.Rule{
+				{Pattern: "Bash(git status *)", Behavior: permissions.Allow, Source: "userSettings"},
+			},
+			input:       map[string]any{"command": "go test ./..."},
+			want:        permissions.Ask,
+			needsPrompt: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ph := NewPermissionHandlerWithConfig(nil, nil, tt.allowRules, tt.denyRules, nil)
+
+			result := ph.Check(&tools.BashTool{}, tt.input)
+			require.NotNil(t, result)
+			assert.Equal(t, tt.want, result.Decision)
+			assert.Equal(t, tt.needsPrompt, ph.NeedsPermission(&tools.BashTool{}, tt.input))
+		})
+	}
+}
+
 func TestNeedsPermissionSafetyPathFires(t *testing.T) {
 	ph := NewPermissionHandler()
 

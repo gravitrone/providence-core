@@ -304,6 +304,59 @@ func TestBridgeSetEngineConcurrentHandlerNoRace(t *testing.T) {
 	assert.False(t, sawUnexpected.Load())
 }
 
+func TestBridgeSetEngineConcurrentHelloAndUserQueryNoRace(t *testing.T) {
+	engA := newFakeEngine()
+	engB := newFakeEngine()
+	engB.model = "opus"
+	engB.engineType = "codex"
+
+	bridge := NewBridge(nil, ember.New(), nil, nil, quietLogger())
+	bridge.SetEngine(engA)
+
+	var sawUnexpected atomic.Bool
+	var sawQueryError atomic.Bool
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			if i%2 == 0 {
+				bridge.SetEngine(engA)
+				continue
+			}
+			bridge.SetEngine(engB)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			w := bridge.OnHello(nil, Hello{PID: i + 1})
+			validA := w.Engine == engA.EngineType() && w.Model == engA.Model()
+			validB := w.Engine == engB.EngineType() && w.Model == engB.Model()
+			if !validA && !validB {
+				sawUnexpected.Store(true)
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			if err := bridge.OnUserQuery(nil, UserQuery{Text: "status"}); err != nil {
+				sawQueryError.Store(true)
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	assert.False(t, sawUnexpected.Load())
+	assert.False(t, sawQueryError.Load())
+	assert.Equal(t, 1000, engA.sendCallCount()+engB.sendCallCount())
+}
+
 func TestBridgeStartForwardsSessionBusEventAfterSetEngine(t *testing.T) {
 	eng := newFakeEngine()
 	spawn := false

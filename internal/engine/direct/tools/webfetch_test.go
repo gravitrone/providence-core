@@ -8,8 +8,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -137,8 +139,8 @@ func TestNormalizeURL_Valid(t *testing.T) {
 		expected string
 	}{
 		{"https://example.com", "https://example.com"},
-		{"http://example.com", "https://example.com"},       // http -> https
-		{"example.com", "https://example.com"},               // add scheme
+		{"http://example.com", "https://example.com"}, // http -> https
+		{"example.com", "https://example.com"},        // add scheme
 		{"example.com/path?q=1", "https://example.com/path?q=1"},
 	}
 
@@ -379,6 +381,50 @@ func TestWebFetchEndToEndCacheServesSecondCall(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "hi body", entry.body)
 	assert.Equal(t, 0, hits, "cache hit must not reach the server")
+}
+
+// TestWebFetchEndToEndCacheRefetchesAfterTTLExpiry verifies an expired entry
+// is discarded and the next Execute call re-fetches from origin.
+func TestWebFetchEndToEndCacheRefetchesAfterTTLExpiry(t *testing.T) {
+	webFetchCachePurge()
+	t.Cleanup(webFetchCachePurge)
+
+	srvHits := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srvHits++
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<html><body><p>version " + strconv.Itoa(srvHits) + "</p></body></html>"))
+	}))
+	t.Cleanup(srv.Close)
+
+	prevTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	t.Cleanup(func() {
+		http.DefaultTransport = prevTransport
+	})
+
+	tool := &WebFetchTool{}
+	first := tool.Execute(context.Background(), map[string]any{"url": srv.URL})
+	require.False(t, first.IsError)
+	assert.Equal(t, 1, srvHits)
+	assert.Contains(t, first.Content, "version 1")
+	assert.False(t, first.Metadata["from_cache"].(bool))
+
+	webFetchCacheMu.Lock()
+	entry, ok := webFetchCache.Get(srv.URL)
+	webFetchCacheMu.Unlock()
+	require.True(t, ok)
+
+	entry.fetchedAt = time.Now().Add(-webFetchCacheTTL - time.Second)
+	webFetchCacheMu.Lock()
+	webFetchCache.Add(srv.URL, entry)
+	webFetchCacheMu.Unlock()
+
+	second := tool.Execute(context.Background(), map[string]any{"url": srv.URL})
+	require.False(t, second.IsError)
+	assert.Equal(t, 2, srvHits)
+	assert.Contains(t, second.Content, "version 2")
+	assert.False(t, second.Metadata["from_cache"].(bool))
 }
 
 // TestBuildHTTPClientRejectsCrossHostRedirect uses a tiny loopback

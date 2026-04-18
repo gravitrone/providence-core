@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,34 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type resultStorePlainTool struct {
+	name    string
+	content string
+}
+
+func (t *resultStorePlainTool) Name() string { return t.name }
+
+func (t *resultStorePlainTool) Description() string {
+	return "plain result-store test tool"
+}
+
+func (t *resultStorePlainTool) InputSchema() map[string]any {
+	return map[string]any{"type": "object"}
+}
+
+func (t *resultStorePlainTool) ReadOnly() bool { return true }
+
+func (t *resultStorePlainTool) Execute(_ context.Context, _ map[string]any) ToolResult {
+	return ToolResult{Content: t.content}
+}
+
+type resultStoreCappedTool struct {
+	*resultStorePlainTool
+	cap int
+}
+
+func (t *resultStoreCappedTool) ResultSizeCap() int { return t.cap }
 
 // redirectSpillDir points the spill writer at a fresh temp directory
 // for the life of the calling test and restores the original on
@@ -95,4 +125,43 @@ func TestSpillIfLargeEmptySessionUsesFallback(t *testing.T) {
 	require.NotEmpty(t, path)
 	assert.Contains(t, path, filepath.Join(dir, "session"),
 		"empty session id must fall back to the 'session' directory")
+}
+
+func TestResultStoreUsesDefaultCapForPlainTool(t *testing.T) {
+	content := strings.Repeat("x", defaultToolResultSizeCap+64)
+	reg := NewRegistry(&resultStorePlainTool{
+		name:    "Plain",
+		content: content,
+	})
+
+	tool, ok := reg.Get("Plain")
+	require.True(t, ok)
+
+	result := tool.Execute(context.Background(), nil)
+	require.False(t, result.IsError)
+	expectedSuffix := fmt.Sprintf("\n[truncated: exceeded %d bytes]", defaultToolResultSizeCap)
+	assert.Contains(t, result.Content, fmt.Sprintf("exceeded %d bytes", defaultToolResultSizeCap))
+	assert.Len(t, result.Content, defaultToolResultSizeCap+len(expectedSuffix))
+}
+
+func TestResultStoreRespectsPerToolCap(t *testing.T) {
+	const customCap = 8
+
+	reg := NewRegistry(&resultStoreCappedTool{
+		resultStorePlainTool: &resultStorePlainTool{
+			name:    "Capped",
+			content: "abcdefghijklmnopqrstuvwxyz",
+		},
+		cap: customCap,
+	})
+
+	tool, ok := reg.Get("Capped")
+	require.True(t, ok)
+
+	result := tool.Execute(context.Background(), nil)
+	require.False(t, result.IsError)
+	assert.Equal(t,
+		"abcdefgh\n[truncated: exceeded 8 bytes]",
+		result.Content,
+	)
 }

@@ -139,3 +139,11 @@ func TestRead_FiresFileReadHook(t *testing.T) {
 	assert.Equal(t, "Read", inputs[0].ToolName)
 	assert.Equal(t, map[string]string{"file_path": path}, inputs[0].ToolInput)
 }
+
+func TestReadToolHasLargerCap(t *testing.T) {
+	rt, _ := newReadTool()
+
+	provider, ok := any(rt).(ResultCapProvider)
+	require.True(t, ok)
+	assert.Equal(t, readToolResultSizeCap, provider.ResultSizeCap())
+}

@@ -39,6 +39,12 @@ type ToolPrompter interface {
 	Prompt() string
 }
 
+// ResultCapProvider is an optional interface tools can implement to override
+// the default result-size cap applied after execution.
+type ResultCapProvider interface {
+	ResultSizeCap() int
+}
+
 // Registry holds a set of named tools.
 type Registry struct {
 	tools map[string]Tool
@@ -48,14 +54,14 @@ type Registry struct {
 func NewRegistry(tools ...Tool) *Registry {
 	r := &Registry{tools: make(map[string]Tool)}
 	for _, t := range tools {
-		r.tools[t.Name()] = t
+		r.tools[t.Name()] = wrapToolWithResultCap(t)
 	}
 	return r
 }
 
 // Register adds a tool to the registry, overwriting any existing tool with the same name.
 func (r *Registry) Register(t Tool) {
-	r.tools[t.Name()] = t
+	r.tools[t.Name()] = wrapToolWithResultCap(t)
 }
 
 // Get returns a tool by name.
@@ -79,7 +85,7 @@ func (r *Registry) All() []Tool {
 func CollectToolPrompts(reg *Registry) string {
 	var parts []string
 	for _, t := range reg.All() {
-		if p, ok := t.(ToolPrompter); ok {
+		if p, ok := unwrapTool(t).(ToolPrompter); ok {
 			if text := p.Prompt(); text != "" {
 				parts = append(parts, "## "+t.Name()+"\n\n"+text)
 			}

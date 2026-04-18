@@ -16,6 +16,11 @@ type stubTool struct {
 	readOnly bool
 }
 
+type promptStubTool struct {
+	stubTool
+	prompt string
+}
+
 type hookSpy struct {
 	mu     sync.Mutex
 	events []string
@@ -43,6 +48,7 @@ func (s *stubTool) Description() string                                    { ret
 func (s *stubTool) InputSchema() map[string]any                            { return nil }
 func (s *stubTool) ReadOnly() bool                                         { return s.readOnly }
 func (s *stubTool) Execute(_ context.Context, _ map[string]any) ToolResult { return ToolResult{} }
+func (s *promptStubTool) Prompt() string                                   { return s.prompt }
 
 func TestRegistryGetAndAll(t *testing.T) {
 	a := &stubTool{name: "alpha", readOnly: true}
@@ -95,4 +101,15 @@ func TestParamHelpers(t *testing.T) {
 	assert.Equal(t, 100, paramInt(input, "num_int", 0))
 	assert.Equal(t, 99, paramInt(input, "missing", 99))
 	assert.Equal(t, 99, paramInt(input, "bad_type", 99))
+}
+
+func TestCollectToolPromptsUnwrapsRegistryTools(t *testing.T) {
+	reg := NewRegistry(&promptStubTool{
+		stubTool: stubTool{name: "prompted", readOnly: true},
+		prompt:   "use the prompted tool carefully",
+	})
+
+	prompts := CollectToolPrompts(reg)
+	assert.Contains(t, prompts, "## prompted")
+	assert.Contains(t, prompts, "use the prompted tool carefully")
 }

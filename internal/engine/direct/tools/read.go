@@ -56,6 +56,7 @@ func (r *ReadTool) SetHookEmitter(emitter HookEmitter) {
 func (r *ReadTool) Name() string        { return "Read" }
 func (r *ReadTool) Description() string { return "Read a file from disk with line numbers." }
 func (r *ReadTool) ReadOnly() bool      { return true }
+func (r *ReadTool) ResultSizeCap() int  { return readToolResultSizeCap }
 
 // Prompt implements ToolPrompter with CC-parity guidance for file reading.
 func (r *ReadTool) Prompt() string {

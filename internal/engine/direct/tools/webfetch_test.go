@@ -238,6 +238,14 @@ func TestWebFetchTool_ContentTruncation(t *testing.T) {
 	}
 }
 
+func TestWebFetchToolHasArticleCap(t *testing.T) {
+	tool := &WebFetchTool{}
+
+	provider, ok := any(tool).(ResultCapProvider)
+	require.True(t, ok)
+	assert.Equal(t, webFetchResultSizeCap, provider.ResultSizeCap())
+}
+
 func TestWebFetchTool_Interface(t *testing.T) {
 	tool := &WebFetchTool{}
 

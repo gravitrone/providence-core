@@ -18,12 +18,12 @@ import (
 )
 
 const (
-	webFetchTimeout        = 60 * time.Second
-	webFetchDomainTimeout  = 10 * time.Second
-	maxResponseBody        = 5 * 1024 * 1024 // 5 MiB
-	maxResultContent       = 50_000          // chars kept inline after extraction
-	maxRedirects           = 10
-	webFetchUserAgent      = "Providence/0.3"
+	webFetchTimeout       = 60 * time.Second
+	webFetchDomainTimeout = 10 * time.Second
+	maxResponseBody       = 5 * 1024 * 1024 // 5 MiB
+	maxResultContent      = 50_000          // chars kept inline after extraction
+	maxRedirects          = 10
+	webFetchUserAgent     = "Providence/0.3"
 )
 
 // Error taxonomy: callers can errors.Is the returned error from
@@ -31,12 +31,12 @@ const (
 // string includes the sentinel name so users reading the TUI get the
 // category alongside the detail.
 var (
-	ErrDomainUnreachable    = errors.New("domain unreachable")
-	ErrTooManyRedirects     = errors.New("too many redirects")
-	ErrCrossHostRedirect    = errors.New("cross-host redirect refused")
-	ErrBodyTooLarge         = errors.New("response body exceeds cap")
-	ErrUnsupportedScheme    = errors.New("unsupported URL scheme")
-	ErrContentTypeBinary    = errors.New("content type is binary; spilled to disk")
+	ErrDomainUnreachable = errors.New("domain unreachable")
+	ErrTooManyRedirects  = errors.New("too many redirects")
+	ErrCrossHostRedirect = errors.New("cross-host redirect refused")
+	ErrBodyTooLarge      = errors.New("response body exceeds cap")
+	ErrUnsupportedScheme = errors.New("unsupported URL scheme")
+	ErrContentTypeBinary = errors.New("content type is binary; spilled to disk")
 )
 
 // webFetchDownloadsDir holds the directory where binary responses
@@ -82,6 +82,9 @@ func (t *WebFetchTool) Description() string {
 	return "Fetch a web page by URL and extract clean readable text content. Strips HTML tags, scripts, styles, and navigation to return just the main text. Use the optional prompt parameter to specify what information to focus on."
 }
 func (t *WebFetchTool) ReadOnly() bool { return true }
+func (t *WebFetchTool) ResultSizeCap() int {
+	return webFetchResultSizeCap
+}
 
 func (t *WebFetchTool) InputSchema() map[string]any {
 	return map[string]any{

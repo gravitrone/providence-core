@@ -217,6 +217,14 @@ func TestGlobInvalidPatternReturnsError(t *testing.T) {
 	assert.Contains(t, res.Content, "invalid glob pattern")
 }
 
+func TestGlobToolHasExpandedCap(t *testing.T) {
+	gt := NewGlobTool()
+
+	provider, ok := any(gt).(ResultCapProvider)
+	require.True(t, ok)
+	assert.Equal(t, globToolResultSizeCap, provider.ResultSizeCap())
+}
+
 // TestGlobBraceExpansionMultipleExtensions verifies brace syntax
 // (supported by doublestar/v4) so users can glob multiple extensions
 // in a single pattern - a notable UX win over the old impl.

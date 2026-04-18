@@ -30,6 +30,9 @@ func (w *WriteTool) Description() string {
 	return "Write content to a file, creating directories as needed."
 }
 func (w *WriteTool) ReadOnly() bool { return false }
+func (w *WriteTool) ResultSizeCap() int {
+	return writeToolResultSizeCap
+}
 
 // Prompt implements ToolPrompter with CC-parity guidance for file writing.
 func (w *WriteTool) Prompt() string {

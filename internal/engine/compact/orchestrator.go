@@ -72,13 +72,17 @@ type Orchestrator struct {
 	provider Provider
 	onPhase  phaseChangeFn
 
-	mu                    sync.Mutex
-	phase                 Phase
-	done                  chan struct{}
-	pending               pendingReplacement
-	lastErr               error
-	consecutiveFailures   int
-	hasAttemptedReactive  bool
+	mu                   sync.Mutex
+	phase                Phase
+	done                 chan struct{}
+	pending              pendingReplacement
+	lastErr              error
+	consecutiveFailures  int
+	hasAttemptedReactive bool
+
+	// memoryReader optionally supplies the authoritative session memory that
+	// should be prepended to the compact replacement. Guarded by mu.
+	memoryReader SessionMemoryReader
 }
 
 // --- Orchestrator ---
@@ -235,7 +239,12 @@ func (o *Orchestrator) TriggerReactive(ctx context.Context) error {
 		return fmt.Errorf("reactive compaction: empty summary")
 	}
 
-	if replaceErr := o.provider.Replace(summary, cutIndex); replaceErr != nil {
+	// Read authoritative session memory first and prepend it to the summary so
+	// the restored context carries the memory block above the compact summary.
+	memory := o.readMemoryOrLog()
+	final := buildMemoryAugmentedSummary(memory, summary)
+
+	if replaceErr := o.provider.Replace(final, cutIndex); replaceErr != nil {
 		return fmt.Errorf("reactive replace: %w", replaceErr)
 	}
 	return nil
@@ -285,10 +294,16 @@ func (o *Orchestrator) run(ctx context.Context, done chan struct{}, keepRecentTo
 		return
 	}
 
+	// Read authoritative session memory first and prepend it so the restored
+	// context carries the memory block above the compact summary. Memory is
+	// best-effort: a read failure is logged and the summary stands alone.
+	memory := o.readMemoryOrLog()
+	final := buildMemoryAugmentedSummary(memory, summary)
+
 	o.mu.Lock()
 	o.phase = PhaseReady
 	o.pending = pendingReplacement{
-		summary:  summary,
+		summary:  final,
 		cutIndex: cutIndex,
 	}
 	o.lastErr = nil

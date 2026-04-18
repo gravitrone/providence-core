@@ -92,6 +92,20 @@ type Config struct {
 	Permissions PermissionsConfig `toml:"permissions" json:"permissions,omitempty"`
 	Overlay     OverlayConfig     `toml:"overlay" json:"overlay,omitempty"`
 	Sandbox     SandboxConfig     `toml:"sandbox" json:"sandbox,omitempty"`
+	Session     SessionConfig     `toml:"session" json:"session,omitempty"`
+}
+
+// SessionConfig holds per-session settings including the LLM-generated
+// session memory feature.
+type SessionConfig struct {
+	// MemoryEnabled toggles the llm-generated session memory writer. When
+	// false, no memory files are created and the compactor falls straight
+	// through to raw-history compression. Default true.
+	MemoryEnabled *bool `toml:"memory_enabled" json:"memory_enabled,omitempty"`
+	// MemoryTurnInterval is the number of completed turns between memory
+	// writes. A fork subagent dispatches on every Nth completed turn. Must
+	// be positive; zero or negative falls back to the default.
+	MemoryTurnInterval int `toml:"memory_turn_interval" json:"memory_turn_interval,omitempty"`
 }
 
 // PermissionsConfig holds permission rules from config files.
@@ -628,6 +642,16 @@ func mergeConfig(base, override *Config) {
 		case "UserPromptSubmit":
 			base.Hooks.UserPromptSubmit = entries
 		}
+	}
+
+	// Session: merge memory settings. A *bool override replaces base only when
+	// explicitly set, so an unset override never flips an already-configured
+	// base value to its zero default.
+	if override.Session.MemoryEnabled != nil {
+		base.Session.MemoryEnabled = boolPtr(*override.Session.MemoryEnabled)
+	}
+	if override.Session.MemoryTurnInterval > 0 {
+		base.Session.MemoryTurnInterval = override.Session.MemoryTurnInterval
 	}
 }
 

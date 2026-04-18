@@ -584,5 +584,37 @@ func TestSend_ErrorStringShape(t *testing.T) {
 	assert.True(t, strings.Contains(err.Error(), "already running"))
 }
 
+func TestIdleTriggeredConcurrentAccess(t *testing.T) {
+	var idleTriggered idleTriggeredFlag
+	var sawTriggered atomic.Bool
+
+	const goroutines = 64
+	const iterations = 2000
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			<-start
+
+			for range iterations {
+				if idleTriggered.Load() {
+					sawTriggered.Store(true)
+				}
+				idleTriggered.Store(true)
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	assert.True(t, idleTriggered.Load())
+	assert.True(t, sawTriggered.Load())
+}
+
 // unused: silence potential unused imports if a test is commented out.
 var _ = context.Background

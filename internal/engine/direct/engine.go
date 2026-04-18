@@ -25,6 +25,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/filewatch"
 	"github.com/gravitrone/providence-core/internal/engine/hooks"
 	"github.com/gravitrone/providence-core/internal/engine/mcp"
+	"github.com/gravitrone/providence-core/internal/engine/permissions"
 	"github.com/gravitrone/providence-core/internal/engine/session"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
 	"github.com/gravitrone/providence-core/internal/engine/teams"
@@ -255,11 +256,15 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	fs := tools.NewFileState()
 	planState := tools.NewPlanModeState(nil)
 	todoTool := tools.NewTodoWriteTool()
+	readTool := tools.NewReadTool(fs)
+	writeTool := tools.NewWriteTool(fs)
+	editTool := tools.NewEditTool(fs)
+	bashTool := tools.NewBashTool()
 	coreTools := []tools.Tool{
-		tools.NewReadTool(fs),
-		tools.NewWriteTool(fs),
-		tools.NewEditTool(fs),
-		&tools.BashTool{},
+		readTool,
+		writeTool,
+		editTool,
+		bashTool,
 		&tools.GlobTool{},
 		&tools.GrepTool{},
 		&tools.WebFetchTool{},
@@ -336,6 +341,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 			cacheTTL = compactCacheTTL1h
 		}
 	}
+	permHandler := NewPermissionHandler()
 
 	e := &DirectEngine{
 		client:              client,
@@ -345,7 +351,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		events:              make(chan engine.ParsedEvent, 64),
 		history:             history,
 		registry:            registry,
-		permissions:         NewPermissionHandler(),
+		permissions:         permHandler,
 		workDir:             cfg.WorkDir,
 		cacheTTL:            cacheTTL,
 		sessionID:           uuid.New().String(),
@@ -367,6 +373,15 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		retryStates:         newRetryStates(),
 		caffeinator:         engine.NewCaffeinator(5 * time.Minute),
 	}
+
+	hookEmitter := func(event string, input hooks.HookInput) {
+		e.fireHookAsync(event, input)
+	}
+	readTool.SetHookEmitter(hookEmitter)
+	writeTool.SetHookEmitter(hookEmitter)
+	editTool.SetHookEmitter(hookEmitter)
+	bashTool.SetHookEmitter(hookEmitter)
+	permHandler.SetHookEmitter(hookEmitter)
 
 	taskTool := tools.NewTaskTool(e.subagentRunner, e.subagentExecutor)
 	registry.Register(taskTool)
@@ -589,6 +604,11 @@ func (e *DirectEngine) SessionBus() *session.Bus {
 
 // Model returns the active model identifier.
 func (e *DirectEngine) Model() string { return e.model }
+
+// SetModel updates the active model identifier for future turns.
+func (e *DirectEngine) SetModel(model string) {
+	e.setModel(model, "manual")
+}
 
 // EngineType returns the engine registry key.
 func (e *DirectEngine) EngineType() string { return "direct" }
@@ -817,7 +837,16 @@ func (e *DirectEngine) Send(text string) error {
 			ToolName:  e.model,
 			ToolInput: map[string]string{"source": e.provider, "model": e.model},
 		})
+		e.fireHookAsync(hooks.SessionStarted, hooks.HookInput{
+			ToolName:  e.model,
+			ToolInput: map[string]string{"source": e.provider, "model": e.model},
+		})
 	}
+
+	e.fireHookAsync(hooks.TurnStarted, hooks.HookInput{
+		ToolName:  e.model,
+		ToolInput: text,
+	})
 
 	e.fireHookAsync(hooks.UserPromptSubmit, hooks.HookInput{
 		ToolInput: text,
@@ -927,12 +956,16 @@ func (e *DirectEngine) Close() {
 		}
 	})
 
-	// Step 4: Fire SessionEnd hook (1.5s timeout).
+	// Step 4: Fire session close hooks (1.5s timeout).
 	runWithDeadline(failsafe, 1500*time.Millisecond, func() {
 		if e.hooksRunner != nil {
 			ctx, cancel := context.WithTimeout(failsafe, 1500*time.Millisecond)
 			defer cancel()
 			e.hooksRunner.Run(ctx, hooks.SessionEnd, hooks.HookInput{
+				SessionID: e.sessionID,
+				ToolInput: "close",
+			})
+			e.hooksRunner.Run(ctx, hooks.SessionClosed, hooks.HookInput{
 				SessionID: e.sessionID,
 				ToolInput: "close",
 			})
@@ -1592,7 +1625,7 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 					e.synthesizeErrorToolResults(accumulated)
 
 					previousModel := e.model
-					e.model = fallback
+					e.setModel(fallback, "fallback")
 					e.fallbackActive = true
 
 					// Strip thinking/signature blocks from history before retrying
@@ -1794,13 +1827,25 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 				queue.mu.Unlock()
 				continue
 			}
-			if e.permissions.NeedsPermission(tool, tc.Input) {
+
+			permResult := e.permissions.Check(tool, tc.Input)
+			if permResult != nil && permResult.Decision == permissions.Deny {
+				queue.mu.Lock()
+				queue.results = append(queue.results, ToolCallResult{
+					ToolCall: tc,
+					Result:   tools.ToolResult{Content: "permission denied: " + permResult.Reason, IsError: true},
+				})
+				queue.mu.Unlock()
+				continue
+			}
+
+			if permResult != nil && permResult.Decision == permissions.Ask {
 				approved, err := e.permissions.RequestPermission(ctx, tc.ID, e.events, tc.Name, tc.Input)
 				if err != nil {
 					return
 				}
 				if !approved {
-					// Fire PermissionDenied hook.
+					// preserve the legacy PermissionRequest hook on explicit user denial.
 					e.fireHookAsync(hooks.PermissionRequest, hooks.HookInput{
 						ToolName:  tc.Name,
 						ToolInput: "permission denied by user",
@@ -1972,6 +2017,15 @@ func (e *DirectEngine) emitResult() {
 		e.compactor.TriggerIfNeeded(context.Background())
 	}
 
+	if wasRunning {
+		e.fireHookAsync(hooks.TurnCompleted, hooks.HookInput{
+			ToolName: e.model,
+			ToolInput: map[string]string{
+				"status": "success",
+			},
+		})
+	}
+
 	e.events <- engine.ParsedEvent{
 		Type: "result",
 		Data: &engine.ResultEvent{
@@ -1987,6 +2041,14 @@ func (e *DirectEngine) emitError(err error) {
 	e.mu.Lock()
 	e.status = engine.StatusFailed
 	e.mu.Unlock()
+
+	e.fireHookAsync(hooks.TurnCompleted, hooks.HookInput{
+		ToolName: e.model,
+		ToolInput: map[string]string{
+			"status": "error",
+			"error":  err.Error(),
+		},
+	})
 
 	e.events <- engine.ParsedEvent{
 		Type: "result",
@@ -2599,6 +2661,23 @@ func isFallbackTriggerable(err error) bool {
 		strings.Contains(msg, "503") ||
 		strings.Contains(msg, "server_error") ||
 		strings.Contains(msg, "internal_error")
+}
+
+func (e *DirectEngine) setModel(model string, reason string) {
+	if model == "" || model == e.model {
+		return
+	}
+
+	previousModel := e.model
+	e.model = model
+	e.fireHookAsync(hooks.ModelChanged, hooks.HookInput{
+		ToolName: model,
+		ToolInput: map[string]string{
+			"from":   previousModel,
+			"to":     model,
+			"reason": reason,
+		},
+	})
 }
 
 // fireHook runs hooks for the given event synchronously and returns the output.

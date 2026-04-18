@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,7 +54,7 @@ exit 0
 	defer cancel()
 
 	out, err := r.Run(ctx, PreToolUse, HookInput{
-		ToolName: "Bash",
+		ToolName:  "Bash",
 		ToolInput: map[string]string{"command": "ls"},
 	})
 	require.NoError(t, err)
@@ -239,6 +240,39 @@ func TestRunnerHTTPHookError(t *testing.T) {
 	_, err := r.Run(context.Background(), PostToolUse, HookInput{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP 500")
+}
+
+func TestRunnerHookExecutedFiresAfterEvent(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		events []string
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input HookInput
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&input))
+
+		mu.Lock()
+		events = append(events, input.Event)
+		mu.Unlock()
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	r := NewRunner(map[string][]HookConfig{
+		PreToolUse:   {{URL: srv.URL, Timeout: 5 * time.Second}},
+		HookExecuted: {{URL: srv.URL, Timeout: 5 * time.Second}},
+	})
+
+	out, err := r.Run(context.Background(), PreToolUse, HookInput{ToolName: "Write"})
+	require.NoError(t, err)
+	assert.NotNil(t, out)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{PreToolUse, HookExecuted}, events)
 }
 
 func TestRunnerAsync(t *testing.T) {

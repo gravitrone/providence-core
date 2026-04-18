@@ -7,6 +7,7 @@ import (
 
 	"github.com/gravitrone/providence-core/internal/engine"
 	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 	"github.com/gravitrone/providence-core/internal/engine/permissions"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -189,4 +190,69 @@ func TestNeedsPermissionInterruptedRequestReturnsCancelled(t *testing.T) {
 	_, ok := ph.pending[questionID]
 	ph.mu.Unlock()
 	assert.False(t, ok)
+}
+
+func TestPermissionHandler_CheckFiresPermissionDeniedHook(t *testing.T) {
+	ph := NewPermissionHandler()
+	ph.SetMode("deny")
+
+	var recordedEvent string
+	var recordedInput hooks.HookInput
+	ph.SetHookEmitter(func(event string, input hooks.HookInput) {
+		recordedEvent = event
+		recordedInput = input
+	})
+
+	result := ph.Check(&permMockTool{name: "Write", readOnly: false}, map[string]any{"file_path": "/tmp/blocked"})
+	require.NotNil(t, result)
+	assert.Equal(t, permissions.Deny, result.Decision)
+	assert.Equal(t, hooks.PermissionDenied, recordedEvent)
+	assert.Equal(t, "Write", recordedInput.ToolName)
+}
+
+func TestPermissionHandler_RequestPermissionFiresPermissionGrantedHook(t *testing.T) {
+	ph := NewPermissionHandler()
+	events := make(chan engine.ParsedEvent, 10)
+
+	var recordedEvent string
+	var recordedInput hooks.HookInput
+	ph.SetHookEmitter(func(event string, input hooks.HookInput) {
+		recordedEvent = event
+		recordedInput = input
+	})
+
+	type requestResult struct {
+		approved bool
+		err      error
+	}
+
+	resultCh := make(chan requestResult, 1)
+	done := make(chan struct{})
+	go func() {
+		approved, err := ph.RequestPermission(context.Background(), "tc_grant", events, "Write", map[string]any{"file_path": "/tmp/allowed"})
+		resultCh <- requestResult{approved: approved, err: err}
+		close(done)
+	}()
+
+	select {
+	case pe := <-events:
+		pre, ok := pe.Data.(*engine.PermissionRequestEvent)
+		require.True(t, ok)
+		ph.Respond(pre.QuestionID, true)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for permission request")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for approval result")
+	}
+
+	result := <-resultCh
+	require.NoError(t, result.err)
+	assert.True(t, result.approved)
+
+	assert.Equal(t, hooks.PermissionGranted, recordedEvent)
+	assert.Equal(t, "Write", recordedInput.ToolName)
 }

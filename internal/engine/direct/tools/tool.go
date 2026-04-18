@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"strings"
+
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 )
 
 // ToolResult is the output of a tool execution.
@@ -17,6 +19,9 @@ type ToolResult struct {
 	// result is recorded. May be nil.
 	ContextModifier func()
 }
+
+// HookEmitter dispatches lifecycle hook events from tool implementations.
+type HookEmitter func(event string, input hooks.HookInput)
 
 // Tool is the interface all direct-engine tools must implement.
 type Tool interface {

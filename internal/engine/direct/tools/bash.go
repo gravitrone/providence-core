@@ -14,6 +14,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 )
 
 const (
@@ -30,9 +32,15 @@ type BashTool struct {
 	sessionID   string
 	sessionRoot string
 	cwdFile     string
+	emitter     HookEmitter
 }
 
 func NewBashTool() *BashTool { return &BashTool{} }
+
+// SetHookEmitter wires lifecycle hook dispatch for bash session updates.
+func (b *BashTool) SetHookEmitter(emitter HookEmitter) {
+	b.emitter = emitter
+}
 
 // Close removes the persisted cwd state for this bash session.
 func (b *BashTool) Close() error {
@@ -280,6 +288,7 @@ func (b *BashTool) runForeground(ctx context.Context, command string, timeout ti
 				IsError: true,
 			}
 		}
+		b.emitCwdChanged(updatedCwd)
 	}
 
 	result := shortOutput + "\n\nExit code: " + strconv.Itoa(exitCode)
@@ -293,6 +302,18 @@ func (b *BashTool) runForeground(ctx context.Context, command string, timeout ti
 		IsError:  exitCode != 0,
 		Metadata: meta,
 	}
+}
+
+func (b *BashTool) emitCwdChanged(dir string) {
+	if b.emitter == nil {
+		return
+	}
+	b.emitter(hooks.CwdChanged, hooks.HookInput{
+		ToolName: b.Name(),
+		ToolInput: map[string]string{
+			"cwd": dir,
+		},
+	})
 }
 
 func (b *BashTool) commandWithStartDir(command string, captureCwd bool) (string, error) {

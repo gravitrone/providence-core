@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 )
 
 // WriteTool creates or overwrites files with read-before-write safety.
 type WriteTool struct {
-	fs *FileState
+	fs      *FileState
+	emitter HookEmitter
 }
 
 // NewWriteTool creates a WriteTool backed by the given FileState.
@@ -17,9 +20,16 @@ func NewWriteTool(fs *FileState) *WriteTool {
 	return &WriteTool{fs: fs}
 }
 
-func (w *WriteTool) Name() string        { return "Write" }
-func (w *WriteTool) Description() string { return "Write content to a file, creating directories as needed." }
-func (w *WriteTool) ReadOnly() bool      { return false }
+// SetHookEmitter wires lifecycle hook dispatch for successful writes.
+func (w *WriteTool) SetHookEmitter(emitter HookEmitter) {
+	w.emitter = emitter
+}
+
+func (w *WriteTool) Name() string { return "Write" }
+func (w *WriteTool) Description() string {
+	return "Write content to a file, creating directories as needed."
+}
+func (w *WriteTool) ReadOnly() bool { return false }
 
 // Prompt implements ToolPrompter with CC-parity guidance for file writing.
 func (w *WriteTool) Prompt() string {
@@ -127,10 +137,23 @@ func (w *WriteTool) Execute(_ context.Context, input map[string]any) ToolResult 
 
 	// Update file state so subsequent edits see this write.
 	w.fs.MarkRead(path)
+	w.emitFileChanged(path)
 
 	verb := "Created"
 	if fileExists {
 		verb = "Updated"
 	}
 	return ToolResult{Content: fmt.Sprintf("%s %s", verb, path)}
+}
+
+func (w *WriteTool) emitFileChanged(path string) {
+	if w.emitter == nil {
+		return
+	}
+	w.emitter(hooks.FileChanged, hooks.HookInput{
+		ToolName: w.Name(),
+		ToolInput: map[string]string{
+			"file_path": path,
+		},
+	})
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gravitrone/providence-core/internal/engine/hooks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -178,6 +179,24 @@ func TestBashCwdTempfileCleanedUp(t *testing.T) {
 
 	_, err = os.Stat(path)
 	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestBash_FiresCwdChangedHook(t *testing.T) {
+	root := t.TempDir()
+	b := newTestBashTool(t, "hook-session", root)
+	spy := &hookSpy{}
+	b.SetHookEmitter(spy.record)
+
+	res := b.Execute(context.Background(), map[string]any{
+		"command": "mkdir sub && cd sub",
+	})
+	require.False(t, res.IsError, res.Content)
+
+	events, inputs := spy.snapshot()
+	require.Equal(t, []string{hooks.CwdChanged}, events)
+	require.Len(t, inputs, 1)
+	assert.Equal(t, "Bash", inputs[0].ToolName)
+	assert.Equal(t, map[string]string{"cwd": filepath.Join(root, "sub")}, inputs[0].ToolInput)
 }
 
 func newTestBashTool(t *testing.T, sessionID string, sessionRoot string) *BashTool {

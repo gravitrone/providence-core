@@ -31,14 +31,14 @@ func Open(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	db.Exec("PRAGMA journal_mode=WAL")
-	db.Exec("PRAGMA foreign_keys=ON")
-	db.Exec("PRAGMA busy_timeout=5000")
-	db.Exec("PRAGMA synchronous=NORMAL")
-	db.Exec("PRAGMA cache_size=-8000")
+	_, _ = db.Exec("PRAGMA journal_mode=WAL")
+	_, _ = db.Exec("PRAGMA foreign_keys=ON")
+	_, _ = db.Exec("PRAGMA busy_timeout=5000")
+	_, _ = db.Exec("PRAGMA synchronous=NORMAL")
+	_, _ = db.Exec("PRAGMA cache_size=-8000")
 
 	if err := migrate(db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return &Store{db: db}, nil

@@ -32,7 +32,7 @@ func (s *Store) AddMessage(sessionID, role, content, toolName, toolArgs, toolSta
 		return 0, err
 	}
 	// Bump session timestamp
-	s.UpdateSessionTimestamp(sessionID)
+	_ = s.UpdateSessionTimestamp(sessionID)
 	return res.LastInsertId()
 }
 
@@ -67,7 +67,9 @@ func (s *Store) GetMessages(sessionID string) ([]MessageRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		_ = rows.Close()
+	}()
 
 	var msgs []MessageRow
 	for rows.Next() {
@@ -110,7 +112,9 @@ func (s *Store) SearchMessages(query string, limit int) ([]SearchResult, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		_ = rows.Close()
+	}()
 
 	var results []SearchResult
 	for rows.Next() {

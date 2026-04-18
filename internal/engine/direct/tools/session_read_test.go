@@ -16,15 +16,19 @@ func testStore(t *testing.T) *store.Store {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	s, err := store.Open(dbPath)
 	require.NoError(t, err)
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() {
+		require.NoError(t, s.Close())
+	})
 	return s
 }
 
 func TestSessionReadCurrentSession(t *testing.T) {
 	st := testStore(t)
 	require.NoError(t, st.CreateSession("s1", "/tmp", "direct", "sonnet"))
-	st.AddMessage("s1", "user", "build the thing", "", "", "", "", "", 0, true)
-	st.AddMessage("s1", "assistant", "on it", "", "", "", "", "", 0, true)
+	_, err := st.AddMessage("s1", "user", "build the thing", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
+	_, err = st.AddMessage("s1", "assistant", "on it", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
 
 	tool := NewSessionReadTool(st, "s1")
 	res := tool.Execute(context.Background(), map[string]any{})
@@ -42,8 +46,10 @@ func TestSessionReadPastSession(t *testing.T) {
 	st := testStore(t)
 	require.NoError(t, st.CreateSession("s1", "/tmp", "direct", "sonnet"))
 	require.NoError(t, st.CreateSession("s2", "/tmp", "direct", "opus"))
-	st.AddMessage("s1", "user", "old message", "", "", "", "", "", 0, true)
-	st.AddMessage("s2", "user", "new message", "", "", "", "", "", 0, true)
+	_, err := st.AddMessage("s1", "user", "old message", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
+	_, err = st.AddMessage("s2", "user", "new message", "", "", "", "", "", 0, true)
+	require.NoError(t, err)
 
 	// Tool bound to s2, but we read s1 explicitly.
 	tool := NewSessionReadTool(st, "s2")
@@ -62,7 +68,8 @@ func TestSessionReadOffsetAndLimit(t *testing.T) {
 	st := testStore(t)
 	require.NoError(t, st.CreateSession("s1", "/tmp", "direct", "sonnet"))
 	for i := range 10 {
-		st.AddMessage("s1", "user", "msg"+string(rune('0'+i)), "", "", "", "", "", 0, true)
+		_, err := st.AddMessage("s1", "user", "msg"+string(rune('0'+i)), "", "", "", "", "", 0, true)
+		require.NoError(t, err)
 	}
 
 	tool := NewSessionReadTool(st, "s1")

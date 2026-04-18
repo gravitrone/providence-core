@@ -96,7 +96,7 @@ func newRootCommand() *cobra.Command {
 	root.Flags().StringVar(&resumeFlag, "resume", "", "Resume session by ID or title substring")
 	root.Flags().BoolVar(&continueFlag, "continue", false, "Resume the most recent session")
 
-	root.RegisterFlagCompletionFunc("engine", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+	_ = root.RegisterFlagCompletionFunc("engine", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return []string{"claude", "direct", "codex_headless", "codex_headless"}, cobra.ShellCompDirectiveNoFileComp
 	})
 
@@ -140,7 +140,9 @@ func runTUI(engineType string, cfg config.Config, resumeQuery string, continueSe
 		fmt.Fprintf(os.Stderr, "warning: session db: %v\n", err)
 	}
 	if st != nil {
-		defer st.Close()
+		defer func() {
+			_ = st.Close()
+		}()
 		// Clean up sessions older than 30 days on startup.
 		if cleaned, cerr := st.CleanupOldSessions(30); cerr != nil {
 			fmt.Fprintf(os.Stderr, "warning: session cleanup: %v\n", cerr)

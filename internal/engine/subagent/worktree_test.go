@@ -94,7 +94,7 @@ func TestCreateAndRemoveWorktree(t *testing.T) {
 	cmd := exec.Command("git", "-C", path, "checkout", ".")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
-	os.Remove(filepath.Join(path, "new.txt"))
+	require.NoError(t, os.Remove(filepath.Join(path, "new.txt")))
 
 	// Remove worktree.
 	err = RemoveWorktree(repo, path, branch)

@@ -87,13 +87,13 @@ func (m *Manager) ConnectAll(configs []ServerConfig) error {
 		m.bindNotificationHandler(cfg.Name, client)
 
 		if err := client.Initialize(); err != nil {
-			client.Close()
+			_ = client.Close()
 			errs = append(errs, fmt.Sprintf("%s: init failed: %v", cfg.Name, err))
 			continue
 		}
 
 		if _, err := client.ListTools(); err != nil {
-			client.Close()
+			_ = client.Close()
 			errs = append(errs, fmt.Sprintf("%s: list tools failed: %v", cfg.Name, err))
 			continue
 		}
@@ -200,7 +200,7 @@ func (m *Manager) Reconnect(name string) error {
 	oldClient, hasOld := m.clients[name]
 	m.mu.RUnlock()
 	if hasOld {
-		oldClient.Close()
+		_ = oldClient.Close()
 	}
 
 	// Spawn and initialize a fresh client.
@@ -211,12 +211,12 @@ func (m *Manager) Reconnect(name string) error {
 	m.bindNotificationHandler(name, client)
 
 	if err := client.Initialize(); err != nil {
-		client.Close()
+		_ = client.Close()
 		return fmt.Errorf("MCP server %q reconnect init: %w", name, err)
 	}
 
 	if _, err := client.ListTools(); err != nil {
-		client.Close()
+		_ = client.Close()
 		return fmt.Errorf("MCP server %q reconnect list tools: %w", name, err)
 	}
 

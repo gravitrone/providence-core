@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,7 +24,7 @@ const (
 // Shells out to rg (ripgrep) if available on PATH, falls back to Go regex.
 type GrepTool struct{}
 
-func NewGrepTool() *GrepTool    { return &GrepTool{} }
+func NewGrepTool() *GrepTool     { return &GrepTool{} }
 func (g *GrepTool) Name() string { return "Grep" }
 func (g *GrepTool) Description() string {
 	return "Search file contents using regex patterns."
@@ -200,7 +201,8 @@ func (g *GrepTool) executeRg(ctx context.Context, pattern, root, mode string,
 	err := cmd.Run()
 	// rg exits 1 when no matches found, not an error.
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			if exitErr.ExitCode() == 1 {
 				return ToolResult{Content: ""}
 			}
@@ -363,19 +365,19 @@ func grepContent(re *regexp.Regexp, files []string, limit, offset int) ToolResul
 				}
 				entry := fmt.Sprintf("%s:%d:%s\n", path, lineNum, line)
 				if b.Len()+len(entry) > maxGrepChars {
-					f.Close()
+					_ = f.Close()
 					b.WriteString("\n... truncated\n")
 					return ToolResult{Content: b.String()}
 				}
 				b.WriteString(entry)
 				entries++
 				if entries >= limit {
-					f.Close()
+					_ = f.Close()
 					return ToolResult{Content: b.String()}
 				}
 			}
 		}
-		f.Close()
+		_ = f.Close()
 	}
 
 	return ToolResult{Content: b.String()}
@@ -441,7 +443,7 @@ func matchesInFile(re *regexp.Regexp, path string) bool {
 			}
 		}
 	}
-	f.Seek(0, 0)
+	_, _ = f.Seek(0, 0)
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 512*1024)
@@ -470,7 +472,7 @@ func countMatchesInFile(re *regexp.Regexp, path string) int {
 			}
 		}
 	}
-	f.Seek(0, 0)
+	_, _ = f.Seek(0, 0)
 
 	count := 0
 	scanner := bufio.NewScanner(f)

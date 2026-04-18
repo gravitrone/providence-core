@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/google/uuid"
 	"github.com/gravitrone/providence-core/internal/auth"
 	"github.com/gravitrone/providence-core/internal/bridge/macos"
@@ -80,6 +79,11 @@ type DirectEngine struct {
 
 	// Provider identifier ("anthropic", "openai", "openrouter").
 	provider string
+
+	// Anthropic client settings needed to rebuild the SDK client when transport
+	// settings change mid-turn.
+	anthropicAPIKey  string
+	anthropicBaseURL string
 
 	// maxOutputRecoveryCount tracks how many times we've auto-recovered from
 	// max_tokens in the current user turn. Reset at the start of each Send.
@@ -171,6 +175,10 @@ type DirectEngine struct {
 	tokensConsumed int
 	budgetMu       sync.Mutex
 
+	// Per-provider retry state for overload and connection reset handling.
+	retryStates map[string]*retryState
+	retryMu     sync.Mutex
+
 	// Stuck loop detection: track recent tool calls to detect repeated patterns.
 	loopHistory   [5]string // ring buffer of "toolName:argsHash" keys
 	loopIdx       int       // next write index into loopHistory
@@ -229,11 +237,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 
 	var client anthropic.Client
 	if !isCodex && !isOpenRouter {
-		opts := []option.RequestOption{}
-		if cfg.APIKey != "" {
-			opts = append(opts, option.WithAPIKey(cfg.APIKey))
-		}
-		client = anthropic.NewClient(opts...)
+		client = newAnthropicClient(cfg.APIKey, "", false)
 	}
 
 	model := cfg.Model
@@ -349,6 +353,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		ctx:                 ctx,
 		cancel:              cancel,
 		provider:            providerName,
+		anthropicAPIKey:     cfg.APIKey,
 		codexMode:           isCodex,
 		openrouterMode:      isOpenRouter,
 		openrouterAPIKey:    openrouterKey,
@@ -359,6 +364,7 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		startTime:           time.Now(),
 		hooksRunner:         hooksRunner,
 		contentReplacements: make(map[string]string),
+		retryStates:         newRetryStates(),
 		caffeinator:         engine.NewCaffeinator(5 * time.Minute),
 	}
 
@@ -772,6 +778,7 @@ func (e *DirectEngine) Send(text string) error {
 	// Reset context for this turn.
 	e.ctx, e.cancel = context.WithCancel(context.Background())
 	e.mu.Unlock()
+	e.resetRetryCounts(e.provider)
 
 	if e.compactor != nil && (e.codexMode || e.openrouterMode) {
 		if err := e.compactor.WaitForPending(e.ctx); err != nil {
@@ -2190,6 +2197,7 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 	idleTimeout := streamIdleTimeout()
 	unattended := e.isUnattendedRetry()
 	startTime := time.Now()
+	source := e.provider
 
 	// Reset pre-execution state for this streaming call.
 	e.preExecMu.Lock()
@@ -2197,10 +2205,6 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 	e.preExecMu.Unlock()
 
 	for attempt := 0; ; attempt++ {
-		// In normal mode, enforce the max retry limit.
-		if !unattended && attempt >= maxRetries {
-			break
-		}
 		// In unattended mode, enforce the total time cap.
 		if unattended && time.Since(startTime) > unattendedTotalCap {
 			return anthropic.Message{}, fmt.Errorf("unattended retry cap reached (%s)", unattendedTotalCap)
@@ -2265,6 +2269,7 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 		if err := stream.Err(); err != nil {
 			// Idle watchdog fired - treat as a transient error and retry.
 			if idleTriggered.Load() {
+				e.resetRetryCounts(source)
 				if !unattended && attempt >= maxRetries-1 {
 					return accumulated, err
 				}
@@ -2273,8 +2278,20 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 
 			// Auth errors: attempt recovery (OAuth refresh) once, then fail.
 			if isAuthError(err) {
+				e.resetRetryCounts(source)
 				if e.handleAuthError(err) {
 					continue // recovery succeeded, retry
+				}
+				return accumulated, err
+			}
+
+			if isConnectionReset(err) {
+				snapshot, keepAliveChanged := e.noteConnResetRetry(source)
+				if keepAliveChanged && source == engine.ProviderAnthropic {
+					e.rebuildAnthropicClient(snapshot.disableKeepAlives)
+				}
+				if snapshot.consecutiveConnReset <= 1 {
+					continue
 				}
 				return accumulated, err
 			}
@@ -2283,7 +2300,32 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 			isRateLimit := strings.Contains(errStr, "429") || strings.Contains(errStr, "rate_limit")
 			isOverload := isOverloadError(err)
 
+			if isOverload && !unattended {
+				snapshot := e.noteOverloadRetry(source)
+				if snapshot.consecutive529 > overloadRetryLimit {
+					e.resetRetryCounts(source)
+					return accumulated, fmt.Errorf("%s: overloaded after %d retries: %w", retrySourceLabel(source), overloadRetryLimit, err)
+				}
+
+				delay := overloadRetryDelay(snapshot.consecutive529)
+				e.events <- engine.ParsedEvent{
+					Type: "rate_limit",
+					Data: &engine.RateLimitEvent{
+						Type:     "rate_limit",
+						DelaySec: int(delay.Seconds()),
+						Attempt:  snapshot.consecutive529,
+						MaxRetry: overloadRetryLimit,
+					},
+				}
+
+				if sleepErr := sleepWithContext(ctx, delay); sleepErr != nil {
+					return accumulated, sleepErr
+				}
+				continue
+			}
+
 			if isRateLimit || (unattended && isOverload) {
+				e.resetRetryCounts(source)
 				canRetry := unattended || attempt < maxRetries-1
 				if canRetry {
 					delay := extractRetryDelay(err)
@@ -2312,14 +2354,18 @@ func (e *DirectEngine) streamWithRetry(ctx context.Context, params anthropic.Mes
 						},
 					}
 					e.sleepWithHeartbeat(ctx, delay)
+					if ctx.Err() != nil {
+						return accumulated, ctx.Err()
+					}
 					continue
 				}
 			}
+			e.resetRetryCounts(source)
 			return accumulated, err
 		}
+		e.resetRetryCounts(source)
 		return accumulated, nil
 	}
-	return anthropic.Message{}, fmt.Errorf("stream retry exhausted")
 }
 
 // sleepWithHeartbeat sleeps for the given duration, emitting keep-alive system
@@ -2542,6 +2588,9 @@ func isFallbackTriggerable(err error) bool {
 		return false
 	}
 	if isOverloadError(err) {
+		if strings.Contains(err.Error(), "overloaded after ") {
+			return false
+		}
 		return true
 	}
 	msg := err.Error()

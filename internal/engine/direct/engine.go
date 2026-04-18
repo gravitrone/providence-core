@@ -107,6 +107,10 @@ type DirectEngine struct {
 	// Per-session TodoWrite tool instance.
 	todoTool *tools.TodoWriteTool
 
+	// verifyPlanReminderTurns tracks how many turns should remind the model
+	// to verify implementation work against the approved plan after plan mode exits.
+	verifyPlanReminderTurns int
+
 	// Codex mode: use OpenAI Codex API instead of Anthropic.
 	codexMode    bool
 	codexHistory []codexHistoryEntry
@@ -1835,6 +1839,10 @@ func (e *DirectEngine) agentLoop(ctx context.Context) {
 				r.Result.ContextModifier()
 			}
 
+			if r.Name == "ExitPlanMode" && !r.Result.IsError {
+				e.verifyPlanReminderTurns = 3
+			}
+
 			e.events <- engine.ParsedEvent{
 				Type: "tool_result",
 				Data: &engine.ToolResultEvent{
@@ -2672,71 +2680,88 @@ func (e *DirectEngine) BudgetRemaining() int {
 
 // --- Per-turn context injection ---
 
-// injectPerTurnContext adds dynamic per-turn context before each API call.
-// Includes time since last message and active todo count as system-reminder blocks.
-func (e *DirectEngine) injectPerTurnContext() {
-	var parts []string
+const turnReminderBlockPrefix = "<system-reminder source=\"turn\">\n"
 
-	// Time since session start.
-	elapsed := time.Since(e.startTime)
-	if elapsed > 1*time.Minute {
-		parts = append(parts, fmt.Sprintf("Session uptime: %s", elapsed.Truncate(time.Second)))
+func (e *DirectEngine) buildTurnReminderState() engine.ReminderState {
+	state := engine.ReminderState{
+		SessionUptime:            time.Since(e.startTime),
+		VerifyPlanTurnsRemaining: e.verifyPlanReminderTurns,
 	}
 
-	// Active todo count.
-	todos := e.todoTool.GetCurrentTodos()
-	activeTodos := 0
-	for _, t := range todos {
-		if t.Status == "in_progress" || t.Status == "pending" {
-			activeTodos++
+	if e.history != nil {
+		state.CurrentTokens = e.history.CurrentTokens()
+		e.history.mu.Lock()
+		state.LastTurnOutputTokens = e.history.lastOutputTokens
+		e.history.mu.Unlock()
+	}
+
+	if e.todoTool != nil {
+		todos := e.todoTool.GetCurrentTodos()
+		for _, t := range todos {
+			if t.Status == "completed" {
+				continue
+			}
+			state.TodoItems = append(state.TodoItems, t.Content)
 		}
 	}
-	if activeTodos > 0 {
-		parts = append(parts, fmt.Sprintf("Active todos: %d", activeTodos))
-	}
 
-	// File watcher: recent changes.
 	if e.fileWatcher != nil {
 		changes := e.fileWatcher.RecentChanges()
 		if len(changes) > 0 {
-			var changedFiles []string
 			for _, c := range changes {
-				if len(changedFiles) >= 3 {
-					changedFiles = append(changedFiles, fmt.Sprintf("and %d more", len(changes)-3))
+				if len(state.RecentFileChanges) >= 3 {
+					state.RecentFileChanges = append(state.RecentFileChanges, fmt.Sprintf("and %d more", len(changes)-3))
 					break
 				}
-				changedFiles = append(changedFiles, c)
+				state.RecentFileChanges = append(state.RecentFileChanges, c)
 			}
-			parts = append(parts, fmt.Sprintf("Recent file changes: %s", strings.Join(changedFiles, ", ")))
 		}
 	}
 
-	// Team inbox polling: check for unread teammate messages.
 	if e.teamStore != nil && e.teamName != "" && e.teamAgentID != "" {
 		mailbox := teams.NewMailbox(e.teamStore)
 		unread, err := mailbox.ReadUnread(e.teamName, e.teamAgentID)
 		if err == nil && len(unread) > 0 {
 			for _, msg := range unread {
-				parts = append(parts, fmt.Sprintf("<teammate-message from=%q>%s</teammate-message>", msg.From, msg.Text))
+				state.TeammateMessages = append(
+					state.TeammateMessages,
+					fmt.Sprintf("<teammate-message from=%q>%s</teammate-message>", msg.From, msg.Text),
+				)
 			}
 			_ = mailbox.MarkRead(e.teamName, e.teamAgentID)
 		}
 	}
 
-	if len(parts) == 0 {
+	contextWindow := engine.ContextWindowFor(e.model)
+	maxOutput := engine.MaxOutputTokensFor(e.model)
+	if contextWindow > 0 && maxOutput > 0 {
+		state.HardTokenLimit = compact.GetEffectiveContextWindow(contextWindow, maxOutput) - 3000
+		if state.HardTokenLimit < 0 {
+			state.HardTokenLimit = 0
+		}
+	}
+
+	return state
+}
+
+// injectPerTurnContext adds the dynamic per-turn system reminder block before each API call.
+func (e *DirectEngine) injectPerTurnContext() {
+	state := e.buildTurnReminderState()
+	reminder := engine.BuildTurnReminder(state)
+	if reminder == "" {
 		return
 	}
 
 	// Inject as the last block in the system blocks (non-cacheable since it's dynamic).
 	contextBlock := engine.SystemBlock{
-		Text:      "<system-reminder>\n" + strings.Join(parts, "\n") + "\n</system-reminder>",
+		Text:      turnReminderBlockPrefix + reminder + "\n</system-reminder>",
 		Cacheable: false,
 	}
 
 	// Replace any previous per-turn context block (identified by prefix).
 	replaced := false
 	for i, b := range e.blocks {
-		if strings.HasPrefix(b.Text, "<system-reminder>\nSession uptime:") || strings.HasPrefix(b.Text, "<system-reminder>\nActive todos:") {
+		if strings.HasPrefix(b.Text, turnReminderBlockPrefix) {
 			e.blocks[i] = contextBlock
 			replaced = true
 			break
@@ -2744,6 +2769,9 @@ func (e *DirectEngine) injectPerTurnContext() {
 	}
 	if !replaced {
 		e.blocks = append(e.blocks, contextBlock)
+	}
+	if state.VerifyPlanTurnsRemaining > 0 && e.verifyPlanReminderTurns > 0 {
+		e.verifyPlanReminderTurns--
 	}
 	e.system = engine.FlattenBlocks(e.blocks)
 }

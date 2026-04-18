@@ -2,16 +2,27 @@ package direct
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/gravitrone/providence-core/internal/engine"
+	"github.com/gravitrone/providence-core/internal/engine/direct/tools"
 	"github.com/gravitrone/providence-core/internal/engine/session"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func findTurnReminderBlock(blocks []engine.SystemBlock) string {
+	for _, block := range blocks {
+		if strings.HasPrefix(block.Text, turnReminderBlockPrefix) {
+			return block.Text
+		}
+	}
+	return ""
+}
 
 func TestNewDirectEngine(t *testing.T) {
 	e, err := NewDirectEngine(engine.EngineConfig{
@@ -78,6 +89,36 @@ func TestUsageEventEmitted(t *testing.T) {
 	assert.Equal(t, 15, usage.TotalTokens)
 	assert.Equal(t, 2, usage.CacheReadTokens)
 	assert.Equal(t, 1, usage.CacheCreateTokens)
+}
+
+func TestReminderIncludesVerifyPlanForThreeTurns(t *testing.T) {
+	t.Parallel()
+
+	e := &DirectEngine{
+		blocks:                  []engine.SystemBlock{{Text: "static", Cacheable: true}},
+		history:                 NewConversationHistory(),
+		model:                   "claude-sonnet-4-6",
+		todoTool:                tools.NewTodoWriteTool(),
+		startTime:               time.Now(),
+		verifyPlanReminderTurns: 3,
+	}
+	e.history.SetReportedTokens(12, 4)
+
+	for remaining := 3; remaining >= 1; remaining-- {
+		e.injectPerTurnContext()
+		reminder := findTurnReminderBlock(e.blocks)
+		require.NotEmpty(t, reminder)
+		assert.Contains(t, reminder, "Plan mode recently exited. Verify the implementation still matches the approved plan.")
+		assert.Contains(t, reminder, fmt.Sprintf("(%d turns remaining)", remaining))
+	}
+
+	assert.Zero(t, e.verifyPlanReminderTurns)
+
+	e.injectPerTurnContext()
+	reminder := findTurnReminderBlock(e.blocks)
+	require.NotEmpty(t, reminder)
+	assert.NotContains(t, reminder, "Plan mode recently exited.")
+	assert.Contains(t, reminder, "Output tokens this turn: 4")
 }
 
 func TestDirectEngine_InterruptIdempotent(t *testing.T) {

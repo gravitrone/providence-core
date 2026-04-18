@@ -1,6 +1,7 @@
 package direct
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"sync"
@@ -21,12 +22,15 @@ type ConversationHistory struct {
 	lastReportedTokens int
 	lastInputTokens    int
 	lastOutputTokens   int
+	counter            *tokenCounter
 	mu                 sync.Mutex
 }
 
 // NewConversationHistory creates an empty conversation history.
 func NewConversationHistory() *ConversationHistory {
-	return &ConversationHistory{}
+	return &ConversationHistory{
+		counter: newDefaultTokenCounter(),
+	}
 }
 
 // AddUser appends a user text message to the history.
@@ -116,12 +120,21 @@ func (h *ConversationHistory) EstimateTokens() int {
 // falling back to a rough estimate from the current message history.
 func (h *ConversationHistory) CurrentTokens() int {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	if h.lastReportedTokens > 0 {
-		return h.lastReportedTokens
+		total := h.lastReportedTokens
+		h.mu.Unlock()
+		return total
 	}
-	return h.estimateTokensLocked()
+
+	msgs := append([]anthropic.MessageParam(nil), h.messages...)
+	counter := h.counter
+	h.mu.Unlock()
+
+	if counter == nil {
+		return heuristicTokenCount(msgs)
+	}
+
+	return counter.Count(context.Background(), msgs)
 }
 
 // SetReportedTokens stores the latest provider-reported input and output totals.
@@ -141,22 +154,7 @@ func (h *ConversationHistory) invalidateReportedTokensLocked() {
 }
 
 func (h *ConversationHistory) estimateTokensLocked() int {
-	charCount := 0
-	for _, msg := range h.messages {
-		for _, block := range msg.Content {
-			if block.OfText != nil {
-				charCount += len(block.OfText.Text)
-			}
-			if block.OfToolResult != nil {
-				for _, inner := range block.OfToolResult.Content {
-					if inner.OfText != nil {
-						charCount += len(inner.OfText.Text)
-					}
-				}
-			}
-		}
-	}
-	return charCount * 4 / 3
+	return heuristicTokenCount(h.messages)
 }
 
 // StripThinkingBlocks removes thinking and redacted thinking content blocks from

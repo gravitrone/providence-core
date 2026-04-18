@@ -198,6 +198,7 @@ func TestToolRegistryComplete(t *testing.T) {
 
 func TestConversationHistoryOperations(t *testing.T) {
 	h := NewConversationHistory()
+	h.counter = newTokenCounter(tokenCounterConfig{})
 
 	// Empty history.
 	assert.Empty(t, h.Messages())

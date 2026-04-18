@@ -75,6 +75,7 @@ func TestConversationHistory_EstimateTokensEmpty(t *testing.T) {
 
 func TestCurrentTokensFallbackToEstimate(t *testing.T) {
 	h := NewConversationHistory()
+	h.counter = newTokenCounter(tokenCounterConfig{})
 	h.AddUser("hello world!")
 
 	assert.Equal(t, 16, h.CurrentTokens())
@@ -90,6 +91,7 @@ func TestCurrentTokensFromReported(t *testing.T) {
 
 func TestCurrentTokensInvalidatesAfterAppend(t *testing.T) {
 	h := NewConversationHistory()
+	h.counter = newTokenCounter(tokenCounterConfig{})
 	h.AddUser("hello world!")
 	h.SetReportedTokens(16, 0)
 	require.Equal(t, 16, h.CurrentTokens())

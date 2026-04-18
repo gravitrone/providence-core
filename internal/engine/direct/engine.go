@@ -207,6 +207,21 @@ type DirectEngine struct {
 	contextInjector contextInjector
 
 	lastCompactedAt time.Time
+
+	// Session memory: an LLM-generated markdown summary persisted to disk
+	// that the compactor reads first on restore. A fork subagent writes it
+	// every memoryTurnInterval completed turns. Writes are fire-and-forget;
+	// failures in the writer MUST NOT affect the main turn.
+	memoryEnabled      bool
+	memoryTurnInterval int
+	turnCount          int64 // atomic counter of completed turns since session start
+	// memoryExecutorOverride lets tests inject a controlled executor in
+	// place of subagentContextExecutor. nil means production behaviour.
+	memoryExecutorOverride subagent.ContextExecutor
+	// memoryWritersInFlight tracks outstanding writer goroutines so tests
+	// and shutdown paths can block until they drain. Always safe to Wait
+	// even when zero writers have run.
+	memoryWritersInFlight sync.WaitGroup
 }
 
 // contextInjector is a local interface matching overlay.Injector to avoid an
@@ -341,10 +356,18 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	hooksMap = hooks.ResolveHookConfigs(cfg.WorkDir, hooksMap)
 	hooksRunner := hooks.NewRunner(hooksMap)
 	cacheTTL := compactCacheTTL5m
+	memoryEnabled := true
+	memoryTurnInterval := session.DefaultMemoryTurnInterval
 	if cfg.WorkDir != "" {
 		loaded := config.LoadMerged(cfg.WorkDir)
 		if loaded.Compact.CacheTTL == compactCacheTTL1h {
 			cacheTTL = compactCacheTTL1h
+		}
+		if loaded.Session.MemoryEnabled != nil {
+			memoryEnabled = *loaded.Session.MemoryEnabled
+		}
+		if loaded.Session.MemoryTurnInterval > 0 {
+			memoryTurnInterval = loaded.Session.MemoryTurnInterval
 		}
 	}
 	permHandler := NewPermissionHandler()
@@ -378,6 +401,8 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 		contentReplacements: make(map[string]string),
 		retryStates:         newRetryStates(),
 		caffeinator:         engine.NewCaffeinator(5 * time.Minute),
+		memoryEnabled:       memoryEnabled,
+		memoryTurnInterval:  memoryTurnInterval,
 	}
 
 	hookEmitter := func(event string, input hooks.HookInput) {
@@ -456,6 +481,12 @@ func NewDirectEngine(cfg engine.EngineConfig) (*DirectEngine, error) {
 	e.compactor = compact.New(provider, func(phase compact.Phase, err error) {
 		e.handleCompactionPhase(provider, phase, err)
 	})
+
+	// Wire session memory as the authoritative context source for the
+	// compactor. On restore the compactor reads memory first and injects it
+	// above the raw-history summary. A stale or unreadable memory file is
+	// logged and treated as a miss so the fall-through path still works.
+	e.compactor.SetMemoryReader(e.readSessionMemoryForCompactor)
 
 	// Start file watcher for config change detection.
 	fw := filewatch.New(cfg.WorkDir, nil)
@@ -965,6 +996,9 @@ func (e *DirectEngine) Close() {
 	runWithDeadline(failsafe, 2*time.Second, func() {
 		e.preExecWg.Wait()
 		e.summaryWg.Wait()
+		// Drain fire-and-forget session memory writers so Close does not
+		// leak goroutines. Bounded by the outer failsafe context.
+		e.memoryWritersInFlight.Wait()
 	})
 
 	// Step 3: Close MCP servers (3s timeout).
@@ -2029,6 +2063,10 @@ func (e *DirectEngine) emitResult() {
 				"status": "success",
 			},
 		})
+		// Dispatch the fire-and-forget session memory writer. This is a
+		// best-effort write: failures inside the subagent or on disk MUST
+		// NOT affect the main turn.
+		e.maybeDispatchSessionMemoryWriter()
 	}
 
 	e.events <- engine.ParsedEvent{

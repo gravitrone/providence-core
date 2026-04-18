@@ -178,6 +178,9 @@ type CompactConfig struct {
 	RollingTokens  int    `toml:"rolling_tokens" json:"rolling_tokens,omitempty"`
 	FastTierModel  string `toml:"fast_tier_model" json:"fast_tier_model,omitempty"`
 	CircuitBreaker int    `toml:"circuit_breaker" json:"circuit_breaker,omitempty"`
+	// CacheTTL controls Anthropic cache_control TTL.
+	// Use "1h" only on Claude subscriber accounts; Anthropic rejects it otherwise.
+	CacheTTL string `toml:"cache_ttl" json:"cache_ttl,omitempty"`
 }
 
 // DefaultTOMLPath returns the default TOML config file location.
@@ -247,6 +250,7 @@ func Defaults() Config {
 			RollingTokens:  50000,
 			FastTierModel:  "haiku",
 			CircuitBreaker: 3,
+			CacheTTL:       "5m",
 		},
 	}
 }
@@ -314,6 +318,7 @@ func expandConfigEnvVars(c *Config) {
 	c.Compact.Mode = expandEnvVars(c.Compact.Mode)
 	c.Compact.Trigger = expandEnvVars(c.Compact.Trigger)
 	c.Compact.FastTierModel = expandEnvVars(c.Compact.FastTierModel)
+	c.Compact.CacheTTL = expandEnvVars(c.Compact.CacheTTL)
 	c.Permissions.Mode = expandEnvVars(c.Permissions.Mode)
 	for i := range c.Permissions.Allow {
 		c.Permissions.Allow[i] = expandEnvVars(c.Permissions.Allow[i])
@@ -498,6 +503,9 @@ func mergeConfig(base, override *Config) {
 	}
 	if override.Compact.CircuitBreaker != 0 {
 		base.Compact.CircuitBreaker = override.Compact.CircuitBreaker
+	}
+	if override.Compact.CacheTTL != "" {
+		base.Compact.CacheTTL = override.Compact.CacheTTL
 	}
 	// Bridge: merge non-zero/non-empty fields.
 	if override.Bridge.Mode != "" {
@@ -759,6 +767,14 @@ func (c *Config) Validate() error {
 	}
 	if !validCompactModes[c.Compact.Mode] {
 		errs = append(errs, fmt.Sprintf("compact.mode %q is not valid (allowed: cc-tail-replace, dynamic-rolling, both, off)", c.Compact.Mode))
+	}
+	validCompactCacheTTLs := map[string]bool{
+		"":   true,
+		"5m": true,
+		"1h": true,
+	}
+	if !validCompactCacheTTLs[c.Compact.CacheTTL] {
+		errs = append(errs, fmt.Sprintf("compact.cache_ttl %q is not valid (allowed: 5m, 1h)", c.Compact.CacheTTL))
 	}
 
 	validEffort := map[string]bool{

@@ -38,6 +38,7 @@ keep_recent_pct = 30
 rolling_tokens = 50000
 fast_tier_model = "haiku"
 circuit_breaker = 3
+cache_ttl = "1h"
 `
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 
@@ -57,6 +58,7 @@ circuit_breaker = 3
 	assert.Equal(t, 50000, c.Compact.RollingTokens)
 	assert.Equal(t, "haiku", c.Compact.FastTierModel)
 	assert.Equal(t, 3, c.Compact.CircuitBreaker)
+	assert.Equal(t, "1h", c.Compact.CacheTTL)
 }
 
 func TestLoadSaveRoundtrip(t *testing.T) {
@@ -71,6 +73,7 @@ func TestLoadSaveRoundtrip(t *testing.T) {
 			Mode:           "both",
 			ThresholdPct:   80,
 			CircuitBreaker: 3,
+			CacheTTL:       "1h",
 		},
 	}
 
@@ -83,6 +86,7 @@ func TestLoadSaveRoundtrip(t *testing.T) {
 	assert.Equal(t, original.Compact.Mode, loaded.Compact.Mode)
 	assert.Equal(t, original.Compact.ThresholdPct, loaded.Compact.ThresholdPct)
 	assert.Equal(t, original.Compact.CircuitBreaker, loaded.Compact.CircuitBreaker)
+	assert.Equal(t, original.Compact.CacheTTL, loaded.Compact.CacheTTL)
 }
 
 func TestMigrateFromJSON(t *testing.T) {
@@ -135,6 +139,7 @@ func TestDefaultValues(t *testing.T) {
 	assert.Equal(t, 80, d.Compact.ThresholdPct)
 	assert.Equal(t, 20, d.Compact.TurnCount)
 	assert.Equal(t, 3, d.Compact.CircuitBreaker)
+	assert.Equal(t, "5m", d.Compact.CacheTTL)
 }
 
 func TestLoadMergedPriority(t *testing.T) {
@@ -157,6 +162,7 @@ keep_recent_pct = 25
 rolling_tokens = 40000
 fast_tier_model = "haiku"
 circuit_breaker = 2
+cache_ttl = "5m"
 `)
 
 	writeTestConfigFile(t, filepath.Join(projectRoot, ".providence", "config.toml"), `model = "project-model"
@@ -180,6 +186,7 @@ openrouter_api_key = "local-key"
 threshold_pct = 90
 rolling_tokens = 60000
 circuit_breaker = 5
+cache_ttl = "1h"
 `)
 
 	loaded := LoadMerged(projectRoot)
@@ -203,6 +210,7 @@ circuit_breaker = 5
 	assert.Equal(t, 60000, loaded.Compact.RollingTokens)
 	assert.Equal(t, "haiku", loaded.Compact.FastTierModel)
 	assert.Equal(t, 5, loaded.Compact.CircuitBreaker)
+	assert.Equal(t, "1h", loaded.Compact.CacheTTL)
 }
 
 func TestLoadMerged_APIKeyHelperSetsAnthropicEnv(t *testing.T) {
@@ -246,6 +254,33 @@ func TestCompactConfigDefaults(t *testing.T) {
 	assert.Equal(t, 50000, compact.RollingTokens)
 	assert.Equal(t, "haiku", compact.FastTierModel)
 	assert.Equal(t, 3, compact.CircuitBreaker)
+	assert.Equal(t, "5m", compact.CacheTTL)
+}
+
+func TestCompactCacheTTLValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		ttl     string
+		wantErr bool
+	}{
+		{name: "empty uses default", ttl: "", wantErr: false},
+		{name: "5m supported", ttl: "5m", wantErr: false},
+		{name: "1h supported", ttl: "1h", wantErr: false},
+		{name: "invalid rejected", ttl: "30m", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Compact: CompactConfig{CacheTTL: tt.ttl}}
+			err := cfg.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "compact.cache_ttl")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestLoadExplicitFalseOverridesDefault(t *testing.T) {
@@ -286,6 +321,7 @@ func TestConfigSaveRoundtrip(t *testing.T) {
 			RollingTokens:  64000,
 			FastTierModel:  "haiku",
 			CircuitBreaker: 7,
+			CacheTTL:       "1h",
 		},
 	}
 
@@ -897,6 +933,7 @@ func TestConfig_SaveAndLoadRoundtripPreservesAllFields(t *testing.T) {
 			RollingTokens:  60000,
 			FastTierModel:  "haiku",
 			CircuitBreaker: 5,
+			CacheTTL:       "1h",
 		},
 		Permissions: PermissionsConfig{
 			Mode:  "acceptEdits",

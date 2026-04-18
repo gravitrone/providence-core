@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -49,6 +51,15 @@ type OverlayConfig struct {
 	DailyTokenBudget int `toml:"daily_token_budget" json:"daily_token_budget,omitempty"`
 }
 
+// SandboxConfig controls extra sandbox-exec allowances.
+//
+// This config is security-sensitive. A malicious config file can relax the
+// sandbox and broaden filesystem or network access for bash commands.
+type SandboxConfig struct {
+	AllowNetwork []string `toml:"allow_network" json:"allow_network,omitempty"`
+	AllowWrite   []string `toml:"allow_write" json:"allow_write,omitempty"`
+}
+
 // SpawnEnabled returns true if the overlay subprocess should be spawned
 // automatically. Defaults to true for backwards compatibility.
 func (c *OverlayConfig) SpawnEnabled() bool {
@@ -80,6 +91,7 @@ type Config struct {
 	Hooks       HooksConfig       `toml:"hooks" json:"hooks,omitempty"`
 	Permissions PermissionsConfig `toml:"permissions" json:"permissions,omitempty"`
 	Overlay     OverlayConfig     `toml:"overlay" json:"overlay,omitempty"`
+	Sandbox     SandboxConfig     `toml:"sandbox" json:"sandbox,omitempty"`
 }
 
 // PermissionsConfig holds permission rules from config files.
@@ -329,6 +341,12 @@ func expandConfigEnvVars(c *Config) {
 	for i := range c.Permissions.Ask {
 		c.Permissions.Ask[i] = expandEnvVars(c.Permissions.Ask[i])
 	}
+	for i := range c.Sandbox.AllowNetwork {
+		c.Sandbox.AllowNetwork[i] = expandEnvVars(c.Sandbox.AllowNetwork[i])
+	}
+	for i := range c.Sandbox.AllowWrite {
+		c.Sandbox.AllowWrite[i] = expandEnvVars(c.Sandbox.AllowWrite[i])
+	}
 }
 
 // LoadFromTOML reads config from a TOML file. Returns empty Config on any error.
@@ -571,6 +589,14 @@ func mergeConfig(base, override *Config) {
 	}
 	if override.Overlay.DailyTokenBudget != 0 {
 		base.Overlay.DailyTokenBudget = override.Overlay.DailyTokenBudget
+	}
+
+	// Sandbox: merge non-empty lists.
+	if len(override.Sandbox.AllowNetwork) > 0 {
+		base.Sandbox.AllowNetwork = override.Sandbox.AllowNetwork
+	}
+	if len(override.Sandbox.AllowWrite) > 0 {
+		base.Sandbox.AllowWrite = override.Sandbox.AllowWrite
 	}
 
 	// Hooks: override replaces entire event lists (not additive).
@@ -820,11 +846,140 @@ func (c *Config) Validate() error {
 	if c.Overlay.DailyTokenBudget < 0 {
 		errs = append(errs, fmt.Sprintf("overlay.daily_token_budget %d must be >= 0 (0 disables)", c.Overlay.DailyTokenBudget))
 	}
+	if _, err := NormalizeSandboxConfig(c.Sandbox); err != nil {
+		errs = append(errs, err.Error())
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("config validation errors: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// NormalizeSandboxConfig validates and normalizes sandbox config values.
+func NormalizeSandboxConfig(cfg SandboxConfig) (SandboxConfig, error) {
+	var normalized SandboxConfig
+	var errs []string
+
+	for _, entry := range cfg.AllowNetwork {
+		value, err := normalizeSandboxNetworkEntry(entry)
+		if err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+		normalized.AllowNetwork = append(normalized.AllowNetwork, value)
+	}
+
+	for _, entry := range cfg.AllowWrite {
+		value, err := normalizeSandboxWritePath(entry)
+		if err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+		normalized.AllowWrite = append(normalized.AllowWrite, value)
+	}
+
+	if len(errs) > 0 {
+		return SandboxConfig{}, fmt.Errorf("sandbox config invalid: %s", strings.Join(errs, "; "))
+	}
+
+	return normalized, nil
+}
+
+func normalizeSandboxNetworkEntry(entry string) (string, error) {
+	value := strings.TrimSpace(expandEnvVars(entry))
+	if value == "" {
+		return "", fmt.Errorf("sandbox.allow_network entry must not be empty")
+	}
+	if value == "*:*" || value == "0.0.0.0:*" {
+		return "", fmt.Errorf("sandbox.allow_network %q is too broad", entry)
+	}
+	if strings.Contains(value, "://") {
+		return "", fmt.Errorf("sandbox.allow_network %q must be host or host:port", entry)
+	}
+
+	host := value
+	port := ""
+	if strings.Contains(value, ":") {
+		parsedHost, parsedPort, err := net.SplitHostPort(value)
+		if err != nil {
+			return "", fmt.Errorf("sandbox.allow_network %q must be host or host:port", entry)
+		}
+		host = parsedHost
+		port = parsedPort
+	}
+
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if host == "" {
+		return "", fmt.Errorf("sandbox.allow_network %q must include a host", entry)
+	}
+	if host == "*" || host == "0.0.0.0" {
+		return "", fmt.Errorf("sandbox.allow_network %q is too broad", entry)
+	}
+	if strings.Contains(host, "*") {
+		return "", fmt.Errorf("sandbox.allow_network %q must not include wildcard hosts", entry)
+	}
+
+	if port == "" {
+		return host + ":*", nil
+	}
+	if port == "*" {
+		return "", fmt.Errorf("sandbox.allow_network %q must not include wildcard ports", entry)
+	}
+
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return "", fmt.Errorf("sandbox.allow_network %q must use a port between 1 and 65535", entry)
+	}
+
+	return net.JoinHostPort(host, port), nil
+}
+
+func normalizeSandboxWritePath(entry string) (string, error) {
+	value := strings.TrimSpace(expandEnvVars(entry))
+	if value == "" {
+		return "", fmt.Errorf("sandbox.allow_write entry must not be empty")
+	}
+
+	expanded, err := expandSandboxHome(value)
+	if err != nil {
+		return "", err
+	}
+	cleaned := filepath.Clean(expanded)
+	if !filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("sandbox.allow_write %q must be an absolute path or ~/subdir", entry)
+	}
+	if cleaned == string(filepath.Separator) {
+		return "", fmt.Errorf("sandbox.allow_write %q must not allow filesystem root", entry)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory for sandbox.allow_write %q: %w", entry, err)
+	}
+	if filepath.Clean(home) == cleaned {
+		return "", fmt.Errorf("sandbox.allow_write %q must target a subdirectory, not $HOME itself", entry)
+	}
+
+	return cleaned, nil
+}
+
+func expandSandboxHome(path string) (string, error) {
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory for sandbox.allow_write %q: %w", path, err)
+		}
+		return home, nil
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory for sandbox.allow_write %q: %w", path, err)
+		}
+		return filepath.Join(home, strings.TrimPrefix(path, "~/")), nil
+	}
+	return path, nil
 }
 
 // Save writes config to DefaultPath as TOML, creating ~/.providence/ if needed.

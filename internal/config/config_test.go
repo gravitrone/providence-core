@@ -415,6 +415,43 @@ allow = ["Write(*)", "Edit(*)"]
 	assert.Equal(t, []string{"Bash(rm -rf *)"}, loaded.Permissions.Deny)
 }
 
+func TestSandboxConfigParse(t *testing.T) {
+	homeDir := t.TempDir()
+	projectRoot := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	writeTestConfigFile(t, filepath.Join(projectRoot, ".providence", "config.toml"), `[sandbox]
+allow_network = ["localhost:3000", "api.myco.internal"]
+allow_write = ["/tmp/cache", "~/.myapp/data"]
+`)
+
+	loaded := LoadMerged(projectRoot)
+
+	assert.Equal(t, []string{"localhost:3000", "api.myco.internal"}, loaded.Sandbox.AllowNetwork)
+	assert.Equal(t, []string{"/tmp/cache", "~/.myapp/data"}, loaded.Sandbox.AllowWrite)
+}
+
+func TestSandboxConfigValidationRejectsWildcardNetwork(t *testing.T) {
+	_, err := NormalizeSandboxConfig(SandboxConfig{
+		AllowNetwork: []string{"*:*"},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `sandbox.allow_network "*:*" is too broad`)
+}
+
+func TestSandboxConfigValidationRejectsBareHomePath(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	_, err := NormalizeSandboxConfig(SandboxConfig{
+		AllowWrite: []string{"~"},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must target a subdirectory")
+}
+
 func TestSaveCreatesDir(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nested", "deep", "config.toml")

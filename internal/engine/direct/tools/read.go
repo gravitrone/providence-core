@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"github.com/gravitrone/providence-core/internal/engine/hooks"
 	"github.com/gravitrone/providence-core/internal/engine/skills"
@@ -151,17 +150,23 @@ func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		return ToolResult{Content: "binary file, cannot read", IsError: true}
 	}
 
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return ToolResult{Content: fmt.Sprintf("file not found: %s", path), IsError: true}
 		}
-		return ToolResult{Content: fmt.Sprintf("cannot open file: %v", err), IsError: true}
+		return ToolResult{Content: fmt.Sprintf("cannot read file: %v", err), IsError: true}
 	}
-	defer f.Close()
+
+	content, encoding, err := detectAndDecodeText(data)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("cannot decode file: %v", err), IsError: true}
+	}
+
+	rememberFileEncoding(path, encoding)
 
 	var b strings.Builder
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(strings.NewReader(content))
 	// Increase buffer for long lines.
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
 
@@ -180,7 +185,7 @@ func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult
 
 		line := fmt.Sprintf("%6d\t%s\n", lineNum, scanner.Text())
 		if totalChars+len(line) > maxReadChars {
-			b.WriteString(fmt.Sprintf("\n... truncated at %d chars\n", maxReadChars))
+			fmt.Fprintf(&b, "\n... truncated at %d chars\n", maxReadChars)
 			break
 		}
 		b.WriteString(line)
@@ -192,7 +197,7 @@ func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		return ToolResult{Content: fmt.Sprintf("read error: %v", err), IsError: true}
 	}
 
-	content := b.String()
+	content = b.String()
 
 	// File-unchanged-since-last-read detection.
 	// Cache key includes offset+limit so different ranges are tracked independently.
@@ -268,7 +273,7 @@ func (r *ReadTool) readPDF(ctx context.Context, path string, offset, limit int) 
 
 	var b strings.Builder
 	for i, line := range lines {
-		b.WriteString(fmt.Sprintf("%6d\t%s\n", start+i+1, line))
+		fmt.Fprintf(&b, "%6d\t%s\n", start+i+1, line)
 	}
 
 	r.fileState.MarkRead(path)
@@ -368,6 +373,6 @@ func isBinaryFile(path string) bool {
 			return true
 		}
 	}
-	// Check if valid UTF-8.
-	return !utf8.Valid(buf)
+
+	return !looksLikeLegacyText(buf)
 }

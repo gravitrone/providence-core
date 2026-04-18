@@ -78,6 +78,54 @@ func TestWrite_ExistingFileRequiresRead(t *testing.T) {
 	assert.Equal(t, "new", string(data))
 }
 
+func TestWritePreservesBOMIfRememberedFromRead(t *testing.T) {
+	dir := t.TempDir()
+	fs := NewFileState()
+	readTool := NewReadTool(fs)
+	writeTool := NewWriteTool(fs)
+
+	path := filepath.Join(dir, "bom.txt")
+	require.NoError(t, os.WriteFile(path, append([]byte{0xEF, 0xBB, 0xBF}, []byte("before\n")...), 0o644))
+
+	readResult := readTool.Execute(context.Background(), map[string]any{"file_path": path})
+	require.False(t, readResult.IsError, readResult.Content)
+
+	writeResult := writeTool.Execute(context.Background(), map[string]any{
+		"file_path": path,
+		"content":   "after\n",
+	})
+	require.False(t, writeResult.IsError, writeResult.Content)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.True(t, len(data) >= len(utf8BOM))
+	assert.Equal(t, utf8BOM, data[:len(utf8BOM)])
+	assert.Equal(t, "after\n", string(data[len(utf8BOM):]))
+}
+
+func TestWritePreservesCRLFIfRememberedFromRead(t *testing.T) {
+	dir := t.TempDir()
+	fs := NewFileState()
+	readTool := NewReadTool(fs)
+	writeTool := NewWriteTool(fs)
+
+	path := filepath.Join(dir, "windows.txt")
+	require.NoError(t, os.WriteFile(path, []byte("before\r\nline\r\n"), 0o644))
+
+	readResult := readTool.Execute(context.Background(), map[string]any{"file_path": path})
+	require.False(t, readResult.IsError, readResult.Content)
+
+	writeResult := writeTool.Execute(context.Background(), map[string]any{
+		"file_path": path,
+		"content":   "after\nline\n",
+	})
+	require.False(t, writeResult.IsError, writeResult.Content)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "after\r\nline\r\n", string(data))
+}
+
 func TestWrite_MissingFilePath(t *testing.T) {
 	fs := NewFileState()
 	w := NewWriteTool(fs)

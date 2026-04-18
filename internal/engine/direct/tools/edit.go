@@ -7,12 +7,14 @@ import (
 	"strings"
 
 	"github.com/gravitrone/providence-core/internal/engine/hooks"
+	"github.com/gravitrone/providence-core/internal/engine/skills"
 )
 
 // EditTool performs string replacements in files with stale-write detection.
 type EditTool struct {
-	fs      *FileState
-	emitter HookEmitter
+	fs                     *FileState
+	emitter                HookEmitter
+	skillActivationHandler func([]skills.ActivatedSkill)
 }
 
 // NewEditTool creates an EditTool backed by the given FileState.
@@ -23,6 +25,11 @@ func NewEditTool(fs *FileState) *EditTool {
 // SetHookEmitter wires lifecycle hook dispatch for successful edits.
 func (e *EditTool) SetHookEmitter(emitter HookEmitter) {
 	e.emitter = emitter
+}
+
+// SetSkillActivationHandler wires conditional skill activation for successful edits.
+func (e *EditTool) SetSkillActivationHandler(handler func([]skills.ActivatedSkill)) {
+	e.skillActivationHandler = handler
 }
 
 func (e *EditTool) Name() string        { return "Edit" }
@@ -168,10 +175,16 @@ func (e *EditTool) Execute(_ context.Context, input map[string]any) ToolResult {
 	e.fs.MarkRead(path)
 	e.emitFileChanged(path)
 
-	if replaceAll {
-		return ToolResult{Content: fmt.Sprintf("Replaced %d occurrences in %s", count, path)}
+	result := ToolResult{
+		ContextModifier: e.skillActivationModifier(path),
 	}
-	return ToolResult{Content: fmt.Sprintf("Replaced 1 occurrence in %s", path)}
+
+	if replaceAll {
+		result.Content = fmt.Sprintf("Replaced %d occurrences in %s", count, path)
+		return result
+	}
+	result.Content = fmt.Sprintf("Replaced 1 occurrence in %s", path)
+	return result
 }
 
 func (e *EditTool) emitFileChanged(path string) {
@@ -184,4 +197,15 @@ func (e *EditTool) emitFileChanged(path string) {
 			"file_path": path,
 		},
 	})
+}
+
+func (e *EditTool) skillActivationModifier(path string) func() {
+	activatedSkills := skills.ActivateForPaths([]string{path})
+	if len(activatedSkills) == 0 || e.skillActivationHandler == nil {
+		return nil
+	}
+
+	return func() {
+		e.skillActivationHandler(activatedSkills)
+	}
 }

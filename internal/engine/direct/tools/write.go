@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 
 	"github.com/gravitrone/providence-core/internal/engine/hooks"
+	"github.com/gravitrone/providence-core/internal/engine/skills"
 )
 
 // WriteTool creates or overwrites files with read-before-write safety.
 type WriteTool struct {
-	fs      *FileState
-	emitter HookEmitter
+	fs                     *FileState
+	emitter                HookEmitter
+	skillActivationHandler func([]skills.ActivatedSkill)
 }
 
 // NewWriteTool creates a WriteTool backed by the given FileState.
@@ -23,6 +25,11 @@ func NewWriteTool(fs *FileState) *WriteTool {
 // SetHookEmitter wires lifecycle hook dispatch for successful writes.
 func (w *WriteTool) SetHookEmitter(emitter HookEmitter) {
 	w.emitter = emitter
+}
+
+// SetSkillActivationHandler wires conditional skill activation for successful writes.
+func (w *WriteTool) SetSkillActivationHandler(handler func([]skills.ActivatedSkill)) {
+	w.skillActivationHandler = handler
 }
 
 func (w *WriteTool) Name() string { return "Write" }
@@ -146,7 +153,10 @@ func (w *WriteTool) Execute(_ context.Context, input map[string]any) ToolResult 
 	if fileExists {
 		verb = "Updated"
 	}
-	return ToolResult{Content: fmt.Sprintf("%s %s", verb, path)}
+	return ToolResult{
+		Content:         fmt.Sprintf("%s %s", verb, path),
+		ContextModifier: w.skillActivationModifier(path),
+	}
 }
 
 func (w *WriteTool) emitFileChanged(path string) {
@@ -159,4 +169,15 @@ func (w *WriteTool) emitFileChanged(path string) {
 			"file_path": path,
 		},
 	})
+}
+
+func (w *WriteTool) skillActivationModifier(path string) func() {
+	activatedSkills := skills.ActivateForPaths([]string{path})
+	if len(activatedSkills) == 0 || w.skillActivationHandler == nil {
+		return nil
+	}
+
+	return func() {
+		w.skillActivationHandler(activatedSkills)
+	}
 }

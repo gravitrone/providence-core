@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gravitrone/providence-core/internal/engine/hooks"
+	"github.com/gravitrone/providence-core/internal/engine/skills"
 )
 
 const (
@@ -33,8 +34,9 @@ var imageExts = map[string]string{
 
 // ReadTool reads text files with line numbers (cat -n format).
 type ReadTool struct {
-	fileState *FileState
-	emitter   HookEmitter
+	fileState              *FileState
+	emitter                HookEmitter
+	skillActivationHandler func([]skills.ActivatedSkill)
 
 	cacheMu   sync.Mutex
 	readCache map[string]string // "path:offset:limit" -> content sha256 hex
@@ -51,6 +53,11 @@ func NewReadTool(fs *FileState) *ReadTool {
 // SetHookEmitter wires lifecycle hook dispatch for successful reads.
 func (r *ReadTool) SetHookEmitter(emitter HookEmitter) {
 	r.emitter = emitter
+}
+
+// SetSkillActivationHandler wires conditional skill activation for successful reads.
+func (r *ReadTool) SetSkillActivationHandler(handler func([]skills.ActivatedSkill)) {
+	r.skillActivationHandler = handler
 }
 
 func (r *ReadTool) Name() string        { return "Read" }
@@ -196,14 +203,20 @@ func (r *ReadTool) Execute(ctx context.Context, input map[string]any) ToolResult
 		r.cacheMu.Unlock()
 		r.fileState.MarkRead(path)
 		r.emitFileRead(path)
-		return ToolResult{Content: "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current - refer to that instead of re-reading."}
+		return ToolResult{
+			Content:         "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current - refer to that instead of re-reading.",
+			ContextModifier: r.skillActivationModifier(path),
+		}
 	}
 	r.readCache[cacheKey] = hash
 	r.cacheMu.Unlock()
 
 	r.fileState.MarkRead(path)
 	r.emitFileRead(path)
-	return ToolResult{Content: content}
+	return ToolResult{
+		Content:         content,
+		ContextModifier: r.skillActivationModifier(path),
+	}
 }
 
 func (r *ReadTool) readImage(path, mime string) ToolResult {
@@ -223,6 +236,7 @@ func (r *ReadTool) readImage(path, mime string) ToolResult {
 			"base64":    encoded,
 			"mime_type": mime,
 		},
+		ContextModifier: r.skillActivationModifier(path),
 	}
 }
 
@@ -259,7 +273,10 @@ func (r *ReadTool) readPDF(ctx context.Context, path string, offset, limit int) 
 
 	r.fileState.MarkRead(path)
 	r.emitFileRead(path)
-	return ToolResult{Content: b.String()}
+	return ToolResult{
+		Content:         b.String(),
+		ContextModifier: r.skillActivationModifier(path),
+	}
 }
 
 // readNotebook reads a Jupyter .ipynb file and renders cells as text.
@@ -301,7 +318,10 @@ func (r *ReadTool) readNotebook(path string) ToolResult {
 
 	r.fileState.MarkRead(path)
 	r.emitFileRead(path)
-	return ToolResult{Content: sb.String()}
+	return ToolResult{
+		Content:         sb.String(),
+		ContextModifier: r.skillActivationModifier(path),
+	}
 }
 
 func (r *ReadTool) emitFileRead(path string) {
@@ -314,6 +334,17 @@ func (r *ReadTool) emitFileRead(path string) {
 			"file_path": path,
 		},
 	})
+}
+
+func (r *ReadTool) skillActivationModifier(path string) func() {
+	activatedSkills := skills.ActivateForPaths([]string{path})
+	if len(activatedSkills) == 0 || r.skillActivationHandler == nil {
+		return nil
+	}
+
+	return func() {
+		r.skillActivationHandler(activatedSkills)
+	}
 }
 
 // isBinaryFile checks if a file looks like binary by reading the first 8KB.

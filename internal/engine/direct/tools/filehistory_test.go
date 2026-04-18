@@ -194,3 +194,72 @@ func TestEvictOldSnapshotsRemovesOldest(t *testing.T) {
 	assert.LessOrEqual(t, len(snaps), historyMaxPerPath,
 		"retention must cap snapshot count per path")
 }
+
+// TestSnapshotFileEvictsExpiredSnapshotsOnNextWrite verifies age-based
+// retention removes expired entries when the next snapshot is taken.
+func TestSnapshotFileEvictsExpiredSnapshotsOnNextWrite(t *testing.T) {
+	redirectFileHistoryDir(t)
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "aged.txt")
+
+	var ids []string
+	for i := 0; i < 3; i++ {
+		require.NoError(t, os.WriteFile(path, []byte{byte('a' + i)}, 0o644))
+		snap, err := SnapshotFile(path)
+		require.NoError(t, err)
+		ids = append(ids, snap.ID)
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	historyDir := filepath.Join(defaultFileHistoryDir(), pathKey(path))
+	expiredAt := time.Now().Add(-historyMaxAge - time.Hour)
+	require.NoError(t, os.Chtimes(filepath.Join(historyDir, ids[0]+".gz"), expiredAt, expiredAt))
+
+	require.NoError(t, os.WriteFile(path, []byte("fresh"), 0o644))
+	fresh, err := SnapshotFile(path)
+	require.NoError(t, err)
+
+	snaps, err := ListSnapshots(path)
+	require.NoError(t, err)
+
+	gotIDs := make([]string, 0, len(snaps))
+	for _, snap := range snaps {
+		gotIDs = append(gotIDs, snap.ID)
+	}
+
+	assert.NotContains(t, gotIDs, ids[0], "expired snapshot must be evicted on next write")
+	assert.Contains(t, gotIDs, ids[1])
+	assert.Contains(t, gotIDs, ids[2])
+	assert.Contains(t, gotIDs, fresh.ID)
+}
+
+// TestSnapshotFileEvictsOldestSnapshotWhenCountExceeded verifies count-based
+// retention drops the oldest snapshot once the per-path cap is exceeded.
+func TestSnapshotFileEvictsOldestSnapshotWhenCountExceeded(t *testing.T) {
+	redirectFileHistoryDir(t)
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "count.txt")
+
+	ids := make([]string, 0, historyMaxPerPath+1)
+	for i := 0; i <= historyMaxPerPath; i++ {
+		require.NoError(t, os.WriteFile(path, []byte{byte('a' + i%10)}, 0o644))
+		snap, err := SnapshotFile(path)
+		require.NoError(t, err)
+		ids = append(ids, snap.ID)
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	snaps, err := ListSnapshots(path)
+	require.NoError(t, err)
+	require.Len(t, snaps, historyMaxPerPath)
+
+	gotIDs := make([]string, 0, len(snaps))
+	for _, snap := range snaps {
+		gotIDs = append(gotIDs, snap.ID)
+	}
+
+	assert.NotContains(t, gotIDs, ids[0], "oldest snapshot must be evicted when count exceeds cap")
+	assert.Contains(t, gotIDs, ids[len(ids)-1], "newest snapshot must be retained")
+}

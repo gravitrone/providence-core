@@ -3041,6 +3041,31 @@ func (at *AgentTab) emitMessageEvent(kind string, payload any) {
 	_, _ = at.store.AddMessageEvent(at.sessionID, at.eventSeq, kind, string(raw))
 }
 
+// toolCallIDMapFromEvents builds a message-row-id to synthetic tool call-id
+// map from tool_call_id events. Each event persists the message row it was
+// minted for, so the resume path can pair tool_use and tool_result rows by
+// id rather than by tool name plus index (which breaks when two calls to
+// the same tool are in flight at once).
+func toolCallIDMapFromEvents(events []store.MessageEvent) map[int64]string {
+	out := make(map[int64]string)
+	for _, ev := range events {
+		if ev.Kind != store.EventKindToolCallID {
+			continue
+		}
+		var p struct {
+			MessageID int64  `json:"message_id"`
+			CallID    string `json:"call_id"`
+		}
+		if err := json.Unmarshal([]byte(ev.Payload), &p); err != nil {
+			continue
+		}
+		if p.MessageID != 0 && p.CallID != "" {
+			out[p.MessageID] = p.CallID
+		}
+	}
+	return out
+}
+
 // hydrateFromEvents walks the typed event log and rebuilds the tab's
 // side-channel state. An empty slice is a valid signal from pre-event-log
 // databases and leaves all state zeroed. The walk also advances eventSeq so
@@ -5182,10 +5207,16 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		// falling back to flat text synthesis.
 		at.messages = nil
 		restored := make([]engine.RestoredMessage, 0, len(msgs))
-		// pendingToolID tracks the synthetic call ID generated for the most
-		// recent tool-bearing assistant turn so the following tool result can
-		// reference the same ID.
-		pendingToolIDs := make(map[string]string) // toolName -> callID
+		// Build a per-row synthetic id map from the event log. Each persisted
+		// tool_call_id event carries the message row it was minted for, so
+		// on resume we can pair tool_use and tool_result rows by id instead
+		// of the legacy toolName+index heuristic that breaks when two calls
+		// to the same tool are in flight at once.
+		msgIDToCallID := toolCallIDMapFromEvents(events)
+		// pendingToolIDs threads ids from an assistant row down to the
+		// tool-result row that follows. Ordered FIFO per tool name so a
+		// burst of same-name calls resolves in call order.
+		pendingToolIDs := make(map[string][]string)
 		for _, m := range msgs {
 			at.messages = append(at.messages, ChatMessage{
 				Role:       m.Role,
@@ -5205,20 +5236,34 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			}
 			switch m.Role {
 			case "assistant":
-				// If this assistant turn included a tool invocation, register a
-				// synthetic call ID so the subsequent tool result can reference it.
+				// If this assistant turn included a tool invocation, queue a
+				// synthetic call id so the subsequent tool result can reference
+				// it. The id comes from the event log when available so
+				// multiple in-flight calls keep their pairing across restart.
 				if m.ToolName != "" {
-					callID := fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
-					pendingToolIDs[m.ToolName] = callID
+					callID := msgIDToCallID[m.ID]
+					if callID == "" {
+						callID = fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
+					}
+					pendingToolIDs[m.ToolName] = append(pendingToolIDs[m.ToolName], callID)
 				}
 			case "tool":
-				// Pair this result with the most recently registered call ID for
-				// its tool name. Fall back to a fresh synthetic ID if none exists.
-				callID, ok := pendingToolIDs[m.ToolName]
-				if !ok || callID == "" {
+				// Prefer the id persisted for this specific row; fall back to
+				// FIFO-pop of the pending queue, then to a fresh synthetic id.
+				callID := msgIDToCallID[m.ID]
+				if callID == "" {
+					if q := pendingToolIDs[m.ToolName]; len(q) > 0 {
+						callID = q[0]
+						pendingToolIDs[m.ToolName] = q[1:]
+					}
+				} else if q := pendingToolIDs[m.ToolName]; len(q) > 0 && q[0] == callID {
+					// Pop the matching head so the next result does not reuse
+					// this id.
+					pendingToolIDs[m.ToolName] = q[1:]
+				}
+				if callID == "" {
 					callID = fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
 				}
-				delete(pendingToolIDs, m.ToolName)
 				restoredMessage.ToolName = m.ToolName
 				restoredMessage.ToolInput = m.ToolArgs
 				restoredMessage.ToolCallID = callID
@@ -7021,7 +7066,17 @@ func (at *AgentTab) handleResumeInit() tea.Cmd {
 	msgs := rd.Messages
 	at.messages = nil
 	restored := make([]engine.RestoredMessage, 0, len(msgs))
-	pendingToolIDs := make(map[string]string)
+	pendingToolIDs := make(map[string][]string)
+
+	// Load persisted tool_call_id events for this session so the pairing
+	// key is stable across restart. Missing table or session is a no-op;
+	// the FIFO queue below still produces a deterministic synthetic id.
+	var events []store.MessageEvent
+	if at.store != nil && rd.SessionID != "" {
+		events, _ = at.store.GetSessionEvents(rd.SessionID)
+		at.hydrateFromEvents(events)
+	}
+	msgIDToCallID := toolCallIDMapFromEvents(events)
 
 	for _, m := range msgs {
 		at.messages = append(at.messages, ChatMessage{
@@ -7043,15 +7098,25 @@ func (at *AgentTab) handleResumeInit() tea.Cmd {
 		switch m.Role {
 		case "assistant":
 			if m.ToolName != "" {
-				callID := fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
-				pendingToolIDs[m.ToolName] = callID
+				callID := msgIDToCallID[m.ID]
+				if callID == "" {
+					callID = fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
+				}
+				pendingToolIDs[m.ToolName] = append(pendingToolIDs[m.ToolName], callID)
 			}
 		case "tool":
-			callID, ok := pendingToolIDs[m.ToolName]
-			if !ok || callID == "" {
+			callID := msgIDToCallID[m.ID]
+			if callID == "" {
+				if q := pendingToolIDs[m.ToolName]; len(q) > 0 {
+					callID = q[0]
+					pendingToolIDs[m.ToolName] = q[1:]
+				}
+			} else if q := pendingToolIDs[m.ToolName]; len(q) > 0 && q[0] == callID {
+				pendingToolIDs[m.ToolName] = q[1:]
+			}
+			if callID == "" {
 				callID = fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
 			}
-			delete(pendingToolIDs, m.ToolName)
 			rm.ToolName = m.ToolName
 			rm.ToolInput = m.ToolArgs
 			rm.ToolCallID = callID
@@ -7085,9 +7150,13 @@ func (at *AgentTab) handleResumeInit() tea.Cmd {
 //   - If the last message is a user message with no following assistant reply,
 //     appends a continuation prompt so the model picks up where it left off.
 //
+// pendingToolIDs is keyed by tool name and holds the FIFO queue of synthetic
+// call ids whose matching tool_result never arrived. Each queued id becomes
+// its own orphan synthesis so multi-call bursts stay paired.
+//
 // Returns the repaired slice and whether the session was interrupted (orphaned
 // tools or trailing user message with no reply).
-func repairRestoredMessages(msgs []engine.RestoredMessage, pendingToolIDs map[string]string) ([]engine.RestoredMessage, bool) {
+func repairRestoredMessages(msgs []engine.RestoredMessage, pendingToolIDs map[string][]string) ([]engine.RestoredMessage, bool) {
 	var repaired []engine.RestoredMessage
 	interrupted := false
 
@@ -7101,15 +7170,21 @@ func repairRestoredMessages(msgs []engine.RestoredMessage, pendingToolIDs map[st
 
 	// Synthesize error results for any orphaned tool calls still in pendingToolIDs.
 	// These are tool_use blocks from the assistant that never got a tool_result.
-	if len(pendingToolIDs) > 0 {
+	orphanCount := 0
+	for _, queue := range pendingToolIDs {
+		orphanCount += len(queue)
+	}
+	if orphanCount > 0 {
 		interrupted = true
-		for toolName, callID := range pendingToolIDs {
-			repaired = append(repaired, engine.RestoredMessage{
-				Role:       "tool",
-				Content:    "[tool execution interrupted - session was terminated]",
-				ToolCallID: callID,
-				ToolName:   toolName,
-			})
+		for toolName, queue := range pendingToolIDs {
+			for _, callID := range queue {
+				repaired = append(repaired, engine.RestoredMessage{
+					Role:       "tool",
+					Content:    "[tool execution interrupted - session was terminated]",
+					ToolCallID: callID,
+					ToolName:   toolName,
+				})
+			}
 		}
 	}
 

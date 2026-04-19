@@ -2,6 +2,7 @@ package direct
 
 import (
 	"context"
+	"log"
 	"sync"
 
 	"github.com/google/uuid"
@@ -28,15 +29,22 @@ type PermissionHandler struct {
 	askRules   []permissions.Rule
 	mode       string // "", "auto", "deny", "plan"
 	emitter    tools.HookEmitter
+	denials    *permissions.DenialTracker
+	autoMode   *permissions.AutoMode
+	shadowed   []permissions.ShadowedRule
 }
 
 // NewPermissionHandler creates a permission handler with default allow rules
 // for read-only tools (Read, Glob, Grep).
 func NewPermissionHandler() *PermissionHandler {
-	return &PermissionHandler{
+	ph := &PermissionHandler{
 		pending:    make(map[string]chan bool),
 		allowRules: defaultAllowRules,
+		denials:    permissions.NewDenialTracker(),
+		autoMode:   permissions.NewAutoMode(),
 	}
+	ph.refreshShadowed()
+	return ph
 }
 
 // NewPermissionHandlerWithRules creates a permission handler with custom
@@ -45,11 +53,15 @@ func NewPermissionHandlerWithRules(allow, deny []permissions.Rule) *PermissionHa
 	merged := make([]permissions.Rule, 0, len(defaultAllowRules)+len(allow))
 	merged = append(merged, defaultAllowRules...)
 	merged = append(merged, allow...)
-	return &PermissionHandler{
+	ph := &PermissionHandler{
 		pending:    make(map[string]chan bool),
 		allowRules: merged,
 		denyRules:  deny,
+		denials:    permissions.NewDenialTracker(),
+		autoMode:   permissions.NewAutoMode(),
 	}
+	ph.refreshShadowed()
+	return ph
 }
 
 // NewPermissionHandlerWithConfig creates a permission handler with rules from
@@ -65,12 +77,97 @@ func NewPermissionHandlerWithConfig(allow, deny []permissions.Rule, configAllow,
 	mergedDeny = append(mergedDeny, deny...)
 	mergedDeny = append(mergedDeny, configDeny...)
 
-	return &PermissionHandler{
+	ph := &PermissionHandler{
 		pending:    make(map[string]chan bool),
 		allowRules: mergedAllow,
 		denyRules:  mergedDeny,
 		askRules:   configAsk,
+		denials:    permissions.NewDenialTracker(),
+		autoMode:   permissions.NewAutoMode(),
 	}
+	ph.refreshShadowed()
+	return ph
+}
+
+// refreshShadowed recomputes the shadowed rule list across all rule kinds
+// and logs a warning for each finding. Callers must hold no locks on p.mu.
+func (p *PermissionHandler) refreshShadowed() {
+	all := make([]permissions.Rule, 0, len(p.allowRules)+len(p.denyRules)+len(p.askRules))
+	all = append(all, p.denyRules...)
+	all = append(all, p.askRules...)
+	all = append(all, p.allowRules...)
+	shadowed := permissions.DetectShadowedRules(all)
+	p.shadowed = shadowed
+	for _, s := range shadowed {
+		log.Printf("permissions: %s", s.Reason)
+	}
+}
+
+// DenialHistory returns a snapshot of denials recorded this session, most
+// recent first. Empty when no denials have occurred.
+func (p *PermissionHandler) DenialHistory() []permissions.DenialRecord {
+	if p.denials == nil {
+		return nil
+	}
+	return p.denials.History()
+}
+
+// ShadowedRules returns the shadowed rule findings computed at load time.
+func (p *PermissionHandler) ShadowedRules() []permissions.ShadowedRule {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]permissions.ShadowedRule, len(p.shadowed))
+	copy(out, p.shadowed)
+	return out
+}
+
+// SetAutoMode toggles the session-scoped auto-approval state for read-only
+// tools. Writes, Bash, and Edit continue through the normal chain.
+func (p *PermissionHandler) SetAutoMode(enabled bool) {
+	if p.autoMode == nil {
+		p.autoMode = permissions.NewAutoMode()
+	}
+	p.autoMode.SetAutoMode(enabled)
+}
+
+// AutoModeEnabled reports the current auto-approval state.
+func (p *PermissionHandler) AutoModeEnabled() bool {
+	if p.autoMode == nil {
+		return false
+	}
+	return p.autoMode.Enabled()
+}
+
+// LoadPersistedRules loads previously saved rules for the project and merges
+// them into the handler's allow list. Missing files are not an error.
+func (p *PermissionHandler) LoadPersistedRules(projectPath string) error {
+	rules, err := permissions.LoadRules(projectPath)
+	if err != nil {
+		return err
+	}
+	if len(rules) == 0 {
+		return nil
+	}
+	p.mu.Lock()
+	p.allowRules = append(p.allowRules, rules...)
+	p.mu.Unlock()
+	p.refreshShadowed()
+	return nil
+}
+
+// PersistRules saves the current non-default allow rules to the on-disk
+// project store using SaveRules.
+func (p *PermissionHandler) PersistRules(projectPath string) error {
+	p.mu.Lock()
+	snapshot := make([]permissions.Rule, 0, len(p.allowRules))
+	for _, r := range p.allowRules {
+		if r.Source == "builtin" {
+			continue
+		}
+		snapshot = append(snapshot, r)
+	}
+	p.mu.Unlock()
+	return permissions.SaveRules(projectPath, snapshot)
 }
 
 // SetMode overrides the permission mode for this handler.
@@ -93,7 +190,17 @@ func (p *PermissionHandler) Check(t tools.Tool, input map[string]any) *permissio
 	p.mu.Lock()
 	mode := p.mode
 	emitter := p.emitter
+	autoMode := p.autoMode
 	p.mu.Unlock()
+
+	// autoApprove short-circuit for read-only tools (never overrides safety).
+	if autoMode != nil && autoMode.IsAutoApproved(t.Name(), input) {
+		return &permissions.Result{
+			Decision: permissions.Allow,
+			Reason:   "autoApprove: read-only tool",
+			ToolName: t.Name(),
+		}
+	}
 
 	switch mode {
 	case "auto":
@@ -108,6 +215,7 @@ func (p *PermissionHandler) Check(t tools.Tool, input map[string]any) *permissio
 			Reason:   "deny mode",
 			ToolName: t.Name(),
 		}
+		p.onDenied(result, t.Name(), input, permissions.Rule{})
 		emitPermissionHook(emitter, hooks.PermissionDenied, t.Name(), input, result.Reason)
 		return result
 	}
@@ -125,9 +233,36 @@ func (p *PermissionHandler) Check(t tools.Tool, input map[string]any) *permissio
 	}
 	result := permissions.CheckPermission(ctx, t.Name(), input)
 	if result != nil && result.Decision == permissions.Deny {
+		matched := matchedDenyRule(p.denyRules, t.Name(), input)
+		p.onDenied(result, t.Name(), input, matched)
 		emitPermissionHook(emitter, hooks.PermissionDenied, t.Name(), input, result.Reason)
 	}
 	return result
+}
+
+// onDenied records the denial and attaches a human-readable explanation to
+// the result. Safe to call with a zero-value rule when no explicit rule
+// matched (mode-level deny, tool checker deny, etc).
+func (p *PermissionHandler) onDenied(result *permissions.Result, tool string, input map[string]any, rule permissions.Rule) {
+	if p.denials != nil {
+		p.denials.Record(tool, input)
+	}
+	if result == nil {
+		return
+	}
+	result.Reason = permissions.ExplainDenial(rule, tool, input) + " (" + result.Reason + ")"
+}
+
+// matchedDenyRule returns the first deny rule matching tool+input, or a
+// zero-value Rule when none matches (for example when the chain denies via
+// plan mode or dontAsk mode).
+func matchedDenyRule(rules []permissions.Rule, tool string, input interface{}) permissions.Rule {
+	for _, r := range rules {
+		if permissions.MatchRule(r, tool, input) {
+			return r
+		}
+	}
+	return permissions.Rule{}
 }
 
 // NeedsPermission returns true if the tool requires explicit user approval

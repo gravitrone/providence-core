@@ -35,6 +35,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/ember"
 	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
 	"github.com/gravitrone/providence-core/internal/engine/outputstyles"
+	"github.com/gravitrone/providence-core/internal/engine/permissions"
 	"github.com/gravitrone/providence-core/internal/engine/skills"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
 	"github.com/gravitrone/providence-core/internal/engine/teams"
@@ -411,6 +412,13 @@ type AgentTab struct {
 	planPrevPermMode string
 	// sessionRules holds permission rules added via /permissions during this session.
 	sessionRules []config.PermissionRule
+	// sessionDenials records denials the user clicked through during this
+	// session. Exposed via /permissions so recent denials are visible
+	// without digging through logs.
+	sessionDenials *permissions.DenialTracker
+	// autoModeEnabled mirrors the session-scoped auto-approval state so
+	// /permissions can report it alongside shadowed rules and denials.
+	autoModeEnabled bool
 
 	// Discovered skills, custom agents, and custom tools loaded at startup.
 	discoveredSkills []skills.SkillDefinition
@@ -951,6 +959,7 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			if at.engine != nil && optionID != "" {
 				_ = at.engine.RespondPermission(perm.QuestionID, optionID)
 			}
+			at.recordUIDenial(perm.Tool.Name, perm.Tool.Input)
 			if cardTool {
 				at.updateLastToolStatus(perm.Tool.Name, "cancelled")
 			} else {
@@ -3039,6 +3048,84 @@ func (at *AgentTab) emitMessageEvent(kind string, payload any) {
 	}
 	at.eventSeq++
 	_, _ = at.store.AddMessageEvent(at.sessionID, at.eventSeq, kind, string(raw))
+}
+
+// recordUIDenial feeds the session-scoped denial tracker used by the
+// /permissions slash surface. Lazy-inits the tracker so existing tests and
+// fresh tabs don't pay for it until the first deny fires.
+func (at *AgentTab) recordUIDenial(toolName string, input any) {
+	if at.sessionDenials == nil {
+		at.sessionDenials = permissions.NewDenialTracker()
+	}
+	at.sessionDenials.Record(toolName, input)
+}
+
+// collectShadowedRules computes shadowing across the merged rule list the
+// UI currently knows about (config + session). The deterministic order -
+// deny, ask, allow - matches the engine-side chain so the same findings
+// surface in both places.
+func (at *AgentTab) collectShadowedRules() []permissions.ShadowedRule {
+	all := make([]permissions.Rule, 0)
+	for _, r := range at.cfg.Permissions.DenyRules("config") {
+		all = append(all, permissions.Rule{Pattern: r.Pattern, Behavior: permissions.Deny, Source: r.Source})
+	}
+	for _, r := range at.cfg.Permissions.AskRules("config") {
+		all = append(all, permissions.Rule{Pattern: r.Pattern, Behavior: permissions.Ask, Source: r.Source})
+	}
+	for _, r := range at.cfg.Permissions.AllowRules("config") {
+		all = append(all, permissions.Rule{Pattern: r.Pattern, Behavior: permissions.Allow, Source: r.Source})
+	}
+	for _, r := range at.sessionRules {
+		all = append(all, permissions.Rule{
+			Pattern:  r.Pattern,
+			Behavior: permissions.Decision(r.Behavior),
+			Source:   r.Source,
+		})
+	}
+	return permissions.DetectShadowedRules(all)
+}
+
+// renderPermissionDepthSections appends the shadowed-rules, recent-denials,
+// and auto-mode lines to out. Sections without content are skipped so the
+// default /permissions view stays quiet when nothing to report.
+func (at *AgentTab) renderPermissionDepthSections(out *strings.Builder) {
+	shadowed := at.collectShadowedRules()
+	if len(shadowed) > 0 {
+		out.WriteString("\nShadowed rules:\n")
+		for _, s := range shadowed {
+			out.WriteString(fmt.Sprintf("  - %s shadowed by %s: %s\n", s.Shadowed.Pattern, s.ShadowedBy.Pattern, s.Reason))
+		}
+	}
+	var denials []permissions.DenialRecord
+	if at.sessionDenials != nil {
+		denials = at.sessionDenials.History()
+	}
+	if len(denials) > 0 {
+		out.WriteString("\nRecent denials (last 10):\n")
+		limit := len(denials)
+		if limit > 10 {
+			limit = 10
+		}
+		for i := 0; i < limit; i++ {
+			d := denials[i]
+			input := d.Input
+			if len(input) > 60 {
+				input = input[:57] + "..."
+			}
+			out.WriteString(fmt.Sprintf("  - %s %s x%d\n", d.Tool, input, d.Count))
+		}
+	}
+	out.WriteString(fmt.Sprintf("\nAuto-mode: %s\n", autoModeLabel(at.autoModeEnabled)))
+}
+
+// autoModeLabel returns the human-readable state string for the auto-mode
+// toggle. Kept in its own helper so it can be unit tested without spinning
+// up the full tab.
+func autoModeLabel(enabled bool) string {
+	if enabled {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 // toolCallIDMapFromEvents builds a message-row-id to synthetic tool call-id
@@ -5664,10 +5751,12 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 					out.WriteString(fmt.Sprintf("  %-5s  %-30s  [%s]\n", r.Behavior, r.Pattern, r.Source))
 				}
 			}
+			at.renderPermissionDepthSections(&out)
 			out.WriteString("\nUsage:\n")
 			out.WriteString("  /permissions allow Bash(git *)   - add allow rule\n")
 			out.WriteString("  /permissions deny Bash(rm -rf *)  - add deny rule\n")
 			out.WriteString("  /permissions ask Write(*)         - add ask rule\n")
+			out.WriteString("  /permissions automode on|off     - toggle read-only auto-approval\n")
 			out.WriteString("  /permissions reset                - clear session rules\n")
 
 			at.addSystemMessage(out.String())
@@ -5684,6 +5773,28 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			count := len(at.sessionRules)
 			at.sessionRules = nil
 			at.addSystemMessage(fmt.Sprintf("Cleared %d session permission rules.", count))
+			at.refreshViewport()
+			return true, nil
+
+		case "automode":
+			flag := ""
+			if len(parts) >= 2 {
+				flag = strings.TrimSpace(parts[1])
+			}
+			switch strings.ToLower(flag) {
+			case "on", "true", "enable", "enabled":
+				at.autoModeEnabled = true
+			case "off", "false", "disable", "disabled":
+				at.autoModeEnabled = false
+			case "":
+				// No arg flips the current state so the slash stays ergonomic.
+				at.autoModeEnabled = !at.autoModeEnabled
+			default:
+				at.addSystemMessage("usage: /permissions automode [on|off]")
+				at.refreshViewport()
+				return true, nil
+			}
+			at.addSystemMessage("Auto-mode: " + autoModeLabel(at.autoModeEnabled))
 			at.refreshViewport()
 			return true, nil
 
@@ -5713,7 +5824,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				at.refreshViewport()
 				return true, nil
 			}
-			at.addSystemMessage("Unknown subcommand: " + subCmd + "\nUsage: /permissions [allow|deny|ask|reset|<mode>]")
+			at.addSystemMessage("Unknown subcommand: " + subCmd + "\nUsage: /permissions [allow|deny|ask|reset|automode|<mode>]")
 			at.refreshViewport()
 			return true, nil
 		}

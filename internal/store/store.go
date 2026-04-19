@@ -203,6 +203,26 @@ func migrate(db *sql.DB) error {
 		}
 	}
 
+	// Event-log side table: persists typed sidecar records (file snapshots,
+	// content replacements, worktree state, synthetic tool-call ids) that
+	// back the resume hydration path. Missing table on old DBs is handled
+	// by CREATE IF NOT EXISTS; callers treat an empty read as "old session".
+	eventLogSchema := `
+	CREATE TABLE IF NOT EXISTS message_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+		seq INTEGER NOT NULL,
+		kind TEXT NOT NULL,
+		payload TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_message_events_session ON message_events(session_id, seq);
+	CREATE INDEX IF NOT EXISTS idx_message_events_kind ON message_events(session_id, kind);
+	`
+	if _, err := db.Exec(eventLogSchema); err != nil {
+		return fmt.Errorf("create message_events: %w", err)
+	}
+
 	return nil
 }
 

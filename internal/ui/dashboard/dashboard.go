@@ -31,6 +31,7 @@ func UpdateThemeColors(primary, secondary, muted, text string) {
 // AgentInfo describes an active/completed subagent.
 type AgentInfo struct {
 	Name          string
+	Type          string // agent-type-name, used for stable per-type tinting (e.g. "researcher")
 	Model         string
 	Status        string // "running", "completed", "failed", "killed", "background"
 	Elapsed       string // e.g. "12s"
@@ -407,10 +408,18 @@ func renderAgentTree(agents []AgentInfo, width int) string {
 		return ""
 	}
 
-	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeTextColor))
+	defaultNameStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(themeTextColor))
 	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(themeMutedColor))
 	activityStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(themeMutedColor)).Italic(true)
 	branchStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(themeMutedColor))
+
+	// nameStyleFor returns the name style tinted by agent-type palette when set.
+	nameStyleFor := func(a AgentInfo) lipgloss.Style {
+		if a.Type == "" {
+			return defaultNameStyle
+		}
+		return lipgloss.NewStyle().Bold(true).Foreground(ColorForAgentType(a.Type))
+	}
 
 	// Group agents by parent for tree rendering.
 	topLevel := make([]AgentInfo, 0)
@@ -445,7 +454,7 @@ func renderAgentTree(agents []AgentInfo, width int) string {
 
 		elapsedStr := mutedStyle.Render(a.Elapsed)
 
-		leftPart := prefix + icon + " " + nameStyle.Render(truncatePath(a.Name, width-20)) + " " + modelStr
+		leftPart := prefix + icon + " " + nameStyleFor(a).Render(truncatePath(a.Name, width-20)) + " " + modelStr
 		leftWidth := lipgloss.Width(leftPart)
 		rightWidth := lipgloss.Width(elapsedStr)
 		gap := width - leftWidth - rightWidth - 2

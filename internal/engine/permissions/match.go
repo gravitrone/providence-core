@@ -38,6 +38,13 @@ var readOnlyTools = map[string]bool{
 
 // --- Rule Matching ---
 
+// MatchRule reports whether the given rule's pattern matches the tool
+// invocation. Callers outside this package use it to find which specific
+// rule in a rule list was responsible for a decision.
+func MatchRule(rule Rule, toolName string, input interface{}) bool {
+	return matchPattern(rule.Pattern, toolName, input)
+}
+
 // matchesRules checks if toolName+input matches any rule in the list.
 func matchesRules(rules []Rule, toolName string, input interface{}) bool {
 	for _, rule := range rules {

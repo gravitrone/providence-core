@@ -35,6 +35,7 @@ import (
 	"github.com/gravitrone/providence-core/internal/engine/ember"
 	_ "github.com/gravitrone/providence-core/internal/engine/opencode" // register opencode factory
 	"github.com/gravitrone/providence-core/internal/engine/outputstyles"
+	"github.com/gravitrone/providence-core/internal/engine/permissions"
 	"github.com/gravitrone/providence-core/internal/engine/skills"
 	"github.com/gravitrone/providence-core/internal/engine/subagent"
 	"github.com/gravitrone/providence-core/internal/engine/teams"
@@ -310,6 +311,19 @@ type AgentTab struct {
 	store     *store.Store
 	sessionID string
 
+	// Resume-hydrated side-channel state rebuilt from the message_events
+	// table. These are authoritative on resume so the engine does not have
+	// to re-run the original code paths that produced them. Empty on fresh
+	// sessions and on resume from pre-event-log databases.
+	fileHistory         []store.MessageEvent // snapshot metadata rows
+	contentReplacements map[string]string    // toolCallID -> replaced body
+	worktreeState       []byte               // raw worktree-index JSON
+	toolCallIDs         map[string]string    // toolName -> last synthetic call id
+	// eventSeq is the monotonic sequence number for the next message_events
+	// row. Starts at 1 and advances whenever a side-channel event is written
+	// or when resume rehydrates the tail of the log.
+	eventSeq int64
+
 	// Slash command table state (harmonica-driven).
 	// slashCursor is the highlighted row in the filtered match list.
 	// -1 means no explicit selection (user is still typing).
@@ -398,6 +412,13 @@ type AgentTab struct {
 	planPrevPermMode string
 	// sessionRules holds permission rules added via /permissions during this session.
 	sessionRules []config.PermissionRule
+	// sessionDenials records denials the user clicked through during this
+	// session. Exposed via /permissions so recent denials are visible
+	// without digging through logs.
+	sessionDenials *permissions.DenialTracker
+	// autoModeEnabled mirrors the session-scoped auto-approval state so
+	// /permissions can report it alongside shadowed rules and denials.
+	autoModeEnabled bool
 
 	// Discovered skills, custom agents, and custom tools loaded at startup.
 	discoveredSkills []skills.SkillDefinition
@@ -748,6 +769,12 @@ func (at AgentTab) Update(msg tea.Msg) (AgentTab, tea.Cmd) {
 			at.addSystemMessage("Index failed: " + r.Err.Error())
 		} else {
 			at.addSystemMessage(fmt.Sprintf("Indexed %d files -> %s", r.Index.Total, r.Path))
+			// Record worktree state so resume can rehydrate the index
+			// without re-scanning the filesystem.
+			at.emitMessageEvent(store.EventKindWorktree, map[string]any{
+				"path":  r.Path,
+				"total": r.Index.Total,
+			})
 		}
 		at.refreshViewport()
 		return at, nil
@@ -932,6 +959,7 @@ func (at AgentTab) handleKey(msg tea.KeyPressMsg) (AgentTab, tea.Cmd) {
 			if at.engine != nil && optionID != "" {
 				_ = at.engine.RespondPermission(perm.QuestionID, optionID)
 			}
+			at.recordUIDenial(perm.Tool.Name, perm.Tool.Input)
 			if cardTool {
 				at.updateLastToolStatus(perm.Tool.Name, "cancelled")
 			} else {
@@ -2171,6 +2199,34 @@ func (at AgentTab) handleAgentEvent(msg AgentEventMsg) (AgentTab, tea.Cmd) {
 					break
 				}
 			}
+			// Record file-mutating tool outcomes in the event log so resume
+			// can rebuild file-history and content-replacement state without
+			// re-running the original tool call.
+			if !tr.IsError {
+				callID := ""
+				if at.toolCallIDs != nil {
+					callID = at.toolCallIDs[tr.ToolName]
+				}
+				switch tr.ToolName {
+				case "Edit", "Write":
+					at.emitMessageEvent(store.EventKindFileSnapshot, map[string]any{
+						"tool":    tr.ToolName,
+						"call_id": callID,
+						"output":  tr.Output,
+					})
+				case "Read":
+					// Large reads may be replaced by a truncation notice when
+					// they exceed the token budget; record the replacement so
+					// resume can surface the same history.
+					if len(tr.Output) > 0 {
+						at.emitMessageEvent(store.EventKindContentReplacement, map[string]any{
+							"tool":    tr.ToolName,
+							"call_id": callID,
+							"bytes":   len(tr.Output),
+						})
+					}
+				}
+			}
 			// Wire errors to dashboard ERRORS panel.
 			if tr.IsError {
 				at.dashboard.AddError(tr.ToolName, tr.Output)
@@ -2936,13 +2992,212 @@ func (at *AgentTab) addMessage(role, content string, done bool) {
 	}
 }
 
-// persistLastMessage saves the last message in at.messages to the DB.
+// persistLastMessage saves the last message in at.messages to the DB and
+// emits a side-channel event row when the message carries tool-call data.
+// The tool_call_id event lets the resume path pair tool_use and tool_result
+// rows by stable synthetic id instead of reconstructing from name+index.
 func (at *AgentTab) persistLastMessage() {
 	if at.store == nil || at.sessionID == "" || len(at.messages) == 0 {
 		return
 	}
 	m := at.messages[len(at.messages)-1]
-	at.store.AddMessage(at.sessionID, m.Role, m.Content, m.ToolName, m.ToolArgs, m.ToolStatus, m.ToolBody, m.ToolOutput, m.ImageCount, m.Done)
+	msgID, err := at.store.AddMessage(at.sessionID, m.Role, m.Content, m.ToolName, m.ToolArgs, m.ToolStatus, m.ToolBody, m.ToolOutput, m.ImageCount, m.Done)
+	if err != nil || msgID == 0 {
+		return
+	}
+	if m.ToolName == "" {
+		return
+	}
+	// Assign or reuse a synthetic tool-call id for this tool name. Assistant
+	// tool_use rows mint a fresh id; tool result rows reuse the most recent
+	// id for the same tool so the pair survives restart.
+	if at.toolCallIDs == nil {
+		at.toolCallIDs = make(map[string]string)
+	}
+	var callID string
+	switch m.Role {
+	case "tool", "permission":
+		// Assistant tool invocation: mint a new id so subsequent results
+		// can pair to it. The map is keyed by tool name; the most recent
+		// value wins because resume walks rows in order.
+		callID = fmt.Sprintf("call_%s_%s", m.ToolName, uuid.NewString())
+		at.toolCallIDs[m.ToolName] = callID
+	default:
+		// Fall back: still record an id so the event log stays complete.
+		callID = fmt.Sprintf("call_%s_%s", m.ToolName, uuid.NewString())
+	}
+	at.emitMessageEvent(store.EventKindToolCallID, map[string]any{
+		"message_id": msgID,
+		"tool_name":  m.ToolName,
+		"call_id":    callID,
+		"role":       m.Role,
+	})
+}
+
+// emitMessageEvent writes a typed event-log row for the current session. The
+// caller provides a kind (one of the store.EventKind* constants) and a JSON
+// payload shape specific to that kind. Errors and nil-store cases are
+// swallowed so the UI path never aborts on a side-channel failure.
+func (at *AgentTab) emitMessageEvent(kind string, payload any) {
+	if at.store == nil || at.sessionID == "" {
+		return
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	at.eventSeq++
+	_, _ = at.store.AddMessageEvent(at.sessionID, at.eventSeq, kind, string(raw))
+}
+
+// recordUIDenial feeds the session-scoped denial tracker used by the
+// /permissions slash surface. Lazy-inits the tracker so existing tests and
+// fresh tabs don't pay for it until the first deny fires.
+func (at *AgentTab) recordUIDenial(toolName string, input any) {
+	if at.sessionDenials == nil {
+		at.sessionDenials = permissions.NewDenialTracker()
+	}
+	at.sessionDenials.Record(toolName, input)
+}
+
+// collectShadowedRules computes shadowing across the merged rule list the
+// UI currently knows about (config + session). The deterministic order -
+// deny, ask, allow - matches the engine-side chain so the same findings
+// surface in both places.
+func (at *AgentTab) collectShadowedRules() []permissions.ShadowedRule {
+	all := make([]permissions.Rule, 0)
+	for _, r := range at.cfg.Permissions.DenyRules("config") {
+		all = append(all, permissions.Rule{Pattern: r.Pattern, Behavior: permissions.Deny, Source: r.Source})
+	}
+	for _, r := range at.cfg.Permissions.AskRules("config") {
+		all = append(all, permissions.Rule{Pattern: r.Pattern, Behavior: permissions.Ask, Source: r.Source})
+	}
+	for _, r := range at.cfg.Permissions.AllowRules("config") {
+		all = append(all, permissions.Rule{Pattern: r.Pattern, Behavior: permissions.Allow, Source: r.Source})
+	}
+	for _, r := range at.sessionRules {
+		all = append(all, permissions.Rule{
+			Pattern:  r.Pattern,
+			Behavior: permissions.Decision(r.Behavior),
+			Source:   r.Source,
+		})
+	}
+	return permissions.DetectShadowedRules(all)
+}
+
+// renderPermissionDepthSections appends the shadowed-rules, recent-denials,
+// and auto-mode lines to out. Sections without content are skipped so the
+// default /permissions view stays quiet when nothing to report.
+func (at *AgentTab) renderPermissionDepthSections(out *strings.Builder) {
+	shadowed := at.collectShadowedRules()
+	if len(shadowed) > 0 {
+		out.WriteString("\nShadowed rules:\n")
+		for _, s := range shadowed {
+			out.WriteString(fmt.Sprintf("  - %s shadowed by %s: %s\n", s.Shadowed.Pattern, s.ShadowedBy.Pattern, s.Reason))
+		}
+	}
+	var denials []permissions.DenialRecord
+	if at.sessionDenials != nil {
+		denials = at.sessionDenials.History()
+	}
+	if len(denials) > 0 {
+		out.WriteString("\nRecent denials (last 10):\n")
+		limit := len(denials)
+		if limit > 10 {
+			limit = 10
+		}
+		for i := 0; i < limit; i++ {
+			d := denials[i]
+			input := d.Input
+			if len(input) > 60 {
+				input = input[:57] + "..."
+			}
+			out.WriteString(fmt.Sprintf("  - %s %s x%d\n", d.Tool, input, d.Count))
+		}
+	}
+	out.WriteString(fmt.Sprintf("\nAuto-mode: %s\n", autoModeLabel(at.autoModeEnabled)))
+}
+
+// autoModeLabel returns the human-readable state string for the auto-mode
+// toggle. Kept in its own helper so it can be unit tested without spinning
+// up the full tab.
+func autoModeLabel(enabled bool) string {
+	if enabled {
+		return "enabled"
+	}
+	return "disabled"
+}
+
+// toolCallIDMapFromEvents builds a message-row-id to synthetic tool call-id
+// map from tool_call_id events. Each event persists the message row it was
+// minted for, so the resume path can pair tool_use and tool_result rows by
+// id rather than by tool name plus index (which breaks when two calls to
+// the same tool are in flight at once).
+func toolCallIDMapFromEvents(events []store.MessageEvent) map[int64]string {
+	out := make(map[int64]string)
+	for _, ev := range events {
+		if ev.Kind != store.EventKindToolCallID {
+			continue
+		}
+		var p struct {
+			MessageID int64  `json:"message_id"`
+			CallID    string `json:"call_id"`
+		}
+		if err := json.Unmarshal([]byte(ev.Payload), &p); err != nil {
+			continue
+		}
+		if p.MessageID != 0 && p.CallID != "" {
+			out[p.MessageID] = p.CallID
+		}
+	}
+	return out
+}
+
+// hydrateFromEvents walks the typed event log and rebuilds the tab's
+// side-channel state. An empty slice is a valid signal from pre-event-log
+// databases and leaves all state zeroed. The walk also advances eventSeq so
+// new events written after resume stay monotonic.
+func (at *AgentTab) hydrateFromEvents(events []store.MessageEvent) {
+	at.fileHistory = nil
+	at.contentReplacements = make(map[string]string)
+	at.worktreeState = nil
+	at.toolCallIDs = make(map[string]string)
+	at.eventSeq = 0
+	for _, ev := range events {
+		if ev.Seq > at.eventSeq {
+			at.eventSeq = ev.Seq
+		}
+		switch ev.Kind {
+		case store.EventKindFileSnapshot:
+			at.fileHistory = append(at.fileHistory, ev)
+		case store.EventKindContentReplacement:
+			var p struct {
+				CallID string `json:"call_id"`
+				Tool   string `json:"tool"`
+			}
+			if err := json.Unmarshal([]byte(ev.Payload), &p); err != nil {
+				continue
+			}
+			key := p.CallID
+			if key == "" {
+				key = p.Tool
+			}
+			at.contentReplacements[key] = ev.Payload
+		case store.EventKindWorktree:
+			at.worktreeState = []byte(ev.Payload)
+		case store.EventKindToolCallID:
+			var p struct {
+				ToolName string `json:"tool_name"`
+				CallID   string `json:"call_id"`
+			}
+			if err := json.Unmarshal([]byte(ev.Payload), &p); err != nil {
+				continue
+			}
+			if p.ToolName != "" && p.CallID != "" {
+				at.toolCallIDs[p.ToolName] = p.CallID
+			}
+		}
+	}
 }
 
 func (at *AgentTab) addSystemMessage(content string) {
@@ -2981,6 +3236,11 @@ func (at *AgentTab) clearSessionState() {
 	at.thinkingActive = false
 	at.thinkingBuffer = ""
 	at.messagesDirty = true
+	at.fileHistory = nil
+	at.contentReplacements = nil
+	at.worktreeState = nil
+	at.toolCallIDs = nil
+	at.eventSeq = 0
 }
 
 // messagesToRestored converts the current chat messages to RestoredMessage
@@ -5017,6 +5277,11 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			at.refreshViewport()
 			return true, nil
 		}
+		// Load the side-channel event log. Pre-event-log sessions report an
+		// empty slice, in which case hydration is a no-op and the restore
+		// falls back to the legacy name+index pairing path.
+		events, _ := at.store.GetSessionEvents(sess.ID)
+		at.hydrateFromEvents(events)
 		// Close current engine.
 		if at.engine != nil {
 			at.engine.Close()
@@ -5029,10 +5294,16 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 		// falling back to flat text synthesis.
 		at.messages = nil
 		restored := make([]engine.RestoredMessage, 0, len(msgs))
-		// pendingToolID tracks the synthetic call ID generated for the most
-		// recent tool-bearing assistant turn so the following tool result can
-		// reference the same ID.
-		pendingToolIDs := make(map[string]string) // toolName -> callID
+		// Build a per-row synthetic id map from the event log. Each persisted
+		// tool_call_id event carries the message row it was minted for, so
+		// on resume we can pair tool_use and tool_result rows by id instead
+		// of the legacy toolName+index heuristic that breaks when two calls
+		// to the same tool are in flight at once.
+		msgIDToCallID := toolCallIDMapFromEvents(events)
+		// pendingToolIDs threads ids from an assistant row down to the
+		// tool-result row that follows. Ordered FIFO per tool name so a
+		// burst of same-name calls resolves in call order.
+		pendingToolIDs := make(map[string][]string)
 		for _, m := range msgs {
 			at.messages = append(at.messages, ChatMessage{
 				Role:       m.Role,
@@ -5052,20 +5323,34 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			}
 			switch m.Role {
 			case "assistant":
-				// If this assistant turn included a tool invocation, register a
-				// synthetic call ID so the subsequent tool result can reference it.
+				// If this assistant turn included a tool invocation, queue a
+				// synthetic call id so the subsequent tool result can reference
+				// it. The id comes from the event log when available so
+				// multiple in-flight calls keep their pairing across restart.
 				if m.ToolName != "" {
-					callID := fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
-					pendingToolIDs[m.ToolName] = callID
+					callID := msgIDToCallID[m.ID]
+					if callID == "" {
+						callID = fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
+					}
+					pendingToolIDs[m.ToolName] = append(pendingToolIDs[m.ToolName], callID)
 				}
 			case "tool":
-				// Pair this result with the most recently registered call ID for
-				// its tool name. Fall back to a fresh synthetic ID if none exists.
-				callID, ok := pendingToolIDs[m.ToolName]
-				if !ok || callID == "" {
+				// Prefer the id persisted for this specific row; fall back to
+				// FIFO-pop of the pending queue, then to a fresh synthetic id.
+				callID := msgIDToCallID[m.ID]
+				if callID == "" {
+					if q := pendingToolIDs[m.ToolName]; len(q) > 0 {
+						callID = q[0]
+						pendingToolIDs[m.ToolName] = q[1:]
+					}
+				} else if q := pendingToolIDs[m.ToolName]; len(q) > 0 && q[0] == callID {
+					// Pop the matching head so the next result does not reuse
+					// this id.
+					pendingToolIDs[m.ToolName] = q[1:]
+				}
+				if callID == "" {
 					callID = fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
 				}
-				delete(pendingToolIDs, m.ToolName)
 				restoredMessage.ToolName = m.ToolName
 				restoredMessage.ToolInput = m.ToolArgs
 				restoredMessage.ToolCallID = callID
@@ -5466,10 +5751,12 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 					out.WriteString(fmt.Sprintf("  %-5s  %-30s  [%s]\n", r.Behavior, r.Pattern, r.Source))
 				}
 			}
+			at.renderPermissionDepthSections(&out)
 			out.WriteString("\nUsage:\n")
 			out.WriteString("  /permissions allow Bash(git *)   - add allow rule\n")
 			out.WriteString("  /permissions deny Bash(rm -rf *)  - add deny rule\n")
 			out.WriteString("  /permissions ask Write(*)         - add ask rule\n")
+			out.WriteString("  /permissions automode on|off     - toggle read-only auto-approval\n")
 			out.WriteString("  /permissions reset                - clear session rules\n")
 
 			at.addSystemMessage(out.String())
@@ -5486,6 +5773,28 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 			count := len(at.sessionRules)
 			at.sessionRules = nil
 			at.addSystemMessage(fmt.Sprintf("Cleared %d session permission rules.", count))
+			at.refreshViewport()
+			return true, nil
+
+		case "automode":
+			flag := ""
+			if len(parts) >= 2 {
+				flag = strings.TrimSpace(parts[1])
+			}
+			switch strings.ToLower(flag) {
+			case "on", "true", "enable", "enabled":
+				at.autoModeEnabled = true
+			case "off", "false", "disable", "disabled":
+				at.autoModeEnabled = false
+			case "":
+				// No arg flips the current state so the slash stays ergonomic.
+				at.autoModeEnabled = !at.autoModeEnabled
+			default:
+				at.addSystemMessage("usage: /permissions automode [on|off]")
+				at.refreshViewport()
+				return true, nil
+			}
+			at.addSystemMessage("Auto-mode: " + autoModeLabel(at.autoModeEnabled))
 			at.refreshViewport()
 			return true, nil
 
@@ -5515,7 +5824,7 @@ func (at *AgentTab) handleSlashCommand(text string) (bool, tea.Cmd) {
 				at.refreshViewport()
 				return true, nil
 			}
-			at.addSystemMessage("Unknown subcommand: " + subCmd + "\nUsage: /permissions [allow|deny|ask|reset|<mode>]")
+			at.addSystemMessage("Unknown subcommand: " + subCmd + "\nUsage: /permissions [allow|deny|ask|reset|automode|<mode>]")
 			at.refreshViewport()
 			return true, nil
 		}
@@ -6868,7 +7177,17 @@ func (at *AgentTab) handleResumeInit() tea.Cmd {
 	msgs := rd.Messages
 	at.messages = nil
 	restored := make([]engine.RestoredMessage, 0, len(msgs))
-	pendingToolIDs := make(map[string]string)
+	pendingToolIDs := make(map[string][]string)
+
+	// Load persisted tool_call_id events for this session so the pairing
+	// key is stable across restart. Missing table or session is a no-op;
+	// the FIFO queue below still produces a deterministic synthetic id.
+	var events []store.MessageEvent
+	if at.store != nil && rd.SessionID != "" {
+		events, _ = at.store.GetSessionEvents(rd.SessionID)
+		at.hydrateFromEvents(events)
+	}
+	msgIDToCallID := toolCallIDMapFromEvents(events)
 
 	for _, m := range msgs {
 		at.messages = append(at.messages, ChatMessage{
@@ -6890,15 +7209,25 @@ func (at *AgentTab) handleResumeInit() tea.Cmd {
 		switch m.Role {
 		case "assistant":
 			if m.ToolName != "" {
-				callID := fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
-				pendingToolIDs[m.ToolName] = callID
+				callID := msgIDToCallID[m.ID]
+				if callID == "" {
+					callID = fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
+				}
+				pendingToolIDs[m.ToolName] = append(pendingToolIDs[m.ToolName], callID)
 			}
 		case "tool":
-			callID, ok := pendingToolIDs[m.ToolName]
-			if !ok || callID == "" {
+			callID := msgIDToCallID[m.ID]
+			if callID == "" {
+				if q := pendingToolIDs[m.ToolName]; len(q) > 0 {
+					callID = q[0]
+					pendingToolIDs[m.ToolName] = q[1:]
+				}
+			} else if q := pendingToolIDs[m.ToolName]; len(q) > 0 && q[0] == callID {
+				pendingToolIDs[m.ToolName] = q[1:]
+			}
+			if callID == "" {
 				callID = fmt.Sprintf("call_%s_%d", m.ToolName, len(restored))
 			}
-			delete(pendingToolIDs, m.ToolName)
 			rm.ToolName = m.ToolName
 			rm.ToolInput = m.ToolArgs
 			rm.ToolCallID = callID
@@ -6932,9 +7261,13 @@ func (at *AgentTab) handleResumeInit() tea.Cmd {
 //   - If the last message is a user message with no following assistant reply,
 //     appends a continuation prompt so the model picks up where it left off.
 //
+// pendingToolIDs is keyed by tool name and holds the FIFO queue of synthetic
+// call ids whose matching tool_result never arrived. Each queued id becomes
+// its own orphan synthesis so multi-call bursts stay paired.
+//
 // Returns the repaired slice and whether the session was interrupted (orphaned
 // tools or trailing user message with no reply).
-func repairRestoredMessages(msgs []engine.RestoredMessage, pendingToolIDs map[string]string) ([]engine.RestoredMessage, bool) {
+func repairRestoredMessages(msgs []engine.RestoredMessage, pendingToolIDs map[string][]string) ([]engine.RestoredMessage, bool) {
 	var repaired []engine.RestoredMessage
 	interrupted := false
 
@@ -6948,15 +7281,21 @@ func repairRestoredMessages(msgs []engine.RestoredMessage, pendingToolIDs map[st
 
 	// Synthesize error results for any orphaned tool calls still in pendingToolIDs.
 	// These are tool_use blocks from the assistant that never got a tool_result.
-	if len(pendingToolIDs) > 0 {
+	orphanCount := 0
+	for _, queue := range pendingToolIDs {
+		orphanCount += len(queue)
+	}
+	if orphanCount > 0 {
 		interrupted = true
-		for toolName, callID := range pendingToolIDs {
-			repaired = append(repaired, engine.RestoredMessage{
-				Role:       "tool",
-				Content:    "[tool execution interrupted - session was terminated]",
-				ToolCallID: callID,
-				ToolName:   toolName,
-			})
+		for toolName, queue := range pendingToolIDs {
+			for _, callID := range queue {
+				repaired = append(repaired, engine.RestoredMessage{
+					Role:       "tool",
+					Content:    "[tool execution interrupted - session was terminated]",
+					ToolCallID: callID,
+					ToolName:   toolName,
+				})
+			}
 		}
 	}
 
